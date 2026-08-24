@@ -32,6 +32,7 @@ jobs:
       - run: python3 -m py_compile server/sync/*.py
 
   publish:
+    if: github.repository == 'daimon3332/address'
     needs: verify
     runs-on: ubuntu-latest
     steps:
