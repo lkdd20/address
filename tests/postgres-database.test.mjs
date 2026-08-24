@@ -5,7 +5,7 @@ import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../se
 describe('PostgreSQL database adapter', () => {
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 13, control_version: 16 }], fields: [], rowCount: 1
+      rows: [{ address_version: 20, control_version: 19 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -13,20 +13,35 @@ describe('PostgreSQL database adapter', () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
-  it('migrates a database that only has the previous schema versions', async () => {
+  it('migrates a database that only has the previous control schema version', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 9, control_version: 11 }], fields: [], rowCount: 1
+      rows: [{ address_version: 20, control_version: 18 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
-    expect(query.mock.calls.map(([sql]) => sql)).toContain('COMMIT');
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements).toContain("SET LOCAL statement_timeout TO '30min'");
+    expect(statements).toContain("SET LOCAL lock_timeout TO '5min'");
+    expect(statements).toContain('COMMIT');
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('migrates a database that only has the previous address schema version', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ address_version: 19, control_version: 19 }], fields: [], rowCount: 1
+    }));
+    const release = vi.fn();
+    await initializePostgres({ connect: async () => ({ query, release }) });
+    const statements = query.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes('idx_generation_country_residential_rank'))).toBe(true);
+    expect(statements).toContain('COMMIT');
     expect(release).toHaveBeenCalledOnce();
   });
 
   it('uses a configurable high but finite pool ceiling', () => {
-    expect(postgresPoolOptions({}).max).toBe(64);
+    expect(postgresPoolOptions({}).max).toBe(16);
     expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '512' }).max).toBe(512);
-    expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '9999' }).max).toBe(64);
+    expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '9999' }).max).toBe(16);
   });
 
   it('ships native PostgreSQL schemas', async () => {
@@ -38,9 +53,10 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 13)");
+    expect(addressSchema).toContain("generate_series(1, 20)");
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
-    expect(controlSchema).toContain("generate_series(1, 16)");
+    expect(controlSchema).toContain("WHERE provider='mappls' AND status='needs_review'");
+    expect(controlSchema).toContain("generate_series(1, 19)");
   });
 
   it('rewrites parameters without changing quoted question marks', async () => {

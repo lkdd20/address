@@ -11,6 +11,10 @@ import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync
 import { startDailyScheduler } from './scheduler.mjs';
 import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
 import { ensureAddressPolicies } from './address-policy.mjs';
+import { validatePublishedPoolBatch } from '../database/published-pool.mjs';
+import { masterKeyFrom } from '../control/security';
+import { ControlStore } from '../control/store';
+import { ChinaDataService } from '../china/service';
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -20,6 +24,60 @@ const integer = (value, fallback, minimum, maximum) => {
   return number;
 };
 const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
+
+const ensureChinaTargets = async (database, environment, postgresUrl) => {
+  if (String(environment.NODE_ENV || '').toLowerCase() === 'test'
+    || !String(environment.CONFIG_MASTER_KEY || '').trim()) return;
+  const count = Number(await database.prepare('SELECT COUNT(*) AS total FROM cn_sync_targets').first('total') || 0);
+  if (count > 0) return;
+  const control = new ControlStore(database, masterKeyFrom(environment.CONFIG_MASTER_KEY));
+  const china = new ChinaDataService(database, control, resolve(environment.ADDRESS_DATA_ROOT || 'data'), {
+    postgresUrl,
+    masterKey: masterKeyFrom(environment.CONFIG_MASTER_KEY)
+  });
+  await china.initializeTargets({ scheduleContinuation: false });
+  await china.close();
+};
+
+export const createPublicationValidationWorker = ({
+  validate,
+  intervalMs = 1_000,
+  log = console
+}) => {
+  let stopped = true;
+  let completed = false;
+  let timer;
+  let running;
+
+  const run = async () => {
+    if (stopped || completed || running) return;
+    running = Promise.resolve()
+      .then(validate)
+      .then((result) => {
+        if (result.retired || result.countryCompleted) {
+          log.log?.(`[publication-validation] country=${result.countryCode} scanned=${result.scanned} retired=${result.retired}`);
+        }
+        completed = Boolean(result.completed);
+      })
+      .catch((error) => log.error?.('[publication-validation] batch failed', error))
+      .finally(() => { running = undefined; });
+    await running;
+    if (!stopped && !completed) timer = setTimeout(() => { void run(); }, intervalMs);
+  };
+
+  return {
+    start: () => {
+      if (!stopped) return;
+      stopped = false;
+      void run();
+    },
+    stop: async () => {
+      stopped = true;
+      clearTimeout(timer);
+      await running;
+    }
+  };
+};
 
 const stripPrefix = (request) => {
   const url = new URL(request.url);
@@ -52,6 +110,7 @@ export const createSyncRuntime = async ({
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   await ensureAddressPolicies(database);
+  await ensureChinaTargets(database, environment, environment.POSTGRES_URL || environment.DATABASE_URL || '');
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;
   const catalogShards = () => {
@@ -96,6 +155,13 @@ export const createSyncRuntime = async ({
     retainRaw: enabled(environment.ADDRESS_SYNC_RETAIN_RAW)
   }) : null;
   artifactCleanup?.start();
+  const publicationValidationWorker = createPublicationValidationWorker({
+    validate: () => validatePublishedPoolBatch(queueDatabase),
+    intervalMs: integer(environment.PUBLICATION_VALIDATION_INTERVAL_MS, 1_000, 100, 60_000)
+  });
+  const runIdleMaintenance = async () => {
+    await artifactCleanup?.runOnce();
+  };
   const queue = createSyncQueue({
     environment,
     coordinator,
@@ -111,7 +177,7 @@ export const createSyncRuntime = async ({
         syncMode: 'probe',
         cacheDir: environment.ADDRESS_SYNC_CACHE_DIR
       }),
-    onIdle: () => artifactCleanup?.runOnce()
+    onIdle: runIdleMaintenance
   });
   const handler = createSyncApi({
     coordinator,
@@ -130,6 +196,7 @@ export const createSyncRuntime = async ({
     startScheduler: ({ startup = true } = {}) => {
       if (!enabled(environment.SYNC_SCHEDULER_ENABLED)) return () => {};
       if (stopScheduler) return stopScheduler;
+      publicationValidationWorker.start();
       stopQueue = queue.start();
       stopScheduler = startDailyScheduler({
         coordinator,
@@ -156,6 +223,7 @@ export const createSyncRuntime = async ({
       await artifactCleanup?.stop();
       await queue.stop();
       await coordinator.waitForIdle();
+      await publicationValidationWorker.stop();
       testDatabase?.close();
       await postgresPool?.end();
     }

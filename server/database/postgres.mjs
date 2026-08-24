@@ -6,8 +6,8 @@ import pg from 'pg';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 13;
-const CONTROL_SCHEMA_VERSION = 16;
+const ADDRESS_SCHEMA_VERSION = 20;
+const CONTROL_SCHEMA_VERSION = 19;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -16,8 +16,8 @@ const integer = (value, fallback, minimum, maximum) => {
 
 export const postgresPoolOptions = (environment = process.env) => ({
   connectionString: environment.POSTGRES_URL || environment.DATABASE_URL,
-  max: integer(environment.POSTGRES_POOL_MAX, 64, 1, 512),
-  min: integer(environment.POSTGRES_POOL_MIN, 4, 0, 128),
+  max: integer(environment.POSTGRES_POOL_MAX, 16, 1, 512),
+  min: integer(environment.POSTGRES_POOL_MIN, 1, 0, 128),
   connectionTimeoutMillis: integer(environment.POSTGRES_CONNECT_TIMEOUT_MS, 10_000, 1_000, 120_000),
   idleTimeoutMillis: integer(environment.POSTGRES_IDLE_TIMEOUT_MS, 30_000, 1_000, 30 * 60_000),
   statement_timeout: integer(environment.POSTGRES_STATEMENT_TIMEOUT_MS, 30_000, 1_000, 30 * 60_000),
@@ -53,6 +53,8 @@ export const initializePostgres = async (pool, {
       if (!['3F000', '42P01'].includes(error?.code)) throw error;
     }
     await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout TO '30min'");
+    await client.query("SET LOCAL lock_timeout TO '5min'");
     await client.query('CREATE SCHEMA IF NOT EXISTS address');
     await client.query('CREATE SCHEMA IF NOT EXISTS control');
     await client.query('SET LOCAL search_path TO address, public');

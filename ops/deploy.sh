@@ -50,6 +50,16 @@ done
 
 REMOTE=$DEPLOY_USER@$DEPLOY_HOST
 RUNTIME=$ADDRESS_ROOT/runtime
+SSH_OPTIONS=(
+  -o BatchMode=yes
+  -o PreferredAuthentications=publickey
+  -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no
+  -o GSSAPIAuthentication=no
+  -o ConnectTimeout=15
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+)
 STAGE=$(mktemp -d)
 TARBALL=''
 cleanup() {
@@ -60,6 +70,9 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 git ls-files -co --exclude-standard -z \
+  | while IFS= read -r -d '' file; do
+      [[ -f "$file" || -L "$file" ]] && printf '%s\0' "$file"
+    done \
   | tar --null -T - -cf - \
   | tar -xf - -C "$STAGE"
 (
@@ -78,22 +91,26 @@ git ls-files -co --exclude-standard -z \
 )
 TREE_HASH=$(sha256sum "$STAGE/.release-manifest.sha256" | cut -c1-12)
 REL="$(git rev-parse --short HEAD)-$TREE_HASH"
-TARBALL="${TMPDIR:-/tmp}/address-$REL.tar.gz"
+TARBALL=$(mktemp "${TMPDIR:-/tmp}/address-$REL.XXXXXX.tar.gz")
 tar -C "$STAGE" -czf "$TARBALL" .
 
 scp_retry() {
   for i in 1 2 3 4 5; do
-    scp -i "$KEY" -P "$DEPLOY_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$@" && return 0
+    scp -i "$KEY" -P "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$@" && return 0
     echo "scp retry $i"; sleep 30
   done
   return 1
 }
 ssh_retry() {
   for i in 1 2 3 4 5; do
-    ssh -i "$KEY" -p "$DEPLOY_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" "$@" </dev/null && return 0
+    ssh -i "$KEY" -p "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$REMOTE" "$@" </dev/null && return 0
     echo "ssh retry $i"; sleep 30
   done
   return 1
+}
+
+ssh_once() {
+  ssh -i "$KEY" -p "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$REMOTE" "$@" </dev/null
 }
 
 echo "==> uploading $REL"
@@ -109,7 +126,7 @@ if $RESTART; then
   ssh_retry "docker build -t '$IMAGE' '$RUNTIME/releases/$REL'"
   ssh_retry "docker run --rm --entrypoint sh '$IMAGE' -c 'cd /srv/address/app && sha256sum --quiet -c .image-manifest.sha256'"
   ssh_retry "cd '$ADDRESS_ROOT' && ./ops/init-compose.sh"
-  ssh_retry "cd '$ADDRESS_ROOT' && bash ./ops/activate-production-release.sh '$REL' '$IMAGE'"
+  ssh_once "cd '$ADDRESS_ROOT' && bash ./ops/activate-production-release.sh '$REL' '$IMAGE'"
 else
   echo "==> files synchronized without rebuilding services"
 fi
