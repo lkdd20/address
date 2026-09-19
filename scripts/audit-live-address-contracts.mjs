@@ -1,12 +1,16 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import { validateAddressContract } from '../src/domain/address-contracts.mjs';
+import { validateAddressQuality, streetAddressKey } from '../src/domain/address-quality.mjs';
+import { postcodePatterns } from '../src/domain/postcode-patterns.mjs';
+import { parsePhoneNumberFromString } from 'libphonenumber-js/mobile';
 
 const base = process.env.API_BASE_URL || 'https://address.333186.xyz/api/v1';
 const token = process.env.API_TOKEN || '';
 const samples = Math.max(500, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '500', 10) || 500);
-const concurrency = Math.max(1, Math.min(24, Number.parseInt(process.env.AUDIT_CONCURRENCY || '4', 10) || 4));
+const concurrency = Math.max(1, Math.min(24, Number.parseInt(process.env.AUDIT_CONCURRENCY || '1', 10) || 1));
 const headers = token ? { Authorization: `Bearer ${token}` } : {};
 headers['Content-Type'] = 'application/json';
 const codes = (process.env.AUDIT_COUNTRIES || 'US,CA,MX,GB,DE,FR,IT,ES,NL,RU,JP,HK,SG,TW,KR,MY,CN,TH,PH,VN,TR,SA,IN,AU,BR,NG,ZA').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
@@ -14,16 +18,6 @@ const nativePatterns = { CN: /\p{Script=Han}/u, HK: /\p{Script=Han}/u, TW: /\p{S
 const latin = /\p{Script=Latin}/u;
 const forbiddenNativeLatin = new Set(['HK', 'TW', 'JP', 'KR', 'TH', 'SA', 'RU', 'CN']);
 const adminCodes = new Set(['US', 'CA', 'MX', 'IT', 'AU', 'BR']);
-const postcodePatterns = {
-  US: /^\d{5}(?:-\d{4})?$/u, CA: /^[A-Z]\d[A-Z][ -]?\d[A-Z]\d$/iu,
-  MX: /^\d{5}$/u, GB: /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/iu,
-  DE: /^\d{5}$/u, FR: /^\d{5}$/u, IT: /^\d{5}$/u, ES: /^\d{5}$/u,
-  NL: /^\d{4} ?[A-Z]{2}$/iu, RU: /^\d{6}$/u, JP: /^\d{3}-?\d{4}$/u,
-  TW: /^\d{3,6}$/u, KR: /^\d{5}$/u, SG: /^\d{6}$/u, MY: /^\d{5}$/u,
-  TH: /^\d{5}$/u, PH: /^\d{4}$/u, VN: /^\d{5,6}$/u, TR: /^\d{5}$/u,
-  SA: /^\d{5}$/u, IN: /^\d{6}$/u, AU: /^\d{4}$/u,
-  BR: /^\d{5}-?\d{3}$/u, ZA: /^\d{4}$/u
-};
 const minimumUniqueRatio = Math.max(0, Math.min(1, Number(process.env.MIN_UNIQUE_RATIO || '0.9')));
 const toTraditional = {
   HK: createTraditionalizer({ from: 'cn', to: 'hk' }),
@@ -46,11 +40,11 @@ const registryResponse = await fetch(`${base}/countries`, { headers, signal: Abo
 const registryPayload = await registryResponse.json();
 if (!registryResponse.ok) throw new Error(`/countries: ${registryPayload.error?.code || registryResponse.status}`);
 const eligibleCounts = new Map((registryPayload.data || []).filter((country) => country.generationMode === 'synchronized-pool'
-  && Number(country.addressCount) > 0 && Number(country.residentialCount) > 0 && country.residentialAvailable)
-  .map((country) => [country.code, Number(country.residentialCount)]));
+  && Number(country.addressCount) > 0)
+  .map((country) => [country.code, Number(country.addressCount)]));
 const fetchBatch = async (code, batch, count) => {
   let lastError;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       const response = await fetch(`${base}/generate/batch`, {
         method: 'POST', headers, signal: AbortSignal.timeout(30_000),
@@ -81,13 +75,17 @@ const issueFor = (code, address) => {
   const nativeComponents = nativeCoreValues(nativeVariant);
   const englishComponents = semanticValues(address.componentVariants?.en);
   const chineseComponents = semanticValues(address.componentVariants?.['zh-CN']);
+  const matchLevel = address.matchLevel;
+  const streetLevel = matchLevel === 'street' && code !== 'CN';
   if (address.countryCode !== code) issues.push('country_mismatch');
   if (address.addressStatus !== 'verified') issues.push('not_verified');
-  if (!String(components.houseNumber || '').trim()) issues.push('missing_house_number');
+  if (!streetLevel && !String(components.houseNumber || '').trim()) issues.push('missing_house_number');
   if (!String(components.street || '').trim()) issues.push('missing_street');
-  for (const reason of validateAddressContract(code, nativeVariant, { strict: true }).reasons) issues.push(`contract_${reason}`);
+  for (const reason of validateAddressContract(code, nativeVariant, { strict: true, matchLevel }).reasons) issues.push(`contract_${reason}`);
+  for (const reason of validateAddressQuality({ countryCode: code, matchLevel, components: nativeVariant,
+    latitude: address.coordinates?.latitude, longitude: address.coordinates?.longitude }).reasons) issues.push(`quality_${reason}`);
   const postcode = String(components.postcode || '').trim();
-  if (postcodePatterns[code] && !postcodePatterns[code].test(postcode)) issues.push('invalid_postcode');
+  if (postcodePatterns[code] && (code === 'CN' || postcode) && !postcodePatterns[code].test(postcode)) issues.push('invalid_postcode');
   const latitude = Number(address.coordinates?.latitude);
   const longitude = Number(address.coordinates?.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
@@ -95,7 +93,9 @@ const issueFor = (code, address) => {
   const evidenceTypes = new Set((address.evidence || []).map((entry) => entry.type));
   if (!evidenceTypes.has('address_existence')) issues.push('missing_address_evidence');
   if (!evidenceTypes.has('coordinate')) issues.push('missing_coordinate_evidence');
-  if (!evidenceTypes.has('residential_use')) issues.push('missing_residential_evidence');
+  if ((code === 'CN' || ['residential', 'apartment'].includes(address.propertyType))
+    && !evidenceTypes.has('residential_use')) issues.push('missing_residential_evidence');
+  if (streetLevel && (address.propertyType !== 'unknown' || evidenceTypes.has('residential_use'))) issues.push('street_residential_claim');
   if (!address.addressVariants?.native || !en || !zh) issues.push('missing_language_variant');
   if (nativePatterns[code] && (!nativeComponents.length || nativeComponents.some((value) => !nativePatterns[code].test(value)))) issues.push('native_script');
   if (forbiddenNativeLatin.has(code) && nativeComponents.some(hasNonIdentifierLatin)) issues.push('native_latin_mixed');
@@ -119,14 +119,24 @@ for (const code of codes) {
     while (cursor < batches) {
       const batch = cursor++;
       const count = Math.min(50, samples - batch * 50);
+      await wait(750);
       const { response, payload } = await fetchBatch(code, batch, count);
-      const addresses = payload.data?.results?.map(({ address }) => address) || [];
-      if (!response.ok || addresses.length !== count) {
+      const bundles = payload.data?.results || [];
+      if (!response.ok || bundles.length !== count) {
         for (let index = 0; index < count; index += 1) rows[batch * 50 + index] = { issues: [payload.error?.code || `http_${response.status}`] };
         continue;
       }
-      addresses.forEach((address, index) => {
-        rows[batch * 50 + index] = { id: address.id, admin1: address.components?.admin1 || '', locality: address.components?.locality || '', issues: issueFor(code, address) };
+      bundles.forEach(({ address, profile }, index) => {
+        const issues = issueFor(code, address);
+        const phone = parsePhoneNumberFromString(String(profile?.phone || ''));
+        if (!phone?.isValid() || phone.country !== code) issues.push('invalid_mobile_number');
+        if (code === 'GB' && /^7700900\d{3}$/u.test(phone?.nationalNumber || '')) issues.push('reserved_mobile_number');
+        rows[batch * 50 + index] = {
+          id: createHash('sha256').update(address.matchLevel === 'street'
+            ? streetAddressKey(code, address.components) : String(address.id)).digest('hex'),
+          matchLevel: address.matchLevel, admin1: address.components?.admin1 || '', locality: address.components?.locality || '',
+          phone: phone?.number, issues
+        };
       });
     }
   });
@@ -142,11 +152,17 @@ for (const code of codes) {
   const expectedUniqueAddresses = eligibleCount * (1 - ((eligibleCount - 1) / eligibleCount) ** samples);
   const minimumUniqueAddresses = Math.max(1, Math.floor(expectedUniqueAddresses * minimumUniqueRatio));
   if (uniqueAddresses < minimumUniqueAddresses) issueCounts.low_unique_ratio = minimumUniqueAddresses - uniqueAddresses;
+  const uniquePhones = new Set(rows.map(({ phone }) => phone).filter(Boolean)).size;
+  if (uniquePhones < samples * 0.99) issueCounts.low_phone_unique_ratio = samples - uniquePhones;
   result[code] = {
     requested: samples,
     returned: rows.length,
     eligibleCount,
     uniqueAddresses,
+    uniquePhones,
+    matchLevels: Object.fromEntries(['street', 'premise', 'subpremise'].map((level) =>
+      [level, rows.filter((row) => row.matchLevel === level).length])),
+    samplingWithReplacement: eligibleCount < samples,
     expectedUniqueAddresses: Number(expectedUniqueAddresses.toFixed(1)),
     minimumUniqueAddresses,
     admin1Covered: new Set(rows.map(({ admin1 }) => admin1).filter(Boolean)).size,

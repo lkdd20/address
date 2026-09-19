@@ -77,6 +77,11 @@ describe('address data aggregation', () => {
     });
   });
 
+  it('uses the same published China count as the public status instead of stale coverage state', async () => {
+    const countries = await listAddressData(database, { counts: { total: 3 }, syncState: 'below_target' });
+    expect(countries.find((country) => country.countryCode === 'CN')).toMatchObject({ currentCount: 3, deficit: 17 });
+  });
+
   it('surfaces the queue credential blocker ahead of stale shard failures', async () => {
     const countries = await listAddressData(database, undefined, new Map([['JP', {
       state: 'blocked',

@@ -39,6 +39,11 @@ const chinaDb = (fixture: ChinaFixture): CatalogDb => ({
   }
 } as unknown as CatalogDb);
 
+const generationGroups = (rows: Array<{ name: string; region_name: string | null; region_code: string | null }>) => rows.map((row) => ({
+  admin1_key: (row.region_name || '').toLowerCase(), admin1_code_key: (row.region_code || '').toLowerCase(),
+  locality_key: row.name.toLowerCase(), postal_locality_key: row.name.toLowerCase(), address_count: 1
+}));
+
 const beijingRegion = { id: 2257, code: 'BJ', name: 'Beijing', native_name: '北京市', zh_name: '北京市' };
 const hebeiRegion = { id: 2280, code: 'HE', name: 'Hebei', native_name: '河北省', zh_name: '河北省' };
 
@@ -98,6 +103,10 @@ const targetDb = (): TargetDb => ({
         if (sql.includes('SELECT COUNT(*) AS total FROM catalog_cities')) return { total: 1 } as T;
         if (sql.includes('FROM catalog_cities c') && sql.includes('ORDER BY c.id')) return philadelphia as T;
         return null;
+      },
+      async all<T>() {
+        return { results: sql.includes('FROM catalog_regions') ? [{ id: 1422, parent_id: null, code: 'PA',
+          name: 'Pennsylvania', native_name: 'Pennsylvania', zh_name: '宾夕法尼亚州' }] : [] } as T;
       }
     };
     return statement;
@@ -108,7 +117,7 @@ describe('stable location selection', () => {
   it('uses the indexed persisted key for postcode availability', async () => {
     const statements: string[] = [];
     const postcode = {
-      id: 1, city_id: 2, code: '1234 AB', locality_name: 'Example', city_name: 'Example',
+      address_count: 4, city_count: 1, region_count: 1, id: 1, city_id: 2, code: '1234 AB', locality_name: 'Example', city_name: 'Example',
       city_native_name: 'Example', city_zh_name: 'Example', region_id: 3, region_name: 'North',
       region_native_name: 'North', region_zh_name: 'North', region_code: 'NO'
     };
@@ -119,7 +128,7 @@ describe('stable location selection', () => {
           bind() { return statement; },
           async first<T>() { return { total: 1 } as T; },
           async all<T>() {
-            if (sql.includes('SELECT MIN(p.id)')) return { results: [postcode] } as T;
+            if (sql.includes('MIN(p.id) AS id')) return { results: [postcode] } as T;
             if (sql.includes('COUNT(address.id) AS address_count')) return { results: [{ id: 1, address_count: 4 }] } as T;
             return { results: [] } as T;
           }
@@ -131,16 +140,13 @@ describe('stable location selection', () => {
     const result = await queryLocationCatalog(db, { country: 'NL', field: 'postcode', limit: 200 });
 
     expect(result.options[0]).toMatchObject({ value: '1234 AB', availableCount: 4 });
-    const poolQueries = statements.filter((sql) => sql.includes('address_pool address'));
-    expect(poolQueries).toHaveLength(2);
-    expect(poolQueries).toEqual(expect.arrayContaining([
-      expect.stringContaining('SELECT address.postcode_key FROM address_pool address'),
-      expect.stringContaining('LEFT JOIN address_pool address')
-    ]));
-    expect(poolQueries.join('\n')).not.toContain("LOWER(REPLACE(address.postcode,' ',''))");
+    const indexQueries = statements.filter((sql) => sql.includes('address_generation_index'));
+    expect(indexQueries).toHaveLength(2);
+    expect(indexQueries.join('\n')).toContain("available.postcode_key=LOWER(REPLACE(p.code,' ',''))");
+    expect(statements.join('\n')).not.toContain('address_pool_evidence');
   });
 
-  it('aggregates city availability by indexed IDs and isolates legacy name fallback', async () => {
+  it('counts only generator-compatible city names instead of coverage estimates', async () => {
     const statements: string[] = [];
     const row = {
       id: 124126, region_id: 1422, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城',
@@ -151,10 +157,13 @@ describe('stable location selection', () => {
         statements.push(sql);
         const statement = {
           bind() { return statement; },
-          async first<T>() { return { total: 1 } as T; },
+          async first<T>() { return (sql.includes('SELECT r.id') ? { id: 1422 } : { total: 1 }) as T; },
           async all<T>() {
             if (sql.includes('SELECT c.id, c.region_id')) return { results: [row] } as T;
-            if (sql.includes('SELECT city_id AS id')) return { results: [{ id: row.id, address_count: 8 }] } as T;
+            if (sql.includes('address_generation_index')) return { results: [
+              { ...generationGroups([row])[0], address_count: 8 },
+              { ...generationGroups([row])[0], locality_key: 'Philadelphia City', postal_locality_key: '', address_count: 2 }
+            ] } as T;
             if (sql.includes('city_id IS NULL')) return { results: [{ city_name: 'Philadelphia City', address_count: 2 }] } as T;
             return { results: [] } as T;
           }
@@ -165,13 +174,9 @@ describe('stable location selection', () => {
 
     const result = await queryLocationCatalog(db, { country: 'US', field: 'city', regionId: '1422', residential: true });
 
-    expect(result.options[0]).toMatchObject({ id: '124126', availableCount: 10, disabled: false });
-    expect(statements).toContainEqual(expect.stringContaining('SELECT city_id AS id,SUM(address_count)'));
-    expect(statements).toContainEqual(expect.stringContaining('city_id IS NULL AND city_name<>'));
-    expect(statements).toContainEqual(expect.stringContaining('WITH legacy_names AS'));
-    expect(statements).toContainEqual(expect.stringContaining('coverage.city_id=c.id WHERE'));
-    expect(statements).not.toContainEqual(expect.stringContaining('coverage.city_id=c.id OR'));
-    expect(statements.filter((sql) => sql.includes('LEFT JOIN residential_coverage'))).toHaveLength(0);
+    expect(result.options[0]).toMatchObject({ id: '124126', availableCount: 8, disabled: false });
+    expect(statements).toContainEqual(expect.stringContaining('FROM address_generation_index'));
+    expect(statements.join('\n')).not.toContain('residential_coverage');
   });
 
   it('keeps parent metadata without adding the parent region to city labels', async () => {
@@ -190,7 +195,7 @@ describe('stable location selection', () => {
         const statement = {
           bind() { return statement; },
           async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : [] } as T; }
+          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
         };
         return statement;
       }
@@ -245,7 +250,7 @@ describe('stable location selection', () => {
         const statement = {
           bind() { return statement; },
           async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : [] } as T; }
+          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
         };
         return statement;
       }
@@ -267,7 +272,7 @@ describe('stable location selection', () => {
         const statement = {
           bind() { return statement; },
           async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : [] } as T; }
+          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
         };
         return statement;
       }
@@ -311,28 +316,16 @@ describe('stable location selection', () => {
     await queryLocationCatalog(db, { country: 'AU', field: 'city' });
 
     expect(statements.find((sql) => sql.includes('SELECT c.id, c.region_id')))
-      .toContain('ORDER BY c.population DESC, c.name, c.id LIMIT ? OFFSET ?');
+      .toContain('ORDER BY COALESCE(c.population,0) DESC,c.name,c.id');
   });
 
   it('uses the default page size when a limit is not finite', async () => {
-    let selectBindings: unknown[] = [];
-    const db = {
-      prepare(sql: string) {
-        const statement = {
-          bind(...bindings: unknown[]) {
-            if (sql.includes('SELECT c.id')) selectBindings = bindings;
-            return statement;
-          },
-          async first<T>() { return { total: 0 } as T; },
-          async all<T>() { return { results: [] } as T; }
-        };
-        return statement;
-      }
-    } as unknown as CatalogDb;
-
-    await queryLocationCatalog(db, { country: 'US', field: 'city', limit: Number.NaN });
-
-    expect(selectBindings[selectBindings.length - 2]).toBe(100);
+    const db = chinaDb({ regions: [hebeiRegion], communities: Array.from({ length: 120 }, (_, index) => ({
+      province: '河北省', city: `Fixture${index}`, address_count: 1
+    })) });
+    const result = await queryLocationCatalog(db, { country: 'CN', field: 'city', limit: Number.NaN });
+    expect(result.options).toHaveLength(100);
+    expect(result.nextCursor).toBe('100');
   });
 
   it('serves China district options from published communities with availability counts', async () => {
@@ -359,7 +352,7 @@ describe('stable location selection', () => {
 
     const result = await queryLocationCatalog(db, { country: 'CN', field: 'district', regionId: '20', cityId: '201', residential: true });
 
-    expect(statements.every((sql) => sql.includes('cn_communities_v2'))).toBe(true);
+    expect(statements.filter((sql) => !sql.includes('address_pool_revisions')).every((sql) => sql.includes('cn_communities_v2'))).toBe(true);
     expect(statements[statements.length - 1]).toContain('catalog_cities WHERE id = ?');
     expect(districtBindings).toContain(20);
     expect(districtBindings).toContain(201);
@@ -443,7 +436,7 @@ describe('China community-backed selection', () => {
     expect(regions.options[0]).toMatchObject({ value: '北京市', label: '北京市', en: 'Beijing', availableCount: 341, disabled: false, id: '2257' });
     expect(regionFixture.statements?.filter((sql) => sql.includes('cn_communities_v2'))).toHaveLength(1);
     await expect(queryLocationCatalog(regionDb, { country: 'CN', field: 'region', residential: true })).resolves.toEqual(regions);
-    expect(regionFixture.statements).toHaveLength(2);
+    expect(regionFixture.statements?.filter((sql) => !sql.includes('address_pool_revisions'))).toHaveLength(2);
 
     const cityDb = chinaDb({
       regions: [beijingRegion],

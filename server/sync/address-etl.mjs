@@ -6,6 +6,7 @@ import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { pinyin } from 'pinyin-pro';
 import { createSourceAdapters, loadSourceCatalog, sourceCapabilityRevision } from './source-adapters.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
+import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 import { loadGoogleCoverageTargets } from './google-coverage-targets.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
 import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
@@ -20,7 +21,7 @@ import {
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { ADDRESS_POLICY_DEFAULTS, getRuntimePolicy, loadImportPolicy } from './address-policy.mjs';
-import { normalizeAddressFacts } from '../../src/domain/address-quality.mjs';
+import { addressCanonicalKey, normalizeAddressFacts, streetAddressKey } from '../../src/domain/address-quality.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const defaultCacheDir = resolve(syncRoot, '../../.data-cache/address-sync');
@@ -89,7 +90,7 @@ export const formattedAddress = (components, countryCode) => [
   components.district,
   components.locality,
   components.admin1,
-  countryCode === 'CN' ? '' : components.postcode,
+  components.postcode,
   countryCode
 ].filter(Boolean).join(', ');
 
@@ -98,17 +99,10 @@ const displayNames = {
   zh: new Intl.DisplayNames(['zh-CN'], { type: 'region' })
 };
 export const localizedFields = ['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit'];
-const nonLatinScript = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Thai}\p{Script=Cyrillic}]/u;
-const han = /\p{Script=Han}/u;
+import { normalizeAddressDigits, usableAddressTranslation as usableTranslation } from '../../src/domain/address-localization.mjs';
 const letters = /\p{L}/u;
 const toSimplified = createSimplifier({ from: 'hk', to: 'cn' });
-const usableTranslation = (value, target) => {
-  const translated = clean(value);
-  if (!translated) return false;
-  if (target === 'en') return !nonLatinScript.test(translated);
-  if (target === 'zh-CN') return !letters.test(translated) || han.test(translated);
-  return true;
-};
+export { usableTranslation };
 
 const hongKongBilingualComponent = (value) => {
   const source = clean(value);
@@ -124,16 +118,15 @@ export const localizedFormattedAddress = (components, countryCode, language) => 
     ? [displayNames.zh.of(countryCode), components.admin1, components.locality, components.postalLocality,
       components.district, components.street, components.houseNumber, components.buildingName,
       components.unit,
-      countryCode === 'CN' ? '' : components.postcode]
+      components.postcode]
     : [[components.houseNumber, components.street].filter(Boolean).join(' '), components.buildingName,
       components.unit,
       components.district, components.postalLocality || components.locality, components.admin1,
-      countryCode === 'CN' ? '' : components.postcode, displayNames.en.of(countryCode)];
+      components.postcode, displayNames.en.of(countryCode)];
   return values.filter(Boolean).filter((value, index, all) => index === 0 || value !== all[index - 1])
     .join(language === 'zh-CN' ? '' : ', ');
 };
 
-const fillTranslations = (values, translations) => new Map(values.map((value, index) => [value, translations[index]]));
 const withEnglishHints = (record, components) => ({ ...components, ...(record.englishComponentHints || {}) });
 const withChineseHints = (record, components) => ({ ...components, ...(record.chineseComponentHints || {}) });
 
@@ -180,7 +173,7 @@ const deferredLocalizations = (record) => {
   };
 };
 
-const googleTranslate = async (values, target, fetchImpl, signal) => {
+export const googleTranslate = async (values, target, fetchImpl, signal) => {
   const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
   const url = new URL('https://translate.googleapis.com/translate_a/single');
   Object.entries({ client: 'gtx', dt: 't', sl: 'auto', tl: target, q: values.join(`\n${boundary}\n`) })
@@ -189,7 +182,10 @@ const googleTranslate = async (values, target, fetchImpl, signal) => {
     headers: { Accept: 'application/json', 'User-Agent': 'address-sync/1.0' },
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000)
   });
-  if (!response.ok) return null;
+  if (!response.ok) throw Object.assign(new Error('GOOGLE_TRANSLATION_UNAVAILABLE'), {
+    code: `GOOGLE_HTTP_${response.status}`,
+    retryAt: response.status === 429 ? new Date(Date.now() + 60_000).toISOString() : null
+  });
   const payload = await response.json();
   const translations = Array.isArray(payload?.[0])
     ? payload[0].map((segment) => Array.isArray(segment) ? segment[0] || '' : '').join('')
@@ -223,40 +219,72 @@ const youdaoTranslate = async (values, target, environment, fetchImpl, signal) =
   return translations.length === values.length && translations.every(Boolean) ? translations : null;
 };
 
-export const translateValues = async (values, target, environment, fetchImpl, cache, signal) => {
+export const translateValues = async (values, target, environment, fetchImpl, cache, signal, providers = {}, accepts = usableTranslation) => {
   signal?.throwIfAborted();
   const output = cache ? await cache.get(values, target, signal) : new Map();
-  const missing = values.filter((value) => !usableTranslation(output.get(value), target));
-  for (let offset = 0; offset < missing.length; offset += 30) {
+  const missing = [...new Set(values)].filter((value) => !accepts(output.get(value), target, value));
+  const routed = Array.isArray(providers.translationChain)
+    ? providers.translationChain.map((route) => route.translate).filter(Boolean) : null;
+  const broker = missing.length && !routed && (!providers.deepl || !providers['openai-compatible'])
+    ? await createCredentialBrokerClient(environment, { fetchImpl }) : null;
+  const deepl = providers.deepl || (broker ? async (texts) => {
+    const result = await broker.request('deepl.translate', { values: texts, target }, { signal, maxDispatches: 2 });
+    return result.translations.map((item) => item.text);
+  } : null);
+  const openAICompatible = providers['openai-compatible'] || (broker ? async (texts) => {
+    const result = await broker.request('openai-compatible.translate', { values: texts, target }, { signal, maxDispatches: 2 });
+    return result.translations;
+  } : null);
+  for (let offset = 0; offset < missing.length;) {
     signal?.throwIfAborted();
-    const chunk = missing.slice(offset, offset + 30);
-    let primary;
-    try {
-      if (!/^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true'))) {
-        primary = await googleTranslate(chunk, target, fetchImpl, signal);
-      }
-    } catch (error) {
-      if (signal?.aborted) signal.throwIfAborted();
+    const chunk = [];
+    let characters = 0;
+    while (offset < missing.length && chunk.length < 30) {
+      const value = missing[offset];
+      if (chunk.length && characters + value.length > 1200) break;
+      chunk.push(value);
+      characters += value.length;
+      offset += 1;
     }
-    const retry = chunk.filter((_, index) => !usableTranslation(primary?.[index], target));
-    let secondary;
-    if (retry.length) {
-      try { secondary = await youdaoTranslate(retry, target, environment, fetchImpl, signal); }
-      catch (error) {
-        if (signal?.aborted) signal.throwIfAborted();
+    const translated = new Map(chunk.map((value) => [value, value]));
+    const chain = routed || [deepl ? (texts) => deepl(texts, target, fetchImpl, signal) : null,
+      openAICompatible ? (texts) => openAICompatible(texts, target, fetchImpl, signal) : null,
+      (texts) => (providers.youdao || youdaoTranslate)(texts, target, environment, fetchImpl, signal),
+      /^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true')) ? null
+        : (texts) => (providers.google || googleTranslate)(texts, target, fetchImpl, signal)];
+    for (const translate of chain) {
+      const retry = chunk.filter((value) => !accepts(translated.get(value), target, value));
+      if (!retry.length) break;
+      if (!translate) continue;
+      try {
+        const results = await translate(retry, target, fetchImpl, signal);
+        retry.forEach((value, index) => {
+          if (accepts(results?.[index], target, value)) translated.set(value, results[index]);
+        });
+      } catch {
+        signal?.throwIfAborted();
       }
     }
-    const fallback = fillTranslations(retry, secondary || []);
-    const translated = new Map(chunk.map((value, index) => {
-      const candidate = primary?.[index];
-      const replacement = fallback.get(value);
-      return [value, usableTranslation(candidate, target)
-        ? candidate
-        : usableTranslation(replacement, target) ? replacement : candidate || replacement || value];
-    }));
     for (const [value, translation] of translated) output.set(value, translation);
-    await cache?.set(translated, target, signal);
+    const accepted = new Map([...translated].filter(([value, translation]) => accepts(translation, target, value)));
+    if (accepted.size) await cache?.set(accepted, target, signal);
   }
+  return output;
+};
+
+export const translateNumberedValues = async (values, target, environment, fetchImpl, cache, signal, providers, accepts = usableTranslation) => {
+  const numbered = values.filter((value) => /\p{Decimal_Number}/u.test(value));
+  const parts = new Map(numbered.map((value) => [value, value.split(/([A-Za-z]*\p{Decimal_Number}+[A-Za-z\p{Decimal_Number}]*(?:[-/.][A-Za-z\p{Decimal_Number}]+)*)/gu)]));
+  const text = [...new Set([...parts.values()].flatMap((parts) => parts.filter((_part, index) => index % 2 === 0)
+    .map(clean).filter((part) => letters.test(part))))];
+  const translated = await translateValues(text, target, environment, fetchImpl, cache, signal, providers);
+  const output = new Map();
+  for (const [value, tokens] of parts) {
+    const candidate = tokens.map((part, index) => index % 2 ? normalizeAddressDigits(part)
+      : translated.get(clean(part)) || clean(part)).filter(Boolean).join(' ');
+    if (accepts(candidate, target, value)) output.set(value, candidate);
+  }
+  if (output.size) await cache?.set(output, target, signal);
   return output;
 };
 
@@ -264,7 +292,9 @@ export const localizeAddressRecords = async (records, {
   environment = process.env,
   fetchImpl = fetch,
   cache,
-  signal
+  signal,
+  database,
+  brokerClient
 } = {}) => {
   signal?.throwIfAborted();
   const selectedOnlineCountries = new Set(String(environment.ADDRESS_SYNC_TRANSLATION_COUNTRIES || '')
@@ -274,12 +304,15 @@ export const localizeAddressRecords = async (records, {
   if (!useOnlineTranslation) {
     return records.map((record) => ({ ...record, localizations: deferredLocalizations(record) }));
   }
+  const providers = database ? await (await import('./translation-providers.mjs')).createImportTranslationProviders({
+    database, environment, fetchImpl, signal, brokerClient
+  }) : {};
   const values = [...new Set(records.flatMap((record) => localizedFields.map((field) => record.components[field]).filter(Boolean)))];
   const needsEnglish = records.some((record) => !record.nativeLanguage.toLowerCase().startsWith('en'));
   const needsChinese = records.some((record) => record.nativeLanguage !== 'zh-CN');
   const [english, chinese] = await Promise.all([
-    needsEnglish ? translateValues(values, 'en', environment, fetchImpl, cache, signal) : Promise.resolve(new Map(values.map((value) => [value, value]))),
-    needsChinese ? translateValues(values, 'zh-CN', environment, fetchImpl, cache, signal) : Promise.resolve(new Map(values.map((value) => [value, value])))
+    needsEnglish ? translateValues(values, 'en', environment, fetchImpl, cache, signal, providers) : Promise.resolve(new Map(values.map((value) => [value, value]))),
+    needsChinese ? translateValues(values, 'zh-CN', environment, fetchImpl, cache, signal, providers) : Promise.resolve(new Map(values.map((value) => [value, value])))
   ]);
   signal?.throwIfAborted();
   return records.map((record) => {
@@ -296,8 +329,8 @@ export const localizeAddressRecords = async (records, {
       ...record,
       localizations: {
         native: { components: record.components, formattedAddress: record.formattedAddress, source: 'source' },
-        en: { components: englishComponents, formattedAddress: localizedFormattedAddress(englishComponents, record.countryCode, 'en'), source: record.nativeLanguage.toLowerCase().startsWith('en') ? 'source' : 'google-youdao' },
-        'zh-CN': { components: chineseComponents, formattedAddress: localizedFormattedAddress(chineseComponents, record.countryCode, 'zh-CN'), source: record.nativeLanguage === 'zh-CN' ? 'source' : 'google-youdao' }
+        en: { components: englishComponents, formattedAddress: localizedFormattedAddress(englishComponents, record.countryCode, 'en'), source: record.nativeLanguage.toLowerCase().startsWith('en') ? 'source' : 'provider-chain' },
+        'zh-CN': { components: chineseComponents, formattedAddress: localizedFormattedAddress(chineseComponents, record.countryCode, 'zh-CN'), source: record.nativeLanguage === 'zh-CN' ? 'source' : 'provider-chain' }
       }
     };
   });
@@ -375,6 +408,7 @@ const normalizeTaiwanHierarchy = (levels, postalCity, fallbackAdmin1, fallbackLo
 };
 
 export const normalizeSourceRecord = (value, shard, format) => {
+  const declaredMatchLevel = clean(value.match_level || value.properties?.match_level);
   let sourceRecordId;
   let admin1;
   let locality;
@@ -390,7 +424,9 @@ export const normalizeSourceRecord = (value, shard, format) => {
   let propertyType = 'unknown';
   let residentialSourceRecordId = '';
   let residentialSourceClass = '';
+  let residentialSourceRecordUrl = '';
   let sourceDataset = shard.source.name;
+  let sourceRecordUrl = '';
   if (format === 'overture-jsonl') {
     const addressLevels = (Array.isArray(value.address_levels) ? value.address_levels : [])
       .map((level) => clean(typeof level === 'object' && level !== null ? level.value : level))
@@ -416,7 +452,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
     } else {
       postalLocality = postalCity;
     }
-    postcode = shard.countryCode === 'CN' ? '' : clean(value.postcode);
+    postcode = clean(value.postcode);
     street = clean(value.street);
     houseNumber = clean(value.number).normalize('NFKC');
     buildingName = clean(value.building_name);
@@ -430,6 +466,18 @@ export const normalizeSourceRecord = (value, shard, format) => {
       residentialSourceClass = clean(value.residential_building_class);
     }
     sourceDataset = clean(value.source_dataset) || sourceDataset;
+    const provider = clean(value.source_record_provider);
+    if (provider) {
+      if (!Object.hasOwn(shard.source.recordSources || {}, provider)) return null;
+      const provenance = shard.source.recordSources[provider];
+      sourceDataset = provenance.name;
+      sourceRecordUrl = provenance.url;
+    }
+    const residentialProvider = clean(value.residential_source_provider);
+    if (residentialSourceRecordId && residentialProvider) {
+      if (!Object.hasOwn(shard.source.recordSources || {}, residentialProvider)) return null;
+      residentialSourceRecordUrl = shard.source.recordSources[residentialProvider].url;
+    }
   } else if (format === 'geofabrik-geojsonseq') {
     const properties = value.properties || {};
     const declaredCountry = clean(properties['addr:country']).toUpperCase();
@@ -458,7 +506,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
       ({ admin1, locality, district } = hierarchy);
       postalLocality = locality;
     }
-    postcode = shard.countryCode === 'CN' ? '' : clean(properties['addr:postcode']);
+    postcode = clean(properties['addr:postcode']);
     street = clean(properties['addr:street'] || properties['addr:place']);
     houseNumber = clean(properties['addr:housenumber']).normalize('NFKC');
     unit = clean(properties['addr:unit'] || properties['addr:flats']);
@@ -481,10 +529,15 @@ export const normalizeSourceRecord = (value, shard, format) => {
   } else {
     throw new Error(`Unsupported normalized source format: ${format}`);
   }
-  if (!sourceRecordId || !street || !houseNumber || !finiteCoordinate(longitude, -180, 180) || !finiteCoordinate(latitude, -90, 90)) return null;
+  const matchLevel = declaredMatchLevel || (unit ? 'subpremise' : 'premise');
+  const streetLevel = matchLevel === 'street' && shard.countryCode !== 'CN';
+  if (!['street', 'premise', 'subpremise'].includes(matchLevel) || (matchLevel === 'street' && !streetLevel)) return null;
+  if (streetLevel && (houseNumber || buildingName || unit || propertyType !== 'unknown' || residentialSourceRecordId)) return null;
+  if (!sourceRecordId || !street || (!streetLevel && !houseNumber) || !finiteCoordinate(longitude, -180, 180) || !finiteCoordinate(latitude, -90, 90)) return null;
   const components = normalizeAddressFacts(shard.countryCode, {
     houseNumber, street, buildingName, unit, district, locality, postalLocality, admin1, postcode
   });
+  if (value.admin1_code) components.admin1Code = clean(value.admin1_code);
   const englishComponentHints = {};
   if (shard.countryCode === 'HK') {
     for (const field of localizedFields) {
@@ -495,23 +548,33 @@ export const normalizeSourceRecord = (value, shard, format) => {
     }
     ({ admin1, locality, postalLocality, district, street, buildingName, unit } = components);
   }
-  if (findNonResidentialMatch({
+  const nonResidential = findNonResidentialMatch({
     countryCode: shard.countryCode,
     buildingNames: [buildingName],
     formattedAddresses: [formattedAddress(components, shard.countryCode)],
     streets: [street]
-  }).excluded) return null;
+  }).excluded;
+  if (nonResidential) {
+    if (shard.countryCode === 'CN') return null;
+    propertyType = 'unknown';
+    residentialSourceRecordId = '';
+    residentialSourceClass = '';
+  }
   if (matchesCustomBlacklist([buildingName, formattedAddress(components, shard.countryCode), street])) return null;
-  const canonicalHash = sha256([
+  const canonicalKey = addressCanonicalKey(shard.countryCode, components, matchLevel);
+  const canonicalHash = sha256(streetLevel ? streetAddressKey(shard.countryCode, components) : [
     shard.countryCode, admin1, locality, postcode, street, houseNumber, unit,
     longitude.toFixed(6), latitude.toFixed(6)
   ].map((part) => clean(part).toLocaleLowerCase('und')).join('\u001f'));
   return {
     id: `addr-${canonicalHash.slice(0, 40)}`,
     canonicalHash,
+    canonicalKey,
     sourceRecordId,
     sourceDataset,
+    sourceRecordUrl,
     countryCode: shard.countryCode,
+    matchLevel,
     admin1,
     admin1Code: clean(value.admin1_code),
     locality,
@@ -525,7 +588,8 @@ export const normalizeSourceRecord = (value, shard, format) => {
     propertyType,
     residentialSourceRecordId,
     residentialSourceClass,
-    evidenceClass: clean(value.residential_evidence).startsWith('BU_USE=')
+    residentialSourceRecordUrl,
+    evidenceClass: streetLevel ? 'sourced-street' : clean(value.residential_evidence).startsWith('BU_USE=')
       ? 'official-residential-address-register'
       : clean(value.residential_evidence).startsWith('OSM_BUILDING_GOOGLE=')
         ? 'open-residential-building-geocoded'
@@ -543,20 +607,33 @@ export const normalizeSourceRecord = (value, shard, format) => {
 };
 
 const loadState = async (file) => {
+  let value;
   try {
-    const state = JSON.parse(await readFile(file, 'utf8'));
-    return state.schemaVersion === 1 && state.shards ? state : { schemaVersion: 1, shards: {} };
+    value = await readFile(file, 'utf8');
   } catch (error) {
     if (error?.code === 'ENOENT') return { schemaVersion: 1, shards: {} };
-    throw error;
+    throw Object.assign(new Error(`Unable to read address sync state: ${file}`, { cause: error }), { code: 'SYNC_STATE_INVALID' });
   }
+  let state;
+  try { state = JSON.parse(value); }
+  catch (error) { throw Object.assign(new Error(`Address sync state is not valid JSON: ${file}`, { cause: error }), { code: 'SYNC_STATE_INVALID' }); }
+  if (!state || typeof state !== 'object' || Array.isArray(state) || state.schemaVersion !== 1
+    || !state.shards || typeof state.shards !== 'object' || Array.isArray(state.shards)) {
+    throw Object.assign(new Error(`Address sync state has an unsupported structure: ${file}`), { code: 'SYNC_STATE_INVALID' });
+  }
+  return state;
 };
 
 const saveState = async (file, state) => {
   await mkdir(resolve(file, '..'), { recursive: true });
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  await rename(temporary, file);
+  try {
+    await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 };
 
 const directorySize = async (directory) => {
@@ -575,16 +652,19 @@ const directorySize = async (directory) => {
 
 const pruneShardCache = async (cacheDir, shard, keepFile) => {
   const directory = resolve(cacheDir, 'normalized');
+  const keepPaths = new Set([resolve(keepFile), `${resolve(keepFile)}.complete`]);
   let entries;
-  try { entries = await readdir(directory); } catch { return; }
+  try { entries = await readdir(directory); }
+  catch (error) { if (error?.code === 'ENOENT') return; throw error; }
   await Promise.all(entries
-    .filter((name) => name.startsWith(`${shard.id}-`) && resolve(directory, name) !== resolve(keepFile))
+    .filter((name) => name.startsWith(`${shard.id}-`) && !keepPaths.has(resolve(directory, name)))
     .map((name) => rm(resolve(directory, name), { force: true })));
 };
 
 const prioritizeCachedShards = async (shards, cacheDir) => {
   let entries;
-  try { entries = await readdir(resolve(cacheDir, 'normalized')); } catch { return shards; }
+  try { entries = await readdir(resolve(cacheDir, 'normalized')); }
+  catch (error) { if (error?.code === 'ENOENT') return shards; throw error; }
   return shards.map((shard, index) => ({
     shard,
     index,
@@ -603,6 +683,7 @@ const selectShards = (catalog, requested) => {
 };
 
 export const runAddressEtl = async ({
+  fetchImpl = fetch,
   database: providedDatabase,
   environment = process.env,
   cacheDir = process.env.ADDRESS_SYNC_CACHE_DIR || defaultCacheDir,
@@ -675,6 +756,7 @@ export const runAddressEtl = async ({
     database,
     normalizeRecord: normalizeSourceRecord,
     localizeRecords: (records, options = {}) => localizeRecords(records, {
+      database, environment, fetchImpl, brokerClient: credentialBrokerClient || undefined,
       cache: new PostgresTranslationCache(database),
       signal: options.signal
     }),
@@ -731,6 +813,7 @@ export const runAddressEtl = async ({
   const failureReport = (task, error) => {
     const errorCode = error?.code || (estimate ? 'SOURCE_ESTIMATE_FAILED' : 'SYNC_FAILED');
     const qualityFailure = errorCode === 'SOURCE_QUALITY_FAILED' || errorCode === 'SNAPSHOT_QUALITY_FAILED';
+    const partial = error?.sourceComplete === false;
     return {
       ...task.previous,
       shardId: task.shard.id,
@@ -750,11 +833,13 @@ export const runAddressEtl = async ({
       rejectionReasons: qualityFailure
         ? error?.rejectionReasons || error?.metrics?.rejectionReasons || task.previous?.rejectionReasons || {}
         : null,
-      metrics: qualityFailure ? error?.metrics || task.previous?.metrics || null : null,
+      metrics: qualityFailure || partial ? error?.metrics || task.previous?.metrics || null : null,
+      checkpointStage: partial ? error?.checkpointStage || task.previous?.checkpointStage || null : null,
+      nextAttemptAt: partial ? error?.nextAttemptAt || task.previous?.nextAttemptAt || null : null,
       errorUrl: error?.url || null,
       errorStatus: error?.status ?? null,
       sourceComplete: error?.sourceComplete !== false,
-      checkpointToken: error?.checkpointToken || null
+      checkpointToken: error?.checkpointToken || task.previous?.checkpointToken || null
     };
   };
   const recordFailure = async (task, error) => {
@@ -980,7 +1065,7 @@ export const runAddressEtl = async ({
           return { ...task, materialized };
         } catch (error) { return { ...task, error }; }
       });
-      await adapters.cleanupSharedRaw?.().catch(() => {});
+      await adapters.cleanupSharedRaw?.();
       for (const task of preparedWave) await importPreparedTask(task);
     }
     if (database && activeRun && !providedImporter) {

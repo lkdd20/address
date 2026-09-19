@@ -1,140 +1,85 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
+import { describe, expect, it, vi } from 'vitest';
+import { pendingTranslationFields, runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
+import { translateNumberedValues, translateValues, usableTranslation } from '../server/sync/address-etl.mjs';
+import { preservesAddressIdentifiers, preservesAddressNumbers } from '../src/domain/address-localization.mjs';
 
-const makeRow = (rid, overrides = {}) => ({
-  rid,
-  id: `addr-${rid}`,
-  country_code: 'RU',
-  native_language: 'ru',
-  component_variants_json: JSON.stringify({
-    native: { street: 'Тверская улица', locality: 'Москва', houseNumber: '7' },
-    en: { street: 'Тверская улица', locality: 'Москва', houseNumber: '7' },
-    'zh-CN': { street: 'Тверская улица', locality: 'Москва', houseNumber: '7' }
-  }),
-  ...overrides
-});
-
-const japaneseRow = (rid) => makeRow(rid, {
-  country_code: 'JP',
-  native_language: 'ja',
-  component_variants_json: JSON.stringify({
-    native: { street: '大字縄生', admin1: '三重県', houseNumber: '771-6' },
-    en: { street: '大字縄生', admin1: '三重県', houseNumber: '771-6' },
-    'zh-CN': { street: '大字縄生', admin1: '三重県', houseNumber: '771-6' }
-  })
-});
-
-const buildDb = (rows, updates, queries = []) => ({
-  prepare(sql) {
-    queries.push(sql);
-    const statement = {
-      _args: [],
-      bind(...args) { statement._args = args; return statement; },
-      async all() {
-        if (sql.includes('FROM address_pool WHERE active')) {
-          const cursor = String(statement._args[0] || '');
-          return { results: rows.filter((row) => row.id > cursor) };
-        }
-        return { results: [] };
-      },
-      async run() {
-        if (sql.startsWith('UPDATE address_pool')) updates.push({ id: statement._args[1], json: statement._args[0] });
-        return { success: true };
-      },
-      async first() { return null; }
-    };
-    return statement;
-  },
-  async batch() { return []; }
-});
-
-const translator = (map) => vi.fn(async (url) => {
-  const target = new URL(url).searchParams.get('tl');
-  const query = new URL(url).searchParams.get('q') || '';
-  const segments = query.split('\n[[[ADDRESS_COMPONENT_BOUNDARY]]]\n');
-  const translated = segments.map((value) => map[target]?.get(value.trim()) || value.trim());
-  return { ok: true, json: async () => [[[translated.join('\n[[[ADDRESS_COMPONENT_BOUNDARY]]]\n')]]] };
-});
-
-afterEach(() => vi.restoreAllMocks());
-
-describe('translation backfill worker', () => {
-  it('is inert when disabled', async () => {
-    const result = await runTranslationBackfillBatch({ database: buildDb([], []), environment: {} });
-    expect(result).toEqual({ scanned: 0, updated: 0, done: true });
+describe('bounded translation backfill', () => {
+  it('repairs numeric translations without sending ordinal and mixed identifiers to providers', async () => {
+    const translate = vi.fn(async (values) => values.map((value) => ({ West: '西', Street: '街', Block: '栋', 'Rue du': '街', Mai: '五月' })[value]));
+    const originals = ['West 23rd Street', 'Block D1-12', 'Rue du 8 Mai 1945'];
+    const result = await translateNumberedValues(originals, 'zh-CN', {}, vi.fn(), null, undefined,
+      { translationChain: [{ translate }] });
+    expect([...result.keys()]).toEqual(originals);
+    expect(translate.mock.calls[0][0]).toEqual(['West', 'Street', 'Block', 'Rue du', 'Mai']);
+    expect(result.get('West 23rd Street')).toBe('西 23rd 街');
+    expect(result.get('Block D1-12')).toBe('栋 D1-12');
+    expect(result.get('Rue du 8 Mai 1945')).toBe('街 8 五月 1945');
+  });
+  it('preserves contextual ordinals, leading zeros and unchanged route identifiers', () => {
+    expect(preservesAddressNumbers('二丁目', '三丁目')).toBe(false);
+    expect(preservesAddressNumbers('二丁目', '2-chome')).toBe(true);
+    expect(preservesAddressNumbers('二丁目', '999-chome')).toBe(false);
+    expect(preservesAddressNumbers('〇一号', '1号')).toBe(false);
+    expect(preservesAddressNumbers('First Avenue', '第一大道')).toBe(true);
+    expect(usableTranslation('BR-101', 'zh-CN', 'BR-101')).toBe(true);
+    expect(usableTranslation('BR-102', 'zh-CN', 'BR-101')).toBe(false);
+  });
+  it.each([
+    ['ซอย ๑๒', 'Soi 12', 'en'],
+    ['شارع ١٢', 'Street 12', 'en'],
+    ['通り １２', 'Road 12', 'en']
+  ])('accepts equivalent decimal scripts without accepting changed identifiers: %s', (original, translated, language) => {
+    expect(usableTranslation(translated, language, original)).toBe(true);
+    expect(usableTranslation(translated.replace('12', '21'), language, original)).toBe(false);
+    expect(usableTranslation(translated.replace('12', '012'), language, original)).toBe(false);
   });
 
-  it('fills en/zh translations including Japanese kanji rows', async () => {
-    const updates = [];
-    const db = buildDb([makeRow(1), japaneseRow(2)], updates);
-    const fetchImpl = translator({
-      en: new Map([['Тверская улица', 'Tverskaya Street'], ['Москва', 'Moscow'], ['大字縄生', 'Oaza Nawao'], ['三重県', 'Mie Prefecture']]),
-      'zh-CN': new Map([['Тверская улица', '特维尔街'], ['Москва', '莫斯科'], ['大字縄生', '大字绳生'], ['三重県', '三重县']])
-    });
-    const environment = { TRANSLATION_BACKFILL_ENABLED: 'true' };
-    const result = await runTranslationBackfillBatch({ database: db, environment, fetchImpl });
-    expect(result.updated).toBe(2);
-    const russian = JSON.parse(updates.find((entry) => entry.id === 'addr-1').json);
-    expect(russian.en.street).toBe('Tverskaya Street');
-    expect(russian['zh-CN'].street).toBe('特维尔街');
-    const japanese = JSON.parse(updates.find((entry) => entry.id === 'addr-2').json);
-    expect(japanese.en.admin1).toBe('Mie Prefecture');
-    expect(japanese['zh-CN'].admin1).toBe('三重县');
-    expect(japanese.native.admin1).toBe('三重県');
-
-    // Second pass over the same (now translated) data finds nothing left to do.
-    const again = await runTranslationBackfillBatch({
-      database: buildDb([
-        makeRow(1, { component_variants_json: updates.find((entry) => entry.id === 'addr-1').json }),
-        japaneseRow(2)
-      ], []),
-      environment,
-      fetchImpl
-    });
-    expect(again.updated).toBeGreaterThanOrEqual(0);
+  it('preserves mixed letter-number address identifiers', () => {
+    expect(preservesAddressIdentifiers('Block D1-12', 'Block D1-12')).toBe(true);
+    expect(preservesAddressIdentifiers('Block D1-12', 'Block D1-21')).toBe(false);
+    expect(preservesAddressIdentifiers('SW1A 1AA', 'SW1A 1AA')).toBe(true);
+    expect(preservesAddressIdentifiers('SW1A 1AA', 'SW1A 1AB')).toBe(false);
   });
 
-  it('scans English-native rows whose stored Chinese variant is still English', async () => {
-    const updates = [];
-    const queries = [];
-    const native = { street: 'Main Street', locality: 'Toronto', houseNumber: '10' };
-    const row = makeRow(3, {
-      country_code: 'CA', native_language: 'en',
-      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': native })
-    });
-    const result = await runTranslationBackfillBatch({
-      database: buildDb([row], updates, queries),
-      environment: { TRANSLATION_BACKFILL_ENABLED: 'true' },
-      fetchImpl: translator({ 'zh-CN': new Map([['Main Street', '主街'], ['Toronto', '多伦多']]) })
-    });
-
-    expect(queries.find((sql) => sql.includes('FROM address_pool WHERE active')))
-      .not.toContain("native_language NOT LIKE 'en%'");
-    expect(result.updated).toBe(1);
-    expect(JSON.parse(updates[0].json)['zh-CN']).toMatchObject({ street: '主街', locality: '多伦多' });
-    expect(queries.find((sql) => sql.startsWith('UPDATE address_pool'))).not.toContain('last_seen_at');
-    expect(queries.some((sql) => sql.includes('address_pool_revisions'))).toBe(true);
+  it('does not read settings or send requests when explicitly disabled', async () => {
+    const database = { prepare: vi.fn() };
+    const setTimer = vi.fn();
+    const environment = { TRANSLATION_BACKFILL_ENABLED: 'false' };
+    expect(await runTranslationBackfillBatch({ database, environment })).toEqual({ scanned: 0, updated: 0, done: true });
+    await startTranslationBackfill({ database, workerPool: {}, environment, setTimer })();
+    expect(database.prepare).not.toHaveBeenCalled();
+    expect(setTimer).not.toHaveBeenCalled();
   });
 
-  it('continues bounded backfill batches while an address sync job is running', async () => {
-    const updates = [];
-    const native = { street: 'Main Street', locality: 'Toronto', houseNumber: '10' };
-    const row = makeRow(4, {
-      country_code: 'CA', native_language: 'en',
-      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': native })
-    });
-    let tick;
-    const stop = startTranslationBackfill({
-      database: buildDb([row], updates),
-      environment: { TRANSLATION_BACKFILL_ENABLED: 'true' },
-      isBusy: () => true,
-      intervalMs: 1,
-      setTimer: (callback) => { tick = callback; return { unref() {} }; }
-    });
-    vi.stubGlobal('fetch', translator({ 'zh-CN': new Map([['Main Street', '主街'], ['Toronto', '多伦多']]) }));
+  it('finds missing fields, Japanese Han and mixed scripts without translating identifiers', () => {
+    const native = { admin1: '\u4e09\u91cd\u770c', street: '\u5927\u5b57\u7e04\u751f',
+      dependentLocality: '\u4e09\u91cd', unit: 'A-21', houseNumber: '771-6', postcode: '510-8101' };
+    const result = pendingTranslationFields({ native, en: {}, 'zh-CN': native }, 'ja');
+    expect(result.en.sort()).toEqual(['admin1', 'dependentLocality', 'street']);
+    expect(result['zh-CN'].sort()).toEqual(['admin1', 'dependentLocality', 'street']);
+    expect(usableTranslation('\u4e3b\u8857 \u0627\u0644', 'zh-CN', 'Main Street')).toBe(false);
+    expect(usableTranslation('\u4e3b\u8857 22', 'zh-CN', 'Main Street 21')).toBe(false);
+    expect(usableTranslation('Main Street', 'zh-CN', 'Main Street')).toBe(false);
+  });
 
-    await tick();
-    stop();
-    expect(updates).toHaveLength(1);
+  it('uses validated cache hits and falls back only for unresolved values', async () => {
+    const cache = { get: vi.fn(async () => new Map([['Main Street', '\u4e3b\u8857']])), set: vi.fn() };
+    const google = vi.fn(async () => ['\u9053\u8def 21']);
+    const youdao = vi.fn(async () => ['Road 22']);
+    const result = await translateValues(['Main Street', 'Road 21', 'Road 21'], 'zh-CN', {}, vi.fn(), cache,
+      new AbortController().signal, { google, youdao });
+    expect(result.get('Road 21')).toBe('\u9053\u8def 21');
+    expect(google.mock.calls[0][0]).toEqual(['Road 21']);
+    expect(youdao.mock.calls[0][0]).toEqual(['Road 21']);
+    expect(youdao.mock.invocationCallOrder[0]).toBeLessThan(google.mock.invocationCallOrder[0]);
+    expect(cache.set).toHaveBeenCalledOnce();
+  });
+
+  it('does not cache failed or digit-changing translations', async () => {
+    const cache = { get: async () => new Map(), set: vi.fn() };
+    const result = await translateValues(['Road 21'], 'zh-CN', {}, vi.fn(), cache, undefined,
+      { google: async () => ['\u9053\u8def 22'], youdao: async () => null });
+    expect(result.get('Road 21')).toBe('Road 21');
+    expect(cache.set).not.toHaveBeenCalled();
   });
 });

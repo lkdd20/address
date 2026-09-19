@@ -38,7 +38,7 @@ describe('Spanish Catastro INSPIRE adapter', () => {
       if (init.method === 'HEAD') return new Response(null, { status: 200, headers: {
         'content-length': '1024', 'last-modified': 'Sat, 21 Feb 2026 00:00:00 GMT', etag: '"fixture"'
       } });
-      return new Response(new Uint8Array([80, 75, 3, 4]), { status: 200, headers: { 'content-length': '4' } });
+      return new Response(new Uint8Array(1024), { status: 200, headers: { 'content-length': '1024' } });
     };
     const execute = async ({ args, phase }) => {
       calls.push({ args, phase });

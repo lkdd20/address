@@ -6,6 +6,7 @@ import {
   validateAdministrativeHierarchy
 } from '../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
+import { streetAddressKey } from '../../src/domain/address-quality.mjs';
 
 const aliases = {
   countryCode: ['country_code', 'country', 'iso_country_code'],
@@ -17,6 +18,7 @@ const aliases = {
   postcode: ['postcode', 'postal_code', 'zip', 'zip_code'],
   street: ['street', 'road', 'street_name'],
   houseNumber: ['house_number', 'number', 'street_number'],
+  matchLevel: ['match_level'],
   buildingName: ['building_name', 'building'],
   latitude: ['latitude', 'lat'],
   longitude: ['longitude', 'lon', 'lng'],
@@ -266,6 +268,7 @@ export const normalizeAddress = (row, defaults = {}) => {
     postcode: value('postcode'),
     street: value('street'),
     houseNumber: value('houseNumber'),
+    matchLevel: value('matchLevel', 'premise'),
     buildingName: value('buildingName'),
     latitude: latitude === '' ? Number.NaN : Number(latitude),
     longitude: longitude === '' ? Number.NaN : Number(longitude),
@@ -286,7 +289,8 @@ export const normalizeAddress = (row, defaults = {}) => {
     street: address.street,
     propertyType: address.propertyType
   });
-  if (exclusion.excluded) {
+  if ((address.countryCode === 'CN' || address.residentialEvidence
+    || ['residential', 'apartment'].includes(address.propertyType)) && exclusion.excluded) {
     errors.push(`non-residential:${exclusion.category}:${exclusion.field}:${exclusion.term}`);
   }
   const hierarchy = validateAdministrativeHierarchy(address);
@@ -299,7 +303,13 @@ export const normalizeAddress = (row, defaults = {}) => {
   if (!Number.isFinite(address.latitude) || address.latitude < -90 || address.latitude > 90) errors.push('latitude is outside [-90, 90]');
   if (!Number.isFinite(address.longitude) || address.longitude < -180 || address.longitude > 180) errors.push('longitude is outside [-180, 180]');
   if (!address.street) errors.push('street is required');
-  if (!address.houseNumber) errors.push('house_number is required');
+  const streetLevel = address.countryCode !== 'CN' && address.matchLevel === 'street';
+  if (!['street', 'premise', 'subpremise'].includes(address.matchLevel)
+    || (address.matchLevel === 'street' && !streetLevel)) errors.push('invalid match_level');
+  if (streetLevel && (address.houseNumber || address.buildingName || address.residentialEvidence || address.propertyType !== 'unknown')) {
+    errors.push('street records cannot include premise fields or residential claims');
+  }
+  if (!streetLevel && !address.houseNumber) errors.push('house_number is required');
   if (!address.sourceId) errors.push('source_id is required');
   if (!address.sourceName) errors.push('source_name is required');
   if (!address.sourceUrl || !validUrl(address.sourceUrl)) errors.push('source_url must be an HTTP(S) URL');
@@ -323,7 +333,7 @@ export const normalizeAddress = (row, defaults = {}) => {
     Number.isFinite(address.latitude) ? address.latitude.toFixed(7) : '',
     Number.isFinite(address.longitude) ? address.longitude.toFixed(7) : ''
   ].join('\u001F');
-  const digest = createHash('sha256').update(canonical).digest('hex');
+  const digest = createHash('sha256').update(streetLevel ? streetAddressKey(address.countryCode, address) : canonical).digest('hex');
   return {
     address: { ...address, id: `addr_${digest.slice(0, 32)}`, randomKey: Number.parseInt(digest.slice(32, 40), 16) & 0x7fffffff },
     errors
@@ -362,6 +372,7 @@ const localizedComponentColumns = [
 ];
 
 const chinaPostcodePattern = /(?:邮(?:政)?编码|郵(?:政)?編碼|邮编|郵編|post(?:al)?\s*code|zip(?:\s*code)?)[^\p{L}\p{N}]*\d{6}|\b\d{6}\b/iu;
+const chinaPostcodeValue = /^\d{6}$/u;
 const addressLanguages = ['native', 'en', 'zh-CN'];
 const requiredComponentFields = ['houseNumber', 'street', 'locality', 'postcode'];
 const languageColumn = (language) => language === 'zh-CN' ? 'zh_cn' : language;
@@ -402,15 +413,13 @@ export const validateLocalizedAddressVariants = (countryCode, componentVariants,
   }
   for (const language of addressLanguages) {
     const address = addressVariants?.[language];
-    if (chinaPostcodePattern.test(comparableText(address))) {
-      errors.push(`address_${languageColumn(language)} must not contain a postcode for CN`);
-    }
     const components = componentVariants?.[language];
-    if (localizedObject(components) && Object.entries(components).some(([field, value]) => (
-      field === 'postcode'
-        ? clean(value) !== ''
-        : chinaPostcodePattern.test(comparableText(value))
-    ))) errors.push(`componentVariants.${language} must not contain a postcode for CN`);
+    if (!chinaPostcodePattern.test(comparableText(address))) {
+      errors.push(`address_${languageColumn(language)} must contain a six-digit postcode for CN`);
+    }
+    if (!localizedObject(components) || !chinaPostcodeValue.test(clean(components.postcode))) {
+      errors.push(`componentVariants.${language}.postcode must be a six-digit string for CN`);
+    }
   }
   return errors;
 };
@@ -445,10 +454,7 @@ export const localizedAddressData = (row, address) => {
     en: localizedComponents('en'),
     'zh-CN': localizedComponents('zh_cn')
   };
-  if (address.countryCode === 'CN') {
-    for (const components of Object.values(componentVariants)) components.postcode = '';
-    componentVariants.en.houseNumber = componentVariants.en.houseNumber.replace(/(?:号|號)$/u, '');
-  }
+  if (address.countryCode === 'CN') componentVariants.en.houseNumber = componentVariants.en.houseNumber.replace(/(?:号|號)$/u, '');
   errors.push(...validateLocalizedAddressVariants(address.countryCode, componentVariants, addressVariants));
 
   return {
@@ -506,7 +512,7 @@ export const addressV2SqlValues = (address, manifest, importedAt) => {
     normalizeAddressKey(address.postalLocality), normalizeAddressKey(address.district), postcodeKey(address.postcode),
     address.propertyType, manifest.defaults.qualityScore, manifest.defaults.generation,
     coverageKey(address, manifest.defaults.coveragePrefix), address.randomKey, 1, importedAt, importedAt,
-    manifest.defaults.expiresAt, null
+    manifest.defaults.expiresAt, null, address.matchLevel || (componentVariants.native.unit ? 'subpremise' : 'premise')
   ];
 };
 
@@ -515,5 +521,5 @@ export const addressV2Columns = [
   'house_number', 'building_name', 'latitude', 'longitude', 'native_language', 'component_variants_json',
   'address_variants_json', 'admin1_key', 'admin1_code_key', 'locality_key', 'postal_locality_key', 'district_key',
   'postcode_key', 'property_type', 'quality_score', 'generation', 'coverage', 'random_key', 'active', 'first_seen_at',
-  'last_seen_at', 'expires_at', 'retired_at'
+  'last_seen_at', 'expires_at', 'retired_at', 'match_level'
 ];

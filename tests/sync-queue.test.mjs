@@ -656,6 +656,18 @@ describe('PostgreSQL queue state', () => {
     database.close();
   });
 
+  it('does not delete or ignore a corrupt legacy queue state file', async () => {
+    const database = openTestDatabase();
+    const directory = stateDir();
+    const legacyFile = resolve(directory, 'queue-state.json');
+    await mkdir(directory, { recursive: true });
+    await writeFile(legacyFile, '{"countries":');
+    const store = new PostgresQueueStateStore(database, legacyFile);
+    await expect(store.load()).rejects.toMatchObject({ code: 'QUEUE_STATE_INVALID' });
+    expect(await readFile(legacyFile, 'utf8')).toBe('{"countries":');
+    database.close();
+  });
+
   it('clears one exact source without unlocking the other sources in its country', async () => {
     const database = openTestDatabase();
     const store = new PostgresQueueStateStore(database, resolve(stateDir(), 'queue-state.json'));
@@ -1789,6 +1801,15 @@ describe('queue state store', () => {
     expect((await reloaded.load()).countries.NG).toMatchObject({ latched: true, fingerprint: 'fp-ng' });
     await reloaded.apply('NG', { action: 'requeue' }, '2026-08-02T01:00:00Z');
     expect((await store.load()).countries.NG).toBeUndefined();
+  });
+
+  it('fails closed instead of treating a corrupt queue state file as empty', async () => {
+    const directory = stateDir();
+    await mkdir(directory, { recursive: true });
+    const file = resolve(directory, 'queue-state.json');
+    await writeFile(file, '{"schemaVersion":1,');
+    await expect(new QueueStateStore(file).load()).rejects.toMatchObject({ code: 'QUEUE_STATE_INVALID' });
+    expect(await readFile(file, 'utf8')).toBe('{"schemaVersion":1,');
   });
 });
 

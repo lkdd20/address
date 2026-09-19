@@ -7,6 +7,11 @@ describe('PostgreSQL production readiness', () => {
     expect(source).toContain("openPostgresDatabase({ migrate: false })");
     expect(source).toContain('pg_database_size(current_database())');
     expect(source).toContain("table_schema='address'");
+    expect(source).toContain('address_generation_index');
+    expect(source).toContain('COUNT(DISTINCT address_id)');
+    expect(source).toContain("country === 'CN'");
+    expect(source).toContain("chinaCommunityPublicationClause('community')");
+    expect(source).toContain("country === 'CN' && residential === 0");
     expect(source).toContain('has no active residential addresses');
     expect(source).toContain('synchronization failures');
     expect(source).not.toMatch(/node:sqlite|PRAGMA|sqlite_master/iu);

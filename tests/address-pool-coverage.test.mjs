@@ -44,15 +44,15 @@ describe('address pool coverage slots', () => {
     });
   });
 
-  it('enforces China English-script and no-postcode presentation at the v2 import gate', () => {
+  it('enforces China English-script and postcode presentation at the v2 import gate', () => {
     const china = {
       countryCode: 'CN', admin1: '河北省', admin1Code: '13', locality: '唐山市', postalLocality: '唐山市',
       district: '丰润区', postcode: '064000', street: '文化路', houseNumber: '30号', buildingName: '光明小区'
     };
     const valid = {
-      address_native: '中国河北省唐山市丰润区文化路30号光明小区',
-      address_en: 'Guangming Residential Community, 30 Wenhua Road, Fengrun District, Tangshan City, Hebei Province, China',
-      address_zh_cn: '中国河北省唐山市丰润区文化路30号光明小区',
+      address_native: '中国河北省唐山市丰润区文化路30号光明小区 邮编064000',
+      address_en: 'Guangming Residential Community, 30 Wenhua Road, Fengrun District, Tangshan City, Hebei Province, 064000, China',
+      address_zh_cn: '中国河北省唐山市丰润区文化路30号光明小区 邮编064000',
       admin1_en: 'Hebei Province', locality_en: 'Tangshan City', postal_locality_en: 'Tangshan City',
       district_en: 'Fengrun District', street_en: 'Wenhua Road', building_name_en: 'Guangming Residential Community',
       admin1_zh_cn: '河北省', locality_zh_cn: '唐山市', postal_locality_zh_cn: '唐山市',
@@ -60,20 +60,18 @@ describe('address pool coverage slots', () => {
     };
     const accepted = localizedAddressData(valid, china);
     expect(accepted.errors).toEqual([]);
-    expect(Object.values(accepted.localized.componentVariants).every((components) => components.postcode === '')).toBe(true);
+    expect(Object.values(accepted.localized.componentVariants).every((components) => components.postcode === '064000')).toBe(true);
     expect(accepted.localized.componentVariants.en.houseNumber).toBe('30');
     expect(JSON.stringify(accepted.localized.componentVariants.en)).not.toMatch(/\p{Script=Han}/u);
 
     expect(localizedAddressData({
       ...valid,
-      address_native: `${valid.address_native} 邮编064000`,
+      address_native: valid.address_native,
       address_en: '光明小区, 30 Wenhua Road, Tangshan, postal code 064000',
       building_name_en: '光明小区'
     }, china).errors).toEqual(expect.arrayContaining([
       'address_en must not contain Han characters for CN',
       'English components must not contain Han characters for CN',
-      'address_native must not contain a postcode for CN',
-      'address_en must not contain a postcode for CN'
     ]));
   });
 
@@ -103,29 +101,30 @@ describe('address pool coverage slots', () => {
     );
   });
 
-  it('normalizes full-width digits before checking persisted China postcodes', () => {
-    const components = { native: { street: '文化路' }, en: { street: 'Wenhua Road' }, 'zh-CN': { street: '文化路' } };
-    const addresses = { native: '河北省唐山市文化路30号 ０６４０００', en: '30 Wenhua Road, Tangshan, China', 'zh-CN': '河北省唐山市文化路30号' };
+  it('requires a six-digit postcode in every persisted China variant', () => {
+    const components = {
+      native: { houseNumber: '30号', street: '文化路', locality: '唐山市', postcode: '064000' },
+      en: { houseNumber: '30', street: 'Wenhua Road', locality: 'Tangshan City', postcode: '064000' },
+      'zh-CN': { houseNumber: '30号', street: '文化路', locality: '唐山市', postcode: '064000' }
+    };
+    const addresses = { native: '河北省唐山市文化路30号 064000', en: '30 Wenhua Road, Tangshan, 064000, China', 'zh-CN': '河北省唐山市文化路30号 064000' };
+    expect(validateLocalizedAddressVariants('CN', components, addresses)).toEqual([]);
+  });
+
+  it.each(['native', 'en', 'zh-CN'])('rejects a missing postcode in the persisted China %s address', (language) => {
+    const components = { native: {}, en: {}, 'zh-CN': {} };
+    const addresses = { native: '河北省唐山市文化路30号', en: '30 Wenhua Road, Tangshan, China', 'zh-CN': '河北省唐山市文化路30号' };
     expect(validateLocalizedAddressVariants('CN', components, addresses)).toContain(
-      'address_native must not contain a postcode for CN'
+      `address_${language === 'zh-CN' ? 'zh_cn' : language} must contain a six-digit postcode for CN`
     );
   });
 
-  it.each(['native', 'en', 'zh-CN'])('rejects a postcode in the persisted China %s address', (language) => {
+  it.each(['native', 'en', 'zh-CN'])('rejects a malformed postcode in the persisted China %s components', (language) => {
     const components = { native: {}, en: {}, 'zh-CN': {} };
-    const addresses = { native: '河北省唐山市文化路30号', en: '30 Wenhua Road, Tangshan, China', 'zh-CN': '河北省唐山市文化路30号' };
-    addresses[language] += ' 064000';
+    components[language].postcode = '64000';
+    const addresses = { native: '河北省唐山市文化路30号 064000', en: '30 Wenhua Road, Tangshan, 064000, China', 'zh-CN': '河北省唐山市文化路30号 064000' };
     expect(validateLocalizedAddressVariants('CN', components, addresses)).toContain(
-      `address_${language === 'zh-CN' ? 'zh_cn' : language} must not contain a postcode for CN`
-    );
-  });
-
-  it.each(['native', 'en', 'zh-CN'])('rejects a postcode in the persisted China %s components', (language) => {
-    const components = { native: {}, en: {}, 'zh-CN': {} };
-    components[language].postcode = '064000';
-    const addresses = { native: '河北省唐山市文化路30号', en: '30 Wenhua Road, Tangshan, China', 'zh-CN': '河北省唐山市文化路30号' };
-    expect(validateLocalizedAddressVariants('CN', components, addresses)).toContain(
-      `componentVariants.${language} must not contain a postcode for CN`
+      `componentVariants.${language}.postcode must be a six-digit string for CN`
     );
   });
 });

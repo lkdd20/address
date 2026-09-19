@@ -22,6 +22,7 @@ export type CountryGroup =
 export type Readiness = 'strict' | 'partial' | 'research';
 export type PropertyType = 'residential' | 'apartment' | 'commercial' | 'mixed' | 'unknown';
 export type UnitStatus = 'verified' | 'building_only' | 'not_present' | 'unknown';
+export type AddressMatchLevel = 'street' | 'premise' | 'subpremise';
 
 export interface SourceDefinition {
   id: string;
@@ -174,7 +175,7 @@ export interface VerifiedAddress {
   propertyType: PropertyType;
   unitStatus: UnitStatus;
   unitProvenance?: 'official' | 'source_tagged' | 'synthetic' | 'none';
-  matchLevel: 'premise' | 'subpremise';
+  matchLevel: AddressMatchLevel;
   verificationLevel: 'L1' | 'L2' | 'L3';
   sourceVersion: string;
   sourceUpdatedAt: string;

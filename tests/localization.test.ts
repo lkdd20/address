@@ -65,9 +65,9 @@ describe('complete address localization', () => {
       postcode: '513400'
     });
     expect(result.formattedAddress).toBe(
-      'Xinhua Residential Community, 95 Lianzhou Avenue, Lianzhou Town, Lianzhou City, Qingyuan City, Guangdong Province, CHINA'
+      'Xinhua Residential Community, 95 Lianzhou Avenue, Lianzhou Town, Lianzhou City, Qingyuan City, Guangdong Province, 513400, CHINA'
     );
-    expect(result.formattedAddress).not.toContain('513400');
+    expect(result.formattedAddress).toContain('513400');
     expect(result.formattedAddress).not.toMatch(/[\u3400-\u9fff]/u);
   });
 
@@ -155,7 +155,7 @@ describe('complete address localization', () => {
     expect(result.componentVariants.en).toMatchObject({
       street: 'Fuzhong 3rd Road', locality: 'Shenzhen City', district: 'Futian District', admin1: 'Guangdong Province'
     });
-    expect(result.formattedAddress).toContain('Futian District, Shenzhen City, Guangdong Province, CHINA');
+    expect(result.formattedAddress).toContain('Futian District, Shenzhen City, Guangdong Province, 518000, CHINA');
   });
 
   it('builds native Japanese, English and Simplified Chinese from localized components', async () => {

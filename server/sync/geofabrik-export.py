@@ -10,7 +10,7 @@ from html.parser import HTMLParser
 import osmium
 from osmium.filter import KeyFilter
 from shapely import contains_xy, intersects_xy, prepare
-from shapely.geometry import LineString, shape
+from shapely.geometry import LineString, Polygon, shape
 from shapely.ops import unary_union
 from vietnam_postcodes import VietnamPostcodes
 
@@ -23,6 +23,10 @@ RESIDENTIAL_BUILDINGS = {
 NON_RESIDENTIAL_POI_KEYS = {
     "amenity", "craft", "healthcare", "industrial", "leisure", "military",
     "office", "public_transport", "shop", "tourism"
+}
+STREET_HIGHWAYS = {
+    "primary", "secondary", "tertiary", "unclassified", "residential",
+    "living_street", "service", "pedestrian", "road"
 }
 
 
@@ -165,7 +169,7 @@ def boundary_from_geojson(path):
 
 
 class AddressSampler:
-    def __init__(self, max_records, per_locality, boundary, exclude_boundary=None, postcodes=None):
+    def __init__(self, max_records, per_locality, boundary, exclude_boundary=None, postcodes=None, country=""):
         self.max_records = max_records
         self.per_locality = per_locality
         self.maximum_groups = min(max_records, max(1, math.ceil(max_records / 10)))
@@ -174,6 +178,8 @@ class AddressSampler:
         self.boundary = boundary
         self.exclude_boundary = exclude_boundary
         self.postcodes = postcodes
+        self.country = country
+        self.seen_streets = set()
         self.groups = {}
         self.group_heap = []
         self.residential = []
@@ -186,25 +192,44 @@ class AddressSampler:
         return self.boundary.contains(longitude, latitude)
 
     def capture(self, object_type, object_id, tags, longitude, latitude, residential_building=None):
-        if self.postcodes:
+        street_level = tags.get("match_level") == "street" and self.country != "CN"
+        if tags.get("match_level") == "street" and not street_level:
+            return
+        if self.postcodes and not street_level:
             postcode = self.postcodes.resolve(tags)
             if postcode:
                 tags = {**tags, "addr:postcode": postcode}
         house_number = tags.get("addr:housenumber", "").strip()
         street = (tags.get("addr:street") or tags.get("addr:place") or "").strip()
-        if not house_number or not street:
+        if (not house_number and not street_level) or not street:
             return
-        if has_non_residential_poi(tags):
-            return
+        non_residential = has_non_residential_poi(tags)
+        if non_residential:
+            residential_building = None
         if not self.inside_boundary(longitude, latitude):
             return
         locality = next((tags.get(key, "").strip() for key in (
             "addr:city", "addr:town", "addr:village", "addr:municipality", "addr:place", "addr:postcode"
         ) if tags.get(key, "").strip()), "")
+        if street_level:
+            locality = next((tags.get(key, "").strip() for key in (
+                "addr:city", "addr:town", "addr:village", "addr:municipality"
+            ) if tags.get(key, "").strip()), "")
+            if not locality and self.country != "SG":
+                return
+            identity = tuple(str(value).strip().casefold() for value in (
+                self.country, tags.get("addr:state") or tags.get("addr:province"), locality,
+                tags.get("addr:district") or tags.get("addr:suburb") or tags.get("addr:county"), street
+            ))
+            if identity in self.seen_streets:
+                return
+            self.seen_streets.add(identity)
         record_id = f"{object_type}/{object_id}"
         record_rank = rank(record_id)
         building = tags.get("building", "").strip().casefold()
-        is_residential = building in RESIDENTIAL_BUILDINGS or residential_building is not None
+        is_residential = not street_level and not non_residential and (
+            building in RESIDENTIAL_BUILDINGS or residential_building is not None
+        )
         group_key = locality.casefold() if locality else f"grid:{math.floor(longitude * 10)}:{math.floor(latitude * 10)}"
         group = self.groups.get(group_key)
         if group is None:
@@ -237,6 +262,12 @@ class AddressSampler:
         ):
             if key in tags:
                 properties[key] = tags[key]
+        if street_level:
+            properties["match_level"] = "street"
+            for key in ("addr:housenumber", "addr:postcode", "addr:unit", "addr:flats", "name", "building"):
+                properties.pop(key, None)
+        elif non_residential:
+            properties.pop("building", None)
         if residential_building is not None:
             properties.pop("name", None)
             properties["residential_building_id"] = residential_building[0]
@@ -270,15 +301,26 @@ class AddressSampler:
 
     def way(self, way, tags=None):
         tags = tags or {tag.k: tag.v for tag in way.tags}
-        if not tags.get("addr:housenumber") or not (tags.get("addr:street") or tags.get("addr:place")):
+        street_level = not tags.get("addr:housenumber") and tags.get("highway") in STREET_HIGHWAYS \
+            and tags.get("name", "").strip() and self.country != "CN"
+        if not street_level and (not tags.get("addr:housenumber") or not (tags.get("addr:street") or tags.get("addr:place"))):
             return
-        locations = [node.location for node in way.nodes if node.location.valid()]
-        if not locations:
+        locations = [node.location for node in way.nodes]
+        if len(locations) < 2 or not all(location.valid() for location in locations):
             return
+        coordinates = [(location.lon, location.lat) for location in locations]
+        if street_level:
+            point = LineString(coordinates).interpolate(0.5, normalized=True)
+            tags = {**tags, "addr:street": tags["name"].strip(), "match_level": "street"}
+        elif len(coordinates) >= 4 and coordinates[0] == coordinates[-1]:
+            polygon = Polygon(coordinates)
+            if not polygon.is_valid or polygon.is_empty:
+                return
+            point = polygon.representative_point()
+        else:
+            point = LineString(coordinates).interpolate(0.5, normalized=True)
         self.capture(
-            "way", way.id, tags,
-            sum(location.lon for location in locations) / len(locations),
-            sum(location.lat for location in locations) / len(locations)
+            "way", way.id, tags, point.x, point.y
         )
 
 
@@ -390,7 +432,7 @@ postcodes = PhilippinePostcodes(args.postcode_html) if args.postcode_html \
 exclude_geometries = [boundary_from_geojson(path).geometry for path in args.exclude_boundary]
 exclude_boundary = CompiledBoundary(unary_union(exclude_geometries)) if exclude_geometries else None
 sampler = AddressSampler(
-    args.max_records, args.per_locality, boundary_from_geojson(args.boundary), exclude_boundary, postcodes
+    args.max_records, args.per_locality, boundary_from_geojson(args.boundary), exclude_boundary, postcodes, args.country
 )
 matcher = ResidentialBuildingMatcher(sampler)
 location_index = None
@@ -399,7 +441,7 @@ if pathlib.Path(args.input).stat().st_size >= 1_000_000_000:
     location_index = pathlib.Path(args.output).with_suffix(pathlib.Path(args.output).suffix + ".locations.idx")
     location_index.unlink(missing_ok=True)
     location_storage = f"sparse_file_array,{location_index}"
-filter_keys = ["addr:housenumber", "addr:street", "addr:place", "building"]
+filter_keys = ["addr:housenumber", "addr:street", "addr:place", "building", "highway"]
 try:
     processor = osmium.FileProcessor(args.input).with_locations(location_storage).with_filter(KeyFilter(*filter_keys))
     try:

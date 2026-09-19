@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { openPostgresDatabase } from '../server/database/postgres.mjs';
+import { catalogHierarchyPaths } from '../server/database/catalog-hierarchy.mjs';
 
 const db = await openPostgresDatabase({ migrate: false });
 const manifest = JSON.parse(await readFile(new URL('../src/domain/location-catalog.meta.json', import.meta.url), 'utf8'));
@@ -7,6 +8,9 @@ const scalar = async (sql, ...params) => Number(await db.prepare(sql).bind(...pa
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 
 try {
+  const regions = (await db.prepare('SELECT id,country_code,parent_id,path FROM catalog_regions').all()).results;
+  const paths = catalogHierarchyPaths(regions);
+  assert(regions.every((region) => paths.get(Number(region.id)) === region.path), 'catalog hierarchy path mismatch');
   for (const [table, expected] of Object.entries({
     catalog_regions: manifest.totals.regions,
     catalog_cities: manifest.totals.cities,

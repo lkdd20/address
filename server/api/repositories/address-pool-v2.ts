@@ -3,6 +3,8 @@ import { hashSeed } from '../../../src/domain/generator';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import type { Database } from '../../database/database.mjs';
+import { addressLocalizationSqlClause } from '../../database/generation-index.mjs';
+import { projectAdministrativeRow } from '../../database/administrative-assignments.mjs';
 import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
 import {
   addressQualitySqlClause,
@@ -15,7 +17,7 @@ import {
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
 import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
-import { storedVariantLooksLocalized } from '../../../src/domain/address-display';
+import { componentLooksLocalized, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
 
@@ -30,6 +32,7 @@ interface AddressPoolV2Row {
   postcode: string;
   street: string;
   house_number: string;
+  match_level?: VerifiedAddress['matchLevel'];
   building_name: string;
   latitude: number;
   longitude: number;
@@ -57,24 +60,24 @@ interface AddressPoolV2Row {
   dataset_version: string | null;
   source_updated_at: string | null;
   imported_at: string | null;
+  administrative_patch_json?: string | null;
 }
 
 const propertyTypes = new Set<PropertyType>(['residential', 'apartment', 'commercial', 'mixed', 'unknown']);
 const evidenceTypes = new Set<AddressEvidence['type']>(['address_existence', 'residential_use', 'coordinate', 'building_status']);
-const residentialEvidenceSource = (row: AddressPoolV2Row): Pick<AddressEvidence, 'sourceId' | 'sourceName' | 'sourceUrl' | 'sourceFamily'> =>
-  row.source_id === 'overture-addresses'
-    ? {
-        sourceId: 'overture-buildings',
-        sourceName: 'Overture Maps buildings',
-        sourceUrl: 'https://docs.overturemaps.org/guides/buildings',
-        sourceFamily: 'overture-buildings'
-      }
-    : {
-        sourceId: row.source_id || '',
-        sourceName: row.source_name || '',
-        sourceUrl: row.record_url || row.source_url || '',
-        sourceFamily: row.source_id || ''
-      };
+const residentialEvidenceSource = (row: AddressPoolV2Row): Pick<AddressEvidence, 'sourceId' | 'sourceName' | 'sourceUrl' | 'sourceFamily'> => {
+  const source = row.source_id || '';
+  const reference = source === 'overture-addresses'
+    ? ['overture-buildings', 'Overture Maps buildings', 'https://docs.overturemaps.org/guides/buildings']
+    : source.startsWith('google-residential-enrichment') || source.startsWith('mappls-in-residential')
+      ? ['openstreetmap', 'OpenStreetMap residential buildings', 'https://www.openstreetmap.org/']
+      : source === 'singapore-hdb-residential'
+        ? ['hdb-property', 'HDB Property Information', 'https://data.gov.sg/collections/189/view']
+        : source === 'korea-kapt-residential'
+          ? ['korea-kapt', 'K-apt official apartment complexes', 'https://www.k-apt.go.kr/']
+          : [source, row.source_name || '', row.record_url || row.source_url || ''];
+  return { sourceId: reference[0], sourceName: reference[1], sourceUrl: reference[2], sourceFamily: reference[0] };
+};
 
 const normalize = (value: string | undefined): string => (value || '')
   .normalize('NFKC')
@@ -97,14 +100,12 @@ const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
 const toTraditionalHongKong = createTraditionalizer({ from: 'cn', to: 'hk' });
 const toTraditionalTaiwan = createTraditionalizer({ from: 'cn', to: 'tw' });
 const hanScript = /\p{Script=Han}/u;
-const latinScript = /\p{Script=Latin}/u;
 const nativeSemanticFields = new Set(['street', 'locality', 'postalLocality', 'district', 'dependentLocality', 'admin1', 'buildingName']);
+const translatedSemanticFields = (country: CountryCode) => semanticAddressFields
+  .filter((field) => field === 'street' || addressContracts[country]?.required.includes(field));
+const unchangedIdentifier = /^[A-Z]{1,6}[-./ ]?\d+(?:[-./ ]?[A-Z\d]+)*$/u;
 const hasHanSemanticContent = (components: AddressComponents): boolean => [...nativeSemanticFields]
   .some((field) => hanScript.test(String(components[field as keyof AddressComponents] || '')));
-export const chineseVariantHasHanClause = (prefix = ''): string => `(${[...nativeSemanticFields]
-  .map((field) => `(${prefix}component_variants_json::jsonb -> 'zh-CN' ->> '${field}') ~ '[一-龥]'`)
-  .join(' OR ')})`;
-
 const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區', '都', '道', '府', '県'];
 const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
 
@@ -129,6 +130,7 @@ const aliases = (values: Array<string | undefined>): string[] => [...new Set(val
   }).filter(Boolean);
 }))];
 
+export const poolLocationAliases = aliases;
 export const completenessClause = (prefix = ''): string => addressQualitySqlClause(prefix);
 
 const residentialEvidenceClause = `EXISTS (
@@ -142,13 +144,13 @@ const residentialEvidenceClause = `EXISTS (
     AND residential_evidence.is_current = 1
 )`;
 
-const aliasClause = (columns: string[], values: string[], bindings: unknown[]): string | undefined => {
+export const aliasClauseValues = (columns: string[], values: string[]): { sql: string; values: string[] } | undefined => {
   if (!values.length) return undefined;
   const placeholders = values.map(() => '?').join(',');
-  return `(${columns.map((column) => {
-    bindings.push(...values);
-    return `${column} IN (${placeholders})`;
-  }).join(' OR ')})`;
+  return {
+    sql: `(${columns.map((column) => `${column} IN (${placeholders})`).join(' OR ')})`,
+    values: columns.flatMap(() => values)
+  };
 };
 
 const fallbackComponents = (row: AddressPoolV2Row): AddressComponents => normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, {
@@ -181,17 +183,16 @@ export const repairHongKongNativeVariants = (
   variants: Record<'native' | 'en' | 'zh-CN', AddressComponents>
 ): Record<'native' | 'en' | 'zh-CN', AddressComponents> => {
   if (country !== 'HK' && country !== 'TW') return variants;
-  const nativeText = Object.values(variants.native).join(' ');
-  const source = hanScript.test(nativeText) ? variants.native : variants['zh-CN'];
-  if (!hanScript.test(Object.values(source).join(' '))) return variants;
   const traditionalize = country === 'HK' ? toTraditionalHongKong : toTraditionalTaiwan;
-  const native = Object.fromEntries(Object.entries(source).map(([field, value]) => [
-    field,
-    typeof value === 'string' && nativeSemanticFields.has(field)
-      ? traditionalize(value).replace(/[\p{Script=Latin}][\p{Script=Latin}\p{N}' .&/-]*/gu, ' ').replace(/\s+/gu, ' ').trim()
-      : value
-  ])) as unknown as AddressComponents;
-  if (latinScript.test([...nativeSemanticFields].map((field) => native[field as keyof AddressComponents] || '').join(' '))) return variants;
+  const native = Object.fromEntries(Object.entries(variants.native).map(([field, original]) => {
+    if (typeof original !== 'string' || !nativeSemanticFields.has(field)) return [field, original];
+    const counterpart = variants['zh-CN'][field as keyof AddressComponents];
+    const value = !hanScript.test(original) && typeof counterpart === 'string' && hanScript.test(counterpart)
+      && preservesAddressNumbers(original, counterpart) ? counterpart : original;
+    if (!hanScript.test(value)) return [field, original];
+    return [field, traditionalize(value).replace(/[\p{Script=Latin}][\p{Script=Latin}\p{N}' .&/-]*/gu, ' ')
+      .replace(/\s+/gu, ' ').trim() || original];
+  })) as unknown as AddressComponents;
   return { ...variants, native };
 };
 
@@ -218,11 +219,36 @@ const nativeStoredAddress = (components: AddressComponents, country: CountryCode
   return storedAddress(components, country);
 };
 
-const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undefined => {
-  if (!row.source_id || !row.source_name || !row.source_url) return undefined;
-  if (!validateAdministrativeHierarchy({
+export interface AddressPublicationIssue {
+  stage: 'source' | 'translation' | 'publication';
+  code: string;
+  field?: string;
+  language?: string;
+  category?: string;
+}
+
+const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = true,
+  issues?: AddressPublicationIssue[]): VerifiedAddress | undefined => {
+  row = projectAdministrativeRow(row);
+  const reject = (stage: AddressPublicationIssue['stage'], code: string, details = {}): undefined => {
+    issues?.push({ stage, code, ...details });
+    return undefined;
+  };
+  if (!(row.quality_score >= 0.7)) return reject('source', 'low_quality_score');
+  if (row.expires_at) {
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/u.test(row.expires_at);
+    const fresh = dateOnly
+      ? row.expires_at >= now.toISOString().slice(0, 10)
+      : Number.isFinite(Date.parse(row.expires_at)) && Date.parse(row.expires_at) > now.getTime();
+    if (!fresh) return reject('source', 'expired');
+  }
+  const matchLevel = row.match_level || 'premise';
+  if (matchLevel === 'street' && (row.property_type !== 'unknown' || row.residential_evidence)) return reject('source', 'invalid_street_evidence');
+  if (!row.source_id || !row.source_name || !row.source_url) return reject('source', 'source_metadata_missing');
+  const hierarchy = validateAdministrativeHierarchy({
     countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code, locality: row.locality
-  }).valid) return undefined;
+  });
+  if (!hierarchy.valid) return reject('source', hierarchy.reason || 'invalid_administrative_hierarchy');
   const fallback = fallbackComponents(row);
   const fallbackAddress = [row.house_number, row.street, row.postal_locality || row.locality, row.admin1_code || row.admin1, row.postcode]
     .filter(Boolean).join(', ');
@@ -230,6 +256,8 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
   for (const language of ['native', 'en', 'zh-CN'] as const) {
     const stored = parsedComponents[language];
     parsedComponents[language] = { ...fallback, ...stored };
+    if (!Object.hasOwn(stored, 'postalLocality') && stored.locality
+      && normalize(row.postal_locality) === normalize(row.locality)) parsedComponents[language].postalLocality = stored.locality;
     if (!Object.hasOwn(stored, 'dependentLocality')) {
       if (stored.district) parsedComponents[language].dependentLocality = stored.district;
       else delete parsedComponents[language].dependentLocality;
@@ -240,14 +268,46 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     en: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.en)),
     'zh-CN': normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents['zh-CN']))
   });
-  if (!storedVariantLooksLocalized(componentVariants.en, 'en')
-    || !storedVariantLooksLocalized(componentVariants['zh-CN'], 'zh-CN')
-    || !hasHanSemanticContent(componentVariants['zh-CN'])) return undefined;
-  if (!validateAddressContract(row.country_code, componentVariants.native, { strict: true, requireAdminCode: false }).valid) return undefined;
-  if (!validateAddressQuality({
+  const contract = validateAddressContract(row.country_code, componentVariants.native, { strict: true, requireAdminCode: false, matchLevel });
+  if (!contract.valid) {
+    for (const code of contract.reasons) reject('source', code);
+    return undefined;
+  }
+  const quality = validateAddressQuality({
     countryCode: row.country_code, components: componentVariants.native,
-    latitude: row.latitude, longitude: row.longitude
-  }).valid) return undefined;
+    latitude: row.latitude, longitude: row.longitude, matchLevel
+  });
+  if (!quality.valid) {
+    for (const code of quality.reasons) reject('source', code);
+    return undefined;
+  }
+  if (requireTranslations) {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const translated = componentVariants[language];
+      for (const field of [...semanticAddressFields, 'houseNumber', 'unit', 'postcode', 'admin1Code'] as Array<keyof AddressComponents>) {
+        const original = String(componentVariants.native[field] || '');
+        const value = String(translated[field] || '');
+        if (!preservesAddressNumbers(original, value) || !preservesAddressIdentifiers(original, value)
+          || ['postcode', 'admin1Code'].includes(field) && original !== value) {
+          return reject('translation', 'changed_source_identifier', { language, field });
+        }
+      }
+      for (const field of semanticAddressFields as Array<keyof AddressComponents>) {
+        const value = String(translated[field] || '');
+        if (!componentLooksLocalized(value, language)) return reject('translation', 'invalid_target_script', { language, field });
+      }
+      if (language === 'zh-CN') {
+        for (const field of translatedSemanticFields(row.country_code) as Array<keyof AddressComponents>) {
+          const original = String(componentVariants.native[field] || '');
+          const value = String(translated[field] || '');
+          if (original && /\p{L}/u.test(original) && !hanScript.test(value) && !unchangedIdentifier.test(original)) {
+            return reject('translation', 'incomplete_target_translation', { language, field });
+          }
+        }
+      }
+      if (language === 'zh-CN' && !hasHanSemanticContent(translated)) return reject('translation', 'missing_target_script', { language });
+    }
+  }
   const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
   const addressVariants = ['HK', 'TW'].includes(row.country_code) && hanScript.test(Object.values(componentVariants.native).join(' '))
     ? {
@@ -264,19 +324,24 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
   const propertyType = propertyTypes.has(row.property_type as PropertyType)
     ? row.property_type as PropertyType
     : 'unknown';
-  const variants = Object.values(componentVariants);
-  if (findNonResidentialMatch({
+  const variants = requireTranslations ? Object.values(componentVariants) : [componentVariants.native];
+  const formattedAddresses = requireTranslations ? Object.values(addressVariants) : [addressVariants.native];
+  const useMatch = (row.country_code === 'CN' || row.residential_evidence
+    || ['residential', 'apartment'].includes(propertyType)) ? findNonResidentialMatch({
     countryCode: row.country_code,
     buildingNames: variants.map((item) => item.buildingName).filter((value): value is string => Boolean(value)),
-    formattedAddresses: Object.values(addressVariants),
+    formattedAddresses,
     streets: variants.map((item) => item.street).filter(Boolean),
     propertyType
-  }).excluded) return undefined;
+  }) : { excluded: false as const };
+  if (useMatch.excluded) return reject(requireTranslations ? 'publication' : 'source', 'use_evidence_conflict', {
+    field: useMatch.field, category: useMatch.category
+  });
   if (matchesCustomBlacklist([
     ...variants.map((item) => item.buildingName),
-    ...Object.values(addressVariants),
+    ...formattedAddresses,
     ...variants.map((item) => item.street)
-  ])) return undefined;
+  ])) return reject(requireTranslations ? 'publication' : 'source', 'custom_blacklist');
   const sourceUpdatedAt = row.observed_at || row.source_updated_at || row.imported_at || row.first_seen_at;
   const type = evidenceTypes.has(row.evidence_type as AddressEvidence['type'])
     ? row.evidence_type as AddressEvidence['type']
@@ -329,12 +394,14 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     propertyType,
     unitStatus: componentVariants.native.unit ? 'verified' : componentVariants.native.buildingName ? 'building_only' : 'not_present',
     unitProvenance: componentVariants.native.unit ? 'source_tagged' : 'none',
-    matchLevel: componentVariants.native.unit ? 'subpremise' : 'premise',
+    matchLevel: matchLevel === 'street' ? 'street' : componentVariants.native.unit ? 'subpremise' : 'premise',
     verificationLevel: 'L2',
     sourceVersion: `${row.dataset_id || row.source_id}:${row.dataset_version || row.generation}`,
     sourceUpdatedAt,
     verifiedAt: now.toISOString(),
-    expiresAt: '9999-12-31T23:59:59.999Z',
+    expiresAt: row.expires_at
+      ? /^\d{4}-\d{2}-\d{2}$/u.test(row.expires_at) ? `${row.expires_at}T23:59:59.999Z` : new Date(row.expires_at).toISOString()
+      : '9999-12-31T23:59:59.999Z',
     evidence,
     exclusionFlags: row.quality_score < 0.7 ? ['low_quality_score'] : []
   };
@@ -343,15 +410,26 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
 export const storedAddressPoolV2RowIsPublishable = (
   row: AddressPoolV2Row,
   now = new Date()
-): boolean => Boolean(rowToAddress(row, now))
-  && (!row.expires_at || new Date(row.expires_at).getTime() > now.getTime());
+): boolean => Boolean(rowToAddress(row, now));
+
+export const storedAddressPoolV2RowCanRecoverTranslations = (row: AddressPoolV2Row, now = new Date()): boolean =>
+  row.country_code !== 'CN' && row.quality_score >= 0.7 && Boolean(rowToAddress(row, now, false));
+
+export const diagnoseStoredAddressPoolV2Row = (row: AddressPoolV2Row,
+  { recovery = false, now = new Date() } = {}): { valid: boolean; issues: AddressPublicationIssue[] } => {
+  const issues: AddressPublicationIssue[] = [];
+  if (recovery && row.country_code === 'CN') issues.push({ stage: 'source', code: 'unsupported_recovery' });
+  if (recovery && row.quality_score < 0.7) issues.push({ stage: 'source', code: 'low_quality_score' });
+  const address = rowToAddress(row, now, !recovery, issues);
+  return { valid: Boolean(address) && !issues.length, issues };
+};
 
 const missingSchema = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
   return /no such (?:table|view).*(?:address_pool_runtime|address_generation_index)|(?:does not exist.*(?:address_pool_runtime|address_generation_index)|(?:address_pool_runtime|address_generation_index).*does not exist)/i.test(message);
 };
 
-interface RegionNameRow { code: string; name: string; native_name: string; zh_name: string }
+interface RegionNameRow { id: number; code: string; name: string; native_name: string; zh_name: string }
 
 const regionNameCaches = new WeakMap<object, Map<string, RegionNameRow | null>>();
 const cityZhCaches = new WeakMap<object, Map<string, string | null>>();
@@ -381,10 +459,10 @@ const lookupRegionNames = async (
   let row: RegionNameRow | null = null;
   try {
     const value = admin1Code || admin1;
-    const raw = await db.prepare(`SELECT code, name, native_name, zh_name FROM catalog_regions
+    const matches = (await db.prepare(`SELECT id, code, name, native_name, zh_name FROM catalog_regions
       WHERE country_code = ? AND (LOWER(code) = LOWER(?) OR LOWER(name) = LOWER(?) OR LOWER(native_name) = LOWER(?))
-      ORDER BY CASE WHEN parent_id IS NULL THEN 0 ELSE 1 END, id LIMIT 1`)
-      .bind(country, value, value, value).first<RegionNameRow>();
+      ORDER BY id LIMIT 2`).bind(country, value, value, value).all<RegionNameRow>()).results;
+    const raw = matches.length === 1 ? matches[0] : null;
     row = raw && (typeof raw.name === 'string' && raw.name.trim() !== ''
       || typeof raw.native_name === 'string' && raw.native_name.trim() !== '')
       ? raw
@@ -410,16 +488,17 @@ const hasCatalogRegions = async (db: Database, country: CountryCode): Promise<bo
   return present;
 };
 
-const lookupCityZhName = async (db: Database, country: CountryCode, locality: string): Promise<string | null> => {
+const lookupCityZhName = async (db: Database, country: CountryCode, locality: string, regionId?: number): Promise<string | null> => {
   const cache = cacheFor(cityZhCaches, db);
-  const key = `${country}:${samePlaceKey(locality)}`;
+  const key = `${country}:${regionId || ''}:${samePlaceKey(locality)}`;
   if (cache.has(key)) return cache.get(key) || null;
   let zhName: string | null = null;
   try {
-    const row = await db.prepare(`SELECT zh_name FROM catalog_cities
+    const matches = (await db.prepare(`SELECT zh_name FROM catalog_cities
       WHERE country_code = ? AND (LOWER(name) = LOWER(?) OR LOWER(native_name) = LOWER(?)) AND zh_name <> ''
-      ORDER BY COALESCE(population, 0) DESC, id LIMIT 1`)
-      .bind(country, locality, locality).first<{ zh_name: string }>();
+        ${regionId ? 'AND region_id=?' : ''} ORDER BY id LIMIT 2`)
+      .bind(country, locality, locality, ...(regionId ? [regionId] : [])).all<{ zh_name: string }>()).results;
+    const row = matches.length === 1 ? matches[0] : null;
     zhName = typeof row?.zh_name === 'string' && han.test(row.zh_name) ? row.zh_name : null;
   } catch {
     zhName = null;
@@ -485,7 +564,8 @@ export const enrichPickedAddress = async (db: Database, address: VerifiedAddress
 
   const zhLocality = updated['zh-CN'].locality;
   if (zhLocality && !han.test(zhLocality)) {
-    const zhName = await lookupCityZhName(db, address.countryCode, zhLocality);
+    const region = await lookupRegionNames(db, address.countryCode, native.admin1 || '', native.admin1Code || '');
+    const zhName = await lookupCityZhName(db, address.countryCode, zhLocality, region?.id);
     if (zhName) {
       updated['zh-CN'].locality = zhName;
       if (updated['zh-CN'].postalLocality && samePlaceKey(updated['zh-CN'].postalLocality) === samePlaceKey(zhLocality)) {
@@ -522,8 +602,18 @@ export const enrichPickedAddress = async (db: Database, address: VerifiedAddress
   }
 
   if (!changed) return address;
+  const baseVariants = address.addressVariants || { native: '', en: '', 'zh-CN': '' };
+  const addressVariants = {
+    native: ['HK', 'TW'].includes(address.countryCode) && hanScript.test(Object.values(updated.native).join(' '))
+      ? nativeStoredAddress(updated.native, address.countryCode) : storedAddress(updated.native, address.countryCode),
+    en: storedAddress(updated.en, address.countryCode),
+    'zh-CN': storedAddress(updated['zh-CN'], address.countryCode)
+  };
   return {
     ...address,
+    nativeAddress: addressVariants.native || baseVariants.native,
+    formattedAddress: addressVariants.en || baseVariants.en,
+    addressVariants,
     components: updated.native,
     componentVariants: updated
   };
@@ -567,7 +657,7 @@ export const pickNearestAddressPoolV2Address = async (
     'active = 1',
     'quality_score >= 0.7',
     completenessClause(),
-    chineseVariantHasHanClause()
+    addressLocalizationSqlClause()
   ];
   const baseBindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`, 'residential_evidence = 1');
@@ -626,7 +716,7 @@ export const loadAddressPoolV2AddressById = async (
     const row = await db.prepare('SELECT * FROM address_pool_runtime WHERE id = ? AND active = 1 LIMIT 1')
       .bind(addressId.slice('pool-v2-'.length).split(':')[0]).first<AddressPoolV2Row>();
     if (!row) return undefined;
-    const address = rowToAddress(row, now);
+    const address = storedAddressPoolV2RowIsPublishable(row, now) ? rowToAddress(row, now) : undefined;
     return address ? enrichPublishableAddress(db, address) : undefined;
   } catch (error) {
     if (missingSchema(error)) return undefined;
@@ -644,22 +734,31 @@ export const pickAddressPoolV2Address = async (
   now = new Date()
 ): Promise<VerifiedAddress | undefined> => {
   if (!db) return undefined;
-  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), chineseVariantHasHanClause()];
+  if (filters.districtId && !filters.district) return undefined;
+  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), addressLocalizationSqlClause()];
   const bindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`);
+  const regionNames = aliases([filters.region, target?.region, target?.regionNative, target?.regionCode, ...target?.regionAliases || []]);
+  const cityNames = aliases([filters.city, target?.city, target?.cityNative, ...target?.cityAliases || []]);
+  const districtNames = aliases([filters.district]);
+  const currentValueMatches = (values: Array<string | undefined>, expected: string[]): boolean =>
+    !expected.length || aliases(values).some((value) => expected.includes(value));
 
-  const regionClause = aliasClause(
-    ['admin1_key', 'admin1_code_key'],
-    aliases([filters.region, target?.region, target?.regionNative, target?.regionCode, ...target?.regionAliases || []]),
-    bindings
-  );
-  if ((filters.region || target?.region) && regionClause) clauses.push(regionClause);
-  const cityClause = aliasClause(
-    ['locality_key', 'postal_locality_key'],
-    aliases([filters.city, target?.city, target?.cityNative, ...target?.cityAliases || []]),
-    bindings
-  );
-  if ((filters.city || target?.city) && cityClause) clauses.push(cityClause);
+  const regionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'], regionNames);
+  if ((filters.region || target?.region) && regionClause) {
+    clauses.push(regionClause.sql);
+    bindings.push(...regionClause.values);
+  }
+  const cityClause = aliasClauseValues(['locality_key', 'postal_locality_key'], cityNames);
+  if ((filters.city || target?.city) && cityClause) {
+    clauses.push(cityClause.sql);
+    bindings.push(...cityClause.values);
+  }
+  const districtClause = aliasClauseValues(['district_key'], districtNames);
+  if (filters.district && districtClause) {
+    clauses.push(districtClause.sql);
+    bindings.push(...districtClause.values);
+  }
   const selectedPostcode = filters.postcode || target?.postcode;
   if (selectedPostcode) {
     clauses.push('postcode_key = ?');
@@ -673,18 +772,21 @@ export const pickAddressPoolV2Address = async (
   const generationClauses = ['country_code = ?', 'active = 1'];
   const generationBindings: unknown[] = [country];
   if (residential) generationClauses.push('residential_ready = 1');
-  const generationRegionClause = aliasClause(
-    ['admin1_key', 'admin1_code_key'],
-    aliases([filters.region, target?.region, target?.regionNative, target?.regionCode, ...target?.regionAliases || []]),
-    generationBindings
-  );
-  if ((filters.region || target?.region) && generationRegionClause) generationClauses.push(generationRegionClause);
-  const generationCityClause = aliasClause(
-    ['locality_key', 'postal_locality_key'],
-    aliases([filters.city, target?.city, target?.cityNative, ...target?.cityAliases || []]),
-    generationBindings
-  );
-  if ((filters.city || target?.city) && generationCityClause) generationClauses.push(generationCityClause);
+  const generationRegionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'], regionNames);
+  if ((filters.region || target?.region) && generationRegionClause) {
+    generationClauses.push(generationRegionClause.sql);
+    generationBindings.push(...generationRegionClause.values);
+  }
+  const generationCityClause = aliasClauseValues(['locality_key', 'postal_locality_key'], cityNames);
+  if ((filters.city || target?.city) && generationCityClause) {
+    generationClauses.push(generationCityClause.sql);
+    generationBindings.push(...generationCityClause.values);
+  }
+  const generationDistrictClause = aliasClauseValues(['district_key'], districtNames);
+  if (filters.district && generationDistrictClause) {
+    generationClauses.push(generationDistrictClause.sql);
+    generationBindings.push(...generationDistrictClause.values);
+  }
   const generationPostcode = filters.postcode || target?.postcode;
   if (generationPostcode) {
     generationClauses.push('postcode_key = ?');
@@ -725,8 +827,20 @@ export const pickAddressPoolV2Address = async (
         .bind(...ids).all<AddressPoolV2Row>()).results || [];
       const byId = new Map(rows.map((row) => [row.id, row]));
       for (const { id } of rotateCandidates(identifiers, `${country}:${seed}:address-pool-v2:candidate`)) {
-        const row = byId.get(id);
-        const address = row ? rowToAddress(row, now) : undefined;
+        const stored = byId.get(id);
+        if (!stored) continue;
+        const row = projectAdministrativeRow(stored);
+        if (row.country_code !== country
+          || residential && (Number(row.residential_evidence) !== 1
+            || !['residential', 'apartment'].includes(row.property_type))
+          || (filters.region || target?.region) && !currentValueMatches([row.admin1, row.admin1_code], regionNames)
+          || (filters.city || target?.city) && !currentValueMatches([row.locality, row.postal_locality], cityNames)
+          || filters.district && !currentValueMatches([row.district], districtNames)
+          || selectedPostcode && normalize(row.postcode).replace(/\s/gu, '') !== normalize(selectedPostcode).replace(/\s/gu, '')
+          || filters.q?.trim() && !normalize([row.house_number, row.street, row.building_name, row.district,
+            row.locality, row.postal_locality, row.admin1, row.admin1_code, row.postcode].filter(Boolean).join(' '))
+            .includes(normalize(filters.q))) continue;
+        const address = rowToAddress(row, now);
         if (address) {
           const enriched = await enrichPublishableAddress(db, address);
           if (enriched) return enriched;

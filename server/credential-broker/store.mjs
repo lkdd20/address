@@ -1,4 +1,6 @@
 import { createDecipheriv, createHash } from 'node:crypto';
+import { deepLBudgetStatus } from './deepl.mjs';
+import { parseOpenAICompatibleSecret } from './openai-compatible.mjs';
 
 const periodStart = (period, offsetMinutes, date) => {
   const shifted = new Date(date.getTime() + offsetMinutes * 60_000).toISOString();
@@ -53,9 +55,12 @@ const jwtExpiresAt = (token) => {
 };
 
 const inspectOneMapCredential = (row, masterKey, now) => {
-  if (row.provider !== 'onemap') return { invalid: false, expired: false };
+  if (!['onemap', 'openai-compatible'].includes(row.provider)) return { invalid: false, expired: false };
   let secret;
   try { secret = decrypt(row, masterKey); } catch { return { invalid: true, expired: false }; }
+  if (row.provider === 'openai-compatible') return {
+    invalid: !parseOpenAICompatibleSecret(secret), expired: false
+  };
   // Keep opaque test fixtures compatible; OneMap production tokens are JWTs.
   if (String(secret).split('.').length !== 3) return { invalid: false, expired: false };
   const expiresAt = jwtExpiresAt(secret);
@@ -77,6 +82,19 @@ const ensureQuotaCounter = async (database, window, start, localUsed, nowIso) =>
   return await database.prepare(`SELECT * FROM credential_broker_quota_counters
     WHERE scope_id=? AND service=? AND period=? AND period_start=?`)
     .bind(window.scope_id, window.service, window.period, start).first();
+};
+
+const providerObservation = (value) => {
+  if (!value || !Number.isSafeInteger(Number(value.used)) || Number(value.used) < 0
+    || !Number.isSafeInteger(Number(value.limit)) || Number(value.limit) <= 0) return null;
+  const period = value.period === 'month' ? 'month' : value.period === 'day' ? 'day' : null;
+  if (!period) return null;
+  return {
+    used: Number(value.used), limit: Number(value.limit), period,
+    service: String(value.service || '').trim().slice(0, 80),
+    resetAt: value.resetAt && Number.isFinite(Date.parse(value.resetAt))
+      ? new Date(value.resetAt).toISOString() : null
+  };
 };
 
 const synchronizeProviderCounters = async (database, provider, now) => {
@@ -155,8 +173,27 @@ export class CredentialBrokerStore {
         enabled,weight,qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset,quota_scope_id,last_used_at,
         secret_ciphertext,secret_iv,secret_tag
       FROM provider_credentials WHERE provider=? ORDER BY id`).bind(provider).all()).results;
+    if (provider === 'deepl') {
+      const enabled = rows.filter((row) => row.enabled && !['disabled', 'needs_review'].includes(row.status));
+      const budget = await deepLBudgetStatus(this.database);
+      const exhausted = Boolean(budget.observedAt && !budget.remaining);
+      const available = !exhausted && enabled.some((row) => !row.cooldown_until || row.cooldown_until <= now.toISOString());
+      return { provider, known: rows.length > 0, available,
+        nextResetAt: available ? null : exhausted ? budget.resetAt : enabled.map((row) => row.cooldown_until).filter(Boolean).sort()[0] || null,
+        waitState: available ? null : !enabled.length ? 'blocked' : exhausted ? 'quota_wait' : 'cooldown_wait',
+        reason: available || enabled.length ? null : !rows.length ? 'missing_api_key:deepl'
+          : rows.some((row) => row.enabled) ? 'api_key_needs_review:deepl' : 'api_key_disabled:deepl',
+        revision: createHash('sha256').update(JSON.stringify([budget.resetAt, rows.map((row) => [row.id,
+          row.enabled, row.qps_limit, row.quota_limit, row.secret_ciphertext, row.status === 'needs_review'])])).digest('hex') };
+    }
     await synchronizeProviderCounters(this.database, provider, now);
-    const candidates = rows.filter((row) => Boolean(row.enabled) && String(row.status || '') !== 'disabled');
+    const routeRows = ['openai-compatible', 'youdao'].includes(provider)
+      ? (await this.database.prepare(`SELECT credential_id,enabled,priority,prompt,updated_at FROM translation_routes
+        WHERE provider=? AND credential_id IS NOT NULL`).bind(provider).all()).results : [];
+    const routeConfig = routeRows.length ? new Map(routeRows.map((row) => [row.credential_id, row])) : null;
+    const routeEnabled = routeConfig ? new Map(routeRows.map((row) => [row.credential_id, Boolean(row.enabled)])) : null;
+    const candidates = rows.filter((row) => Boolean(row.enabled) && String(row.status || '') !== 'disabled'
+      && (!routeEnabled || routeEnabled.get(row.id)));
     if (!candidates.length) return {
       provider, known: rows.length > 0, available: false, nextResetAt: null, waitState: 'blocked',
       reason: rows.length ? `api_key_disabled:${provider}` : `missing_api_key:${provider}`,
@@ -168,8 +205,10 @@ export class CredentialBrokerStore {
     let credentialIssue = null;
     const revision = [];
     for (const row of candidates) {
+      const route = routeConfig?.get(row.id);
       revision.push([row.id, row.enabled, row.weight, row.qps_limit, row.quota_service, row.quota_period,
-        row.quota_limit, row.quota_timezone_offset, row.quota_scope_id]);
+        row.quota_limit, row.quota_timezone_offset, row.quota_scope_id,
+        route?.enabled, route?.priority, route?.prompt, route?.updated_at]);
       const inspection = inspectOneMapCredential(row, this.masterKey, now);
       if (inspection.expired || inspection.invalid) {
         credentialIssue = inspection.expired ? `api_key_expired:${provider}` : `api_key_needs_review:${provider}`;
@@ -194,12 +233,16 @@ export class CredentialBrokerStore {
         revision.push([row.id, window.service, window.scope_id, window.period,
           window.limit_count, window.timezone_offset]);
         const start = periodStart(window.period, Number(window.timezone_offset || 0), now);
-        const localUsed = Number(await this.database.prepare(`SELECT COALESCE(SUM(
-            usage.accepted_count+usage.rejected_count),0) AS total
-          FROM provider_credentials credential JOIN provider_usage_periods usage
-            ON usage.credential_id=credential.id
-          WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
-          .bind(window.scope_id, window.service, start).first('total') || 0);
+    const localUsed = Number(await this.database.prepare(`SELECT COALESCE(SUM(
+        usage.accepted_count+usage.rejected_count),0) AS total
+      FROM provider_credentials credential JOIN provider_usage_periods usage
+        ON usage.credential_id=credential.id
+      LEFT JOIN provider_quota_windows configured
+        ON configured.credential_id=credential.id AND configured.enabled=1
+        AND configured.scope_id=? AND configured.service=? AND configured.period=?
+      WHERE usage.period_start=? AND (
+        (credential.quota_scope_id=? AND credential.quota_service=?) OR configured.credential_id IS NOT NULL)`)
+      .bind(window.scope_id, window.service, window.period, start, window.scope_id, window.service).first('total') || 0);
         const counter = await ensureQuotaCounter(this.database, window, start, localUsed, now.toISOString());
         const observation = await this.database.prepare(`SELECT
             MAX(CASE WHEN observation.source='provider' THEN observation.used_count ELSE 0 END) AS provider_used,
@@ -245,7 +288,13 @@ export class CredentialBrokerStore {
     };
   }
 
-  async reserve({ requestKey, clientId, provider, excludeIds = [] }) {
+  async translationPrompt(credentialId) {
+    const row = await this.database.prepare(`SELECT prompt FROM translation_routes
+      WHERE provider='openai-compatible' AND credential_id=? AND enabled=1`).bind(credentialId).first();
+    return String(row?.prompt || '');
+  }
+
+  async reserve({ requestKey, clientId, provider, credentialId = null, excludeIds = [] }) {
     return await this.database.transaction(async (database) => {
       const now = this.now();
       const nowIso = now.toISOString();
@@ -261,10 +310,15 @@ export class CredentialBrokerStore {
         WHERE provider=? AND enabled=1 AND status <> 'disabled'
         ORDER BY last_used_at IS NOT NULL,last_used_at,created_at,id FOR UPDATE`)
         .bind(provider).all()).results;
+      const routes = ['openai-compatible', 'youdao'].includes(provider)
+        ? new Map((await database.prepare(`SELECT credential_id,enabled FROM translation_routes
+          WHERE provider=? AND credential_id IS NOT NULL`).bind(provider).all()).results
+          .map((row) => [row.credential_id, Boolean(row.enabled)])) : null;
       const excluded = new Set(excludeIds);
       let nextAvailableAt = null;
       let blockedReason = 'unavailable';
       for (const row of rows) {
+        if ((credentialId && row.id !== credentialId) || (routes && !routes.get(row.id))) continue;
         const inspection = inspectOneMapCredential(row, this.masterKey, now);
         if (row.status === 'needs_review' && !inspection.expired) continue;
         const cooldownAt = Date.parse(row.cooldown_until || '');
@@ -317,8 +371,12 @@ export class CredentialBrokerStore {
               usage.accepted_count+usage.rejected_count),0) AS total
             FROM provider_credentials credential JOIN provider_usage_periods usage
               ON usage.credential_id=credential.id
-            WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
-            .bind(window.scope_id, window.service, start).first('total') || 0);
+            LEFT JOIN provider_quota_windows configured
+              ON configured.credential_id=credential.id AND configured.enabled=1
+              AND configured.scope_id=? AND configured.service=? AND configured.period=?
+            WHERE usage.period_start=? AND (
+              (credential.quota_scope_id=? AND credential.quota_service=?) OR configured.credential_id IS NOT NULL)`)
+            .bind(window.scope_id, window.service, window.period, start, window.scope_id, window.service).first('total') || 0);
           await ensureQuotaCounter(database, window, start, localUsed, nowIso);
           await database.prepare(`SELECT 1 FROM credential_broker_quota_counters
             WHERE scope_id=? AND service=? AND period=? AND period_start=? FOR UPDATE`)
@@ -388,23 +446,25 @@ export class CredentialBrokerStore {
         await database.prepare("UPDATE provider_credentials SET last_used_at=?,status='healthy',updated_at=? WHERE id=?")
           .bind(nowIso, nowIso, row.id).run();
         const dispatch = await database.prepare(`INSERT INTO credential_broker_dispatches(
-            request_key,credential_id,status,reserved_at
-          ) VALUES (?,?,'dispatched',?) RETURNING id`).bind(requestKey, row.id, nowIso).first();
+            request_key,credential_id,credential_revision,status,reserved_at
+          ) VALUES (?,?,?,'dispatched',?) RETURNING id`).bind(requestKey, row.id, nowIso, nowIso).first();
         return { credential: { id: row.id, secret }, dispatchId: dispatch.id };
       }
       return { credential: null, reason: blockedReason, nextAvailableAt };
     });
   }
 
-  async report({ dispatchId, outcome, retryAt = null }) {
+  async report({
+    dispatchId, outcome, retryAt = null, observation = null, service = null, period = null,
+  }) {
     await this.database.transaction(async (database) => {
       const reference = await database.prepare('SELECT credential_id FROM credential_broker_dispatches WHERE id=?')
         .bind(dispatchId).first();
       const credential = reference?.credential_id
-        ? await database.prepare(`SELECT id,failure_count,quota_service,quota_period,quota_limit,quota_timezone_offset
+        ? await database.prepare(`SELECT id,failure_count,quota_service,quota_period,quota_limit,quota_scope_id,quota_timezone_offset,updated_at
             FROM provider_credentials WHERE id=? FOR UPDATE`).bind(reference.credential_id).first()
         : null;
-      const dispatch = await database.prepare(`SELECT id AS dispatch_id,credential_id,status AS dispatch_status,reserved_at
+      const dispatch = await database.prepare(`SELECT id AS dispatch_id,credential_id,credential_revision,status AS dispatch_status,reserved_at
           FROM credential_broker_dispatches WHERE id=? FOR UPDATE`).bind(dispatchId).first();
       if (!dispatch || dispatch.dispatch_status !== 'dispatched') return;
       const now = this.now();
@@ -412,7 +472,33 @@ export class CredentialBrokerStore {
       const success = outcome === 'success';
       await database.prepare(`UPDATE credential_broker_dispatches SET status=?,outcome=?,completed_at=? WHERE id=?`)
         .bind(success ? 'success' : 'rejected', outcome, nowIso, dispatchId).run();
-      if (!credential) return;
+      if (!credential || dispatch.credential_revision && credential.updated_at !== dispatch.credential_revision) return;
+      const observed = providerObservation({
+        ...(observation || {}),
+        service: observation?.service || service,
+        period: observation?.period || period
+      });
+      if (observed) {
+        const observedService = observed.service || credential.quota_service;
+        const resetAt = observed.resetAt || nextReset(observed.period,
+          Number(credential.quota_timezone_offset || 0), now).toISOString();
+        await database.prepare(`INSERT INTO provider_quota_windows(
+            credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+          ) VALUES (?,?,?,?,?,?,'provider',1,?,?) ON CONFLICT(credential_id,service,period) DO UPDATE SET
+            limit_count=excluded.limit_count,source='provider',enabled=1,updated_at=excluded.updated_at`)
+          .bind(reference.credential_id, observedService, credential.quota_scope_id, observed.period,
+            observed.limit, credential.quota_timezone_offset, nowIso, nowIso).run();
+        await database.prepare(`INSERT INTO provider_quota_observations(
+            credential_id,service,period,used_count,limit_count,reset_at,observed_at,source
+          ) VALUES (?,?,?,?,?,?,?,'provider') ON CONFLICT(credential_id,service,period) DO UPDATE SET
+            used_count=excluded.used_count,limit_count=excluded.limit_count,reset_at=excluded.reset_at,
+            observed_at=excluded.observed_at,source='provider'`)
+          .bind(reference.credential_id, observedService, observed.period, observed.used, observed.limit,
+            resetAt, nowIso).run();
+        await database.prepare(`UPDATE provider_credentials SET provider_reported_used=?,provider_reported_limit=?,
+            provider_reported_reset_at=?,provider_reported_at=? WHERE id=?`)
+          .bind(observed.used, observed.limit, resetAt, nowIso, reference.credential_id).run();
+      }
       if (success) {
         const day = periodStart('day', Number(credential.quota_timezone_offset || 0), new Date(dispatch.reserved_at));
         const starts = new Set([day,
@@ -443,12 +529,14 @@ export class CredentialBrokerStore {
         status, failures, status === 'healthy' ? null : cooldown.toISOString(), nowIso, nowIso, dispatch.credential_id
       ).run();
       if (outcome === 'quota') {
+        const quotaPeriod = period === 'month' || period === 'day' ? period : credential.quota_period;
+        const quotaService = String(service || '').trim() || credential.quota_service;
         const windows = (await database.prepare(`SELECT service,period,limit_count,timezone_offset
-          FROM provider_quota_windows WHERE credential_id=? AND enabled=1`)
-          .bind(dispatch.credential_id).all()).results;
+          FROM provider_quota_windows WHERE credential_id=? AND enabled=1 AND service=? AND period=?`)
+          .bind(dispatch.credential_id, quotaService, quotaPeriod).all()).results;
         const effectiveWindows = windows.length ? windows : [{
-          service: credential.quota_service,
-          period: credential.quota_period,
+          service: quotaService,
+          period: quotaPeriod,
           limit_count: credential.quota_limit,
           timezone_offset: credential.quota_timezone_offset
         }];
@@ -466,6 +554,12 @@ export class CredentialBrokerStore {
         }
       }
     });
+  }
+
+  async cancelDispatch(dispatchId) {
+    await this.database.prepare(`UPDATE credential_broker_dispatches
+      SET status='unknown',outcome='cancelled',completed_at=? WHERE id=? AND status='dispatched'`)
+      .bind(this.now().toISOString(), dispatchId).run();
   }
 
   async finishRequest(requestKey, { status, responseStatus = null, errorCode = null }) {

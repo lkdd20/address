@@ -1,17 +1,19 @@
 import { countryByCode } from './countries';
-import { formatAddressPresentation } from './address-format';
+import { chinaPinyinComponents, formatAddressPresentation, formatChinaPinyinPresentation } from './address-format';
 import { localizedCountryName } from './locales';
 import type {
   AddressComponents,
   AddressLanguage,
   AddressPresentation,
   CountryCode,
+  GeneratedUnit,
   Locale,
   VerifiedAddress
 } from './types';
 import type { FavoriteAddressPresentationSource } from './favorites';
+export { componentLooksLocalized, storedVariantLooksLocalized } from './address-localization.mjs';
 
-export type AddressDisplayLanguage = 'native' | Locale;
+export type AddressDisplayLanguage = 'native' | Locale | 'pinyin';
 
 const primaryLanguage = (tag: string): string => tag.split('-')[0].toLowerCase();
 const chineseScript = (tag: string): 'Hans' | 'Hant' =>
@@ -32,8 +34,11 @@ const trustedLanguage = (language: AddressDisplayLanguage, nativeLanguage: strin
 export const addressDisplayComponents = (
   bundle: FavoriteAddressPresentationSource,
   language: AddressDisplayLanguage
-): AddressComponents => bundle.address.componentVariants[trustedLanguage(language, bundle.address.nativeLanguage) || 'en']
-  || bundle.address.componentVariants.native;
+): AddressComponents => {
+  if (language === 'pinyin' && bundle.address.countryCode === 'CN') return chinaPinyinComponents(bundle.address.componentVariants.native);
+  return bundle.address.componentVariants[trustedLanguage(language, bundle.address.nativeLanguage) || 'en']
+    || bundle.address.componentVariants.native;
+};
 
 export const addressDisplayCountryName = (
   countryCode: CountryCode,
@@ -43,6 +48,7 @@ export const addressDisplayCountryName = (
   const country = countryByCode.get(countryCode);
   if (!country) return countryCode;
   if (language === 'native') return country.nativeName;
+  if (language === 'pinyin') return 'Zhongguo';
   if (language === 'en') return country.name.en;
   if (language === 'zh-CN') return country.name['zh-CN'];
   return localizedCountryName(countryCode, language, localizedCountryName(countryCode, fallbackLocale, country.name.en));
@@ -51,12 +57,22 @@ export const addressDisplayCountryName = (
 export const addressDisplayPresentation = (
   bundle: FavoriteAddressPresentationSource,
   language: AddressDisplayLanguage,
-  fallbackLocale: Locale
+  fallbackLocale: Locale,
+  generatedUnit?: GeneratedUnit
 ): AddressPresentation => {
+  if (language === 'pinyin' && bundle.address.countryCode === 'CN') {
+    return formatChinaPinyinPresentation(bundle.address.componentVariants.native, '', generatedUnit);
+  }
   const trusted = trustedLanguage(language, bundle.address.nativeLanguage);
-  if (trusted) return bundle.addressFormats[trusted];
+  if (trusted) {
+    const stored = bundle.addressFormats?.[trusted];
+    if (stored) return stored;
+    const fallback = bundle.addressFormats?.native || bundle.addressFormats?.en || bundle.addressFormats?.['zh-CN'];
+    if (fallback) return fallback;
+  }
 
-  const source = bundle.addressFormats.en || bundle.addressFormats.native;
+  const source = bundle.addressFormats?.en || bundle.addressFormats?.native || bundle.addressFormats?.['zh-CN'];
+  if (!source) return { language: 'native', postalLines: [], singleLine: '' };
   const sourceCountry = source.postalLines.at(-1) || '';
   const countryName = addressDisplayCountryName(bundle.address.countryCode, language, fallbackLocale)
     .toLocaleUpperCase(language);
@@ -69,44 +85,6 @@ export const addressDisplayPresentation = (
 
   return { ...source, postalLines, singleLine };
 };
-
-const scriptPatterns = {
-  han: /[⺀-⻿㐀-䶿一-鿿豈-﫿]/u,
-  kana: /[぀-ヿㇰ-ㇿｦ-ﾝ]/u,
-  hangul: /[ᄀ-ᇿ㄰-㆏가-힯]/u,
-  thai: /[฀-๿]/u,
-  arabic: /[؀-ۿݐ-ݿ]/u,
-  cyrillic: /[Ѐ-ӿ]/u
-} as const;
-
-// Scripts that cannot appear in a component correctly localized to the target
-// locale. Han is shared between Chinese and Japanese (kanji≈hanzi), Latin
-// identifiers and digits are acceptable everywhere.
-const foreignScripts: Record<string, ReadonlyArray<RegExp>> = {
-  zh: [scriptPatterns.kana, scriptPatterns.hangul, scriptPatterns.thai, scriptPatterns.arabic, scriptPatterns.cyrillic],
-  ja: [scriptPatterns.hangul, scriptPatterns.thai, scriptPatterns.arabic, scriptPatterns.cyrillic],
-  ko: [scriptPatterns.kana, scriptPatterns.thai, scriptPatterns.arabic, scriptPatterns.cyrillic],
-  latin: [scriptPatterns.han, scriptPatterns.kana, scriptPatterns.hangul, scriptPatterns.thai, scriptPatterns.arabic, scriptPatterns.cyrillic]
-};
-
-export const componentLooksLocalized = (text: string, targetLocale: Locale): boolean => {
-  const family = primaryLanguage(targetLocale);
-  const rejected = foreignScripts[family] || foreignScripts.latin;
-  return !rejected.some((pattern) => pattern.test(text));
-};
-
-const semanticDisplayFields = [
-  'buildingName', 'street', 'locality', 'postalLocality', 'dependentLocality', 'district', 'admin1'
-] as const satisfies ReadonlyArray<keyof AddressComponents>;
-
-// A stored variant is trusted for a display locale only when every semantic
-// component already reads in the target script; digit identifiers
-// (houseNumber, unit, postcode) are never inspected.
-export const storedVariantLooksLocalized = (components: AddressComponents, targetLocale: Locale): boolean =>
-  semanticDisplayFields.every((field) => {
-    const value = components[field];
-    return typeof value !== 'string' || !value.trim() || componentLooksLocalized(value, targetLocale);
-  });
 
 const latinScriptLocales = new Set<Locale>(['en', 'de', 'fr', 'es', 'pt']);
 

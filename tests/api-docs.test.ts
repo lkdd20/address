@@ -16,8 +16,16 @@ describe('public API contract', () => {
     expect(JSON.stringify(publicApiEndpoints)).not.toContain('limit=20000');
     const generate = publicApiEndpoints.find(({ id }) => id === 'generate')!;
     expect(generate.parameters.map(({ name }) => name)).toEqual(expect.arrayContaining(['districtId', 'q', 'strategy', 'residential']));
+    expect(generate.parameters.find(({ name }) => name === 'q')).toMatchObject({ maxLength: 300 });
+    expect(generate.parameters.find(({ name }) => name === 'requestId')).toMatchObject({ maxLength: 160 });
+    expect(publicOpenApiDocument.paths['/api/v1/generate'].get.parameters)
+      .toContainEqual(expect.objectContaining({ name: 'q', schema: expect.objectContaining({ maxLength: 300 }) }));
     const batch = publicApiEndpoints.find(({ id }) => id === 'generate-batch')!;
     expect(batch.parameters.find(({ name }) => name === 'count')).toMatchObject({ minimum: 1, maximum: 50 });
+    expect(batch.parameters.find(({ name }) => name === 'filters')?.schema).toMatchObject({
+      properties: { residential: { type: 'boolean' } }
+    });
+    expect(generate.parameters.find(({ name }) => name === 'residential')?.description).toContain('matchLevel=street');
   });
 
   it('generates curl, Python, JavaScript, and OpenAPI from the same catalog', () => {

@@ -16,6 +16,26 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SingaporeHdbExportTest(unittest.TestCase):
+    def test_onemap_retains_precise_and_street_results_without_postcode_or_residential_invention(self):
+        payload = {"results": [
+            {"BLK_NO": "1", "ROAD_NAME": "TEST ROAD", "POSTAL": "NIL", "LONGITUDE": "103.8", "LATITUDE": "1.3"},
+            {"BLK_NO": "NIL", "ROAD_NAME": "TEST ROAD", "POSTAL": "123456", "LONGITUDE": "103.81", "LATITUDE": "1.3"},
+            {"BLK_NO": "NIL", "ROAD_NAME": "TEST ROAD", "LONGITUDE": "0", "LATITUDE": "0"},
+        ]}
+        values = MODULE.onemap_address_results(payload, {"blk_no": "1", "street": "TEST ROAD"})
+        self.assertEqual(len(values), 2)
+        self.assertEqual(values[0]["number"], "1")
+        self.assertEqual(values[0]["postcode"], "")
+        self.assertEqual(values[1]["match_level"], "street")
+        self.assertEqual(values[1]["number"], "")
+        self.assertEqual(values[1]["postcode"], "")
+        self.assertTrue(all(value["property_type"] == "unknown" for value in values))
+
+    def test_empty_postcodes_do_not_merge_different_streets(self):
+        values = [{"id": str(index), "locality": "Singapore", "street": street, "number": "",
+                   "postcode": "", "match_level": "street"} for index, street in enumerate(["FIRST ROAD", "SECOND ROAD"])]
+        self.assertEqual(len(MODULE.select_balanced(values, 10, 10)), 2)
+
     def test_legacy_null_cache_is_rechecked_because_it_may_be_a_transient_failure(self):
         pathlib.Path(".data-cache").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
@@ -47,6 +67,22 @@ class SingaporeHdbExportTest(unittest.TestCase):
                     )
             self.assertEqual(raised.exception.kind, "quota")
             self.assertEqual(raised.exception.next_available_at, "2026-08-11T00:00:00Z")
+            self.assertFalse(cache_file.exists())
+
+    def test_actual_http_budget_stops_without_retrying_or_caching(self):
+        pathlib.Path(".data-cache").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
+            cache_file = pathlib.Path(directory) / "onemap.jsonl"
+            error = urllib.error.HTTPError("http://127.0.0.1/bridge", 429, "budget", {},
+                                          io.BytesIO(b'{"code":"SOURCE_REQUEST_BUDGET"}'))
+            with patch.object(MODULE.urllib.request, "urlopen", side_effect=error) as request, \
+                    patch.object(MODULE.time, "sleep") as sleep:
+                with self.assertRaises(MODULE.TemporaryOnemapFailure) as raised:
+                    MODULE.onemap_result({"blk_no": "1", "street": "TEST ROAD"},
+                                         "http://127.0.0.1/bridge", {}, cache_file, 0)
+            self.assertEqual(raised.exception.kind, "request_budget")
+            request.assert_called_once()
+            sleep.assert_not_called()
             self.assertFalse(cache_file.exists())
 
     def test_short_rate_limit_is_retried_without_marking_daily_quota_exhausted(self):
@@ -156,12 +192,12 @@ class SingaporeHdbExportTest(unittest.TestCase):
             self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 1)
             self.assertFalse(list(root.glob("state.json.*.tmp")))
 
-    def test_prefers_official_building_when_onemap_resolves_to_same_postcode(self):
+    def test_prefers_official_building_for_the_same_normalized_address(self):
         common = {
             "postcode": "200026", "locality": "Kallang/Whampoa",
             "street": "BENDEMEER RD", "number": "26",
         }
-        onemap = {**common, "id": "hdb-building:onemap:200026", "street": "JLN BERSEH"}
+        onemap = {**common, "id": "hdb-building:onemap:200026", "street": "BENDEMEER ROAD"}
         official = {**common, "id": "hdb-building:3740:943709"}
         selected = MODULE.select_balanced([onemap, official], 10, 10)
         self.assertEqual(selected, [official])

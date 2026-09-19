@@ -12,6 +12,7 @@ export interface CommunityCandidate {
   city: string;
   district: string;
   township: string;
+  postcode?: string;
   latitude: number;
   longitude: number;
   rawLatitude: number;
@@ -25,6 +26,7 @@ export interface CommunityCandidate {
 export interface ProviderPage {
   candidates: CommunityCandidate[];
   rawCount: number;
+  pageSignature: string;
 }
 
 export interface ChinaCredentialBroker {
@@ -53,6 +55,8 @@ interface AmapResponse {
 
 const clean = (value: unknown): string => String(value ?? '').replace(/\s+/gu, ' ').trim();
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const pageSignature = (items: Array<Record<string, unknown>>): string =>
+  hash(items.map((item) => clean(item.id || item.uid) || hash(item)).sort());
 const finite = (value: unknown): number | null => Number.isFinite(Number(value)) ? Number(value) : null;
 const redactSecrets = (value: unknown, secrets: string[]): string => {
   let message = clean(value);
@@ -131,14 +135,15 @@ const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPa
     const typecode = clean(item.typecode); const adcode = clean(item.adcode);
     if (typecode !== '120302' || (/^\d{6}$/u.test(region) && adcode !== region)) return null;
     const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const postcode = clean(item.postcode || (item.business as Record<string, unknown> | undefined)?.postcode);
     if (!isChinaDeliveryAddress(address)) return null;
     return {
       provider: 'amap' as const, providerPoiId: clean(item.id), name: clean(item.name), address,
-      province: clean(item.pname), city: clean(item.cityname), district: clean(item.adname), township: '',
+      province: clean(item.pname), city: clean(item.cityname), district: clean(item.adname), township: '', postcode,
       latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'GCJ-02' as const, responseHash: hash(item), typecode, adcode
     };
   }).filter(presentCandidate);
-  return { candidates, rawCount: pois.length };
+  return { candidates, rawCount: pois.length, pageSignature: pageSignature(pois) };
 };
 
 const requestAmapPage = async (url: URL, region: string, key: string, fetcher: typeof fetch): Promise<ProviderPage> => {
@@ -147,21 +152,11 @@ const requestAmapPage = async (url: URL, region: string, key: string, fetcher: t
 };
 
 export const fetchAmapCommunities = async (region: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver, subdivision = ''): Promise<ProviderPage> => {
-  const primary = new URL('https://restapi.amap.com/v5/place/text');
-  Object.entries({ key, region, types: '120302', city_limit: 'true', page_size: '25', page_num: String(page), show_fields: 'business' })
-    .forEach(([name, value]) => primary.searchParams.set(name, value));
-  if (subdivision) primary.searchParams.set('keywords', subdivision);
-  try {
-    return await requestAmapPage(primary, region, key, fetcher);
-  } catch (error) {
-    if (!(error instanceof ProviderRequestError) || error.outcome !== 'network' || error.message !== 'INVALID_JSON') throw error;
-  }
-
-  const fallback = new URL('https://restapi.amap.com/v3/place/text');
+  const url = new URL('https://restapi.amap.com/v3/place/text');
   Object.entries({ key, city: region, types: '120302', citylimit: 'true', offset: '25', page: String(page), extensions: 'all' })
-    .forEach(([name, value]) => fallback.searchParams.set(name, value));
-  if (subdivision) fallback.searchParams.set('keywords', subdivision);
-  return await requestAmapPage(fallback, region, key, fetcher);
+    .forEach(([name, value]) => url.searchParams.set(name, value));
+  if (subdivision) url.searchParams.set('keywords', subdivision);
+  return await requestAmapPage(url, region, key, fetcher);
 };
 
 export const fetchTencentCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, observeQuota?: QuotaObserver, subdivision = ''): Promise<ProviderPage> => {
@@ -189,16 +184,17 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
     const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const postcode = clean(item.postcode);
     const typecode = clean(item.category);
     if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
     return {
       provider: 'tencent' as const, providerPoiId: clean(item.id), name: clean(item.title),
       province: clean(admin?.province), city: clean(admin?.city), district: clean(admin?.district), township: '',
       latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'GCJ-02' as const, responseHash: hash(item),
-      address, typecode, adcode: clean(admin?.adcode)
+      address, postcode, typecode, adcode: clean(admin?.adcode)
     };
   }).filter(presentCandidate);
-  return { candidates, rawCount: data.length };
+  return { candidates, rawCount: data.length, pageSignature: pageSignature(data) };
 };
 
 export const fetchBaiduCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver, subdivision = ''): Promise<ProviderPage> => {
@@ -207,7 +203,9 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
     .forEach(([name, value]) => url.searchParams.set(name, value));
   const { body } = await requestJson(url, fetcher) as { body: { status?: number; message?: string; results?: Array<Record<string, unknown>> }; headers: Headers };
   if (body.status !== 0) {
-    const outcome = [4, 302].includes(Number(body.status)) ? 'quota' : body.status === 301 ? 'qps' : [101, 102, 200, 201].includes(Number(body.status)) ? 'auth' : 'invalid';
+    const status = Number(body.status);
+    const outcome = [4, 302].includes(status) ? 'quota' : [301, 401].includes(status) ? 'qps'
+      : [101, 102, 200, 201, 210, 240].includes(status) ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]), String(body.status || ''),
       outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : outcome === 'quota' ? nextChinaDay() : null,
       outcome === 'quota' ? 'day' : undefined);
@@ -220,16 +218,17 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = bd09ToWgs84(rawLatitude, rawLongitude);
     const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const postcode = clean(item.postcode);
     const typecode = clean(detail?.tag);
     if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
     return {
       provider: 'baidu' as const, providerPoiId: clean(item.uid), name: clean(item.name),
       province: clean(item.province), city: clean(item.city), district: clean(item.area), township: '',
       latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'BD-09' as const, responseHash: hash(item),
-      address, typecode, adcode: clean(item.adcode)
+      address, postcode, typecode, adcode: clean(item.adcode)
     };
   }).filter(presentCandidate);
-  return { candidates, rawCount: results.length };
+  return { candidates, rawCount: results.length, pageSignature: pageSignature(results) };
 };
 
 export const fetchBrokerCommunities = async (
@@ -250,16 +249,17 @@ export const fetchBrokerCommunities = async (
       if (rawLatitude === null || rawLongitude === null) return null;
       const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
       const address = normalizeChinaDeliveryAddress(clean(item.address));
+      const postcode = clean(item.postcode);
       const typecode = clean(item.category);
       if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
       return {
         provider: 'tencent' as const, providerPoiId: clean(item.id), name: clean(item.title),
         province: clean(admin?.province), city: clean(admin?.city), district: clean(admin?.district), township: '',
         latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'GCJ-02' as const, responseHash: hash(item),
-        address, typecode, adcode: clean(admin?.adcode)
+        address, postcode, typecode, adcode: clean(admin?.adcode)
       };
     }).filter(presentCandidate);
-    return { candidates, rawCount: data.length };
+    return { candidates, rawCount: data.length, pageSignature: pageSignature(data) };
   }
   const results = (body as { results?: Array<Record<string, unknown>> })?.results || [];
   const candidates = results.map((item) => {
@@ -269,16 +269,17 @@ export const fetchBrokerCommunities = async (
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = bd09ToWgs84(rawLatitude, rawLongitude);
     const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const postcode = clean(item.postcode);
     const typecode = clean(detail?.tag);
     if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
     return {
       provider: 'baidu' as const, providerPoiId: clean(item.uid), name: clean(item.name),
       province: clean(item.province), city: clean(item.city), district: clean(item.area), township: '',
       latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'BD-09' as const, responseHash: hash(item),
-      address, typecode, adcode: clean(item.adcode)
+      address, postcode, typecode, adcode: clean(item.adcode)
     };
   }).filter(presentCandidate);
-  return { candidates, rawCount: results.length };
+  return { candidates, rawCount: results.length, pageSignature: pageSignature(results) };
 };
 
 export const providerFetcher = {

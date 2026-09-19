@@ -6,6 +6,7 @@ const maxMetadataMs = Number.parseInt(process.env.MAX_METADATA_MS || '3000', 10)
 const maxGenerationMs = Number.parseInt(process.env.MAX_ORDINARY_GENERATION_MS || '5000', 10);
 const maxGenerationServerMs = Number.parseInt(process.env.MAX_GENERATION_SERVER_P95_MS || '100', 10);
 const maxIpGenerationMs = Number.parseInt(process.env.MAX_IP_GENERATION_MS || '30000', 10);
+const countryConcurrency = Math.max(1, Math.min(27, Number.parseInt(process.env.LIVE_API_COUNTRY_CONCURRENCY || '4', 10) || 4));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const serverTimings = (header) => Object.fromEntries(
   String(header || '').split(',').map((entry) => {
@@ -50,7 +51,10 @@ const collect = async (country, field, params = {}) => {
   return { total, options };
 };
 
-const summaries = await Promise.all(Object.entries(manifest.countries).map(async ([country, expected]) => {
+const countryEntries = Object.entries(manifest.countries);
+const summaries = [];
+let nextCountry = 0;
+const verifyCountry = async ([country, expected]) => {
   const regions = await collect(country, 'region');
   const cities = await collect(country, 'city');
   assert(regions.total > 0 && regions.total <= expected.regions,
@@ -61,6 +65,12 @@ const summaries = await Promise.all(Object.entries(manifest.countries).map(async
   const postcodes = await get(`/locations/search?${new URLSearchParams({ country, field: 'postcode', limit: '200' })}`);
   if (expected.postcodes > 0) assert(postcodes.total > 0 && postcodes.postcodes.length > 0, `${country} postcode catalog is empty`);
   return { country, regions: regions.total, cities: cities.total, postcodes: postcodes.total };
+};
+await Promise.all(Array.from({ length: Math.min(countryConcurrency, countryEntries.length) }, async () => {
+  while (nextCountry < countryEntries.length) {
+    const index = nextCountry++;
+    summaries[index] = await verifyCountry(countryEntries[index]);
+  }
 }));
 
 const usRegions = await get('/locations/search?country=US&field=region&q=California&limit=20');
@@ -84,9 +94,9 @@ for (const country of registry) {
   const ordinaryAvailable = Number(country.addressCount) > 0;
   const residentialAvailable = Number(country.residentialCount) > 0 && country.residentialAvailable;
   if (ordinaryAvailable || residentialAvailable) {
-    assert(ordinaryAvailable && residentialAvailable, `${country.code} has a partially published pool`);
     assert(Number(country.addressCount) > 0, `${country.code} ordinary address count is empty`);
-    assert(Number(country.residentialCount) > 0 && country.residentialAvailable, `${country.code} residential address count is empty`);
+    assert(Number(country.residentialCount) <= Number(country.addressCount), `${country.code} residential count exceeds total`);
+    if (country.code === 'CN') assert(residentialAvailable, 'China residential address count is empty');
     assert(country.generationMode === 'synchronized-pool', `${country.code} is not using the synchronized pool`);
     availableCountries.add(country.code);
   } else {
@@ -95,8 +105,8 @@ for (const country of registry) {
 }
 const residential = [];
 for (const country of registry.filter(({ code }) => availableCountries.has(code))) {
-  const cities = await get(`/locations/search?country=${country.code}&field=city&residential=true&limit=20`);
-  assert(cities.total > 0, `${country.code} residential city coverage is empty`);
+  const cities = await get(`/locations/search?country=${country.code}&field=city&residential=${country.code === 'CN'}&limit=20`);
+  assert(cities.total > 0, `${country.code} city coverage is empty`);
   residential.push({ country: country.code, cities: cities.total });
 }
 
@@ -142,6 +152,7 @@ assert(ipGeneration.data.sourcesTried?.includes('address-pool-v2'), 'IP-region f
 
 console.log(JSON.stringify({
   countries: summaries.length,
+  countryConcurrency,
   summaries,
   residential,
   xiamen: { id: xiamen.id, regionId: xiamen.regionId, searchRttMs: [xiamenChinese.ms, xiamenEnglish.ms] },

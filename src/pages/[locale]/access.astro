@@ -39,11 +39,29 @@ const t = copy[locale];
         <div id="error" class="error" role="alert"></div>
       </form>
     </main>
-    <script is:inline>
-      const localeSelect=document.querySelector('#locale');localeSelect.addEventListener('change',()=>location.assign(`/${localeSelect.value}/access/${location.search}${location.hash}`));
-      const form=document.querySelector('#access-form');const error=document.querySelector('#error');
-      form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';const button=form.querySelector('button');button.disabled=true;
-        try{const response=await fetch('/web-api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.querySelector('#password').value}),credentials:'same-origin'});if(!response.ok)throw new Error(form.dataset.invalid);const next=new URLSearchParams(location.search).get('next');location.replace(next&&next.startsWith('/')&&!next.startsWith('//')?next:`/${form.dataset.locale}/`);}catch(value){error.textContent=value.message||String(value);}finally{button.disabled=false;}});
+    <script>
+      import { safeReturnPath } from '../../domain/locales';
+      const localeSelect = document.querySelector<HTMLSelectElement>('#locale')!;
+      localeSelect.addEventListener('change', () => location.assign(`/${localeSelect.value}/access/${location.search}${location.hash}`));
+      const form = document.querySelector<HTMLFormElement>('#access-form')!;
+      const error = document.querySelector<HTMLElement>('#error')!;
+      const button = form.querySelector<HTMLButtonElement>('button')!;
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (button.disabled) return;
+        error.textContent = ''; button.disabled = true;
+        try {
+          const response = await fetch('/web-api/v1/auth/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: document.querySelector<HTMLInputElement>('#password')!.value }),
+            credentials: 'same-origin', signal: AbortSignal.timeout(15_000)
+          });
+          if (!response.ok) throw new Error(response.status === 401 ? form.dataset.invalid : `HTTP ${response.status}`);
+          location.replace(safeReturnPath(new URLSearchParams(location.search).get('next'), location.origin, `/${form.dataset.locale}/`));
+        } catch (value) {
+          error.textContent = value instanceof Error ? value.message : String(value);
+        } finally { button.disabled = false; }
+      });
     </script>
   </body>
 </html>

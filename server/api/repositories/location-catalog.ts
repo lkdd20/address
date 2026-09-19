@@ -2,6 +2,8 @@ import { pinyin } from 'pinyin-pro';
 import type { CountryCode, LocationOption } from '../../../src/domain/types';
 import type { Database } from '../../database/database.mjs';
 import { chinaCommunityPublicationClause } from './china-community';
+import { catalogDescendantClause, catalogId, cityAliases, findRegion, loadCatalogRegions, regionAliasResolver, resolveCatalogTarget } from './address-repository';
+import { aliasClauseValues, poolLocationAliases } from './address-pool-v2';
 
 export type CatalogField = 'region' | 'city' | 'district' | 'postcode';
 
@@ -12,6 +14,7 @@ export interface CatalogQuery {
   region?: string;
   regionId?: string;
   cityId?: string;
+  city?: string;
   residential?: boolean;
   cursor?: string;
   limit?: number;
@@ -22,6 +25,7 @@ export interface CatalogPage {
   total: number;
   availableTotal: number;
   nextCursor?: string;
+  revision?: string;
   source: 'postgres';
 }
 
@@ -47,7 +51,10 @@ interface CityRow {
 }
 
 interface PostcodeRow {
-  id: number;
+  address_count: number;
+  city_count: number;
+  region_count: number;
+  id: number | null;
   city_id: number | null;
   code: string;
   locality_name: string;
@@ -61,8 +68,10 @@ interface PostcodeRow {
   region_code: string | null;
 }
 
-interface AvailabilityRow { id: number; address_count: number }
 interface ChinaProvinceAvailabilityRow { province: string; address_count: number }
+interface GenerationLocationGroup {
+  admin1_key: string; admin1_code_key: string; locality_key: string; postal_locality_key: string; address_count: number;
+}
 
 const PAGE_SIZE = 100;
 const normalizeLimit = (value = PAGE_SIZE, maximum = 200): number => {
@@ -71,89 +80,19 @@ const normalizeLimit = (value = PAGE_SIZE, maximum = 200): number => {
 };
 const normalizeOffset = (cursor?: string): number => Math.max(0, Number.parseInt(cursor || '0', 10) || 0);
 const searchPattern = (query?: string): string => `%${(query || '').trim().toLocaleLowerCase().replace(/[\\%_]/g, '\\$&')}%`;
-
 const page = <T,>(rows: T[], total: number, offset: number): { rows: T[]; nextCursor?: string } => ({
-  rows,
-  nextCursor: offset + rows.length < total ? String(offset + rows.length) : undefined
+  rows, nextCursor: offset + rows.length < total ? String(offset + rows.length) : undefined
 });
-
-const availabilityMap = (rows: AvailabilityRow[]): Map<number, number> => new Map(
-  rows.map((row) => [Number(row.id), Number(row.address_count || 0)])
-);
-
-const regionAvailability = async (db: Database, country: CountryCode, rows: RegionRow[]): Promise<Map<number, number>> => {
-  if (!rows.length) return new Map();
-  const placeholders = rows.map(() => '?').join(',');
-  if (country === 'CN') {
-    const result = await db.prepare(`SELECT r.id,COUNT(community.id) AS address_count FROM catalog_regions r
-      LEFT JOIN cn_communities_v2 community ON community.province IN (r.name,r.native_name,r.zh_name)
-        AND ${chinaCommunityPublicationClause('community')}
-      WHERE r.id IN (${placeholders}) GROUP BY r.id`).bind(...rows.map((row) => row.id)).all<AvailabilityRow>();
-    return availabilityMap(result.results || []);
-  }
-  const result = await db.prepare(`SELECT selected.id,COALESCE(SUM(coverage.address_count),0) AS address_count
-    FROM catalog_regions selected
-    LEFT JOIN catalog_regions linked ON linked.country_code=selected.country_code
-      AND (linked.id=selected.id OR linked.path LIKE selected.path||'/%')
-    LEFT JOIN residential_coverage coverage ON coverage.country_code=selected.country_code AND coverage.region_id=linked.id
-    WHERE selected.id IN (${placeholders}) GROUP BY selected.id`)
-    .bind(...rows.map((row) => row.id)).all<AvailabilityRow>();
-  return availabilityMap(result.results || []);
-};
-
-interface LegacyCityCoverageRow { city_name: string; address_count: number }
-
-const legacyCityKey = (value: string): string => value.trim().replace(/ City/gu, '').toLocaleLowerCase('und');
-
-const cityAvailability = async (db: Database, country: CountryCode, rows: CityRow[]): Promise<Map<number, number>> => {
-  if (!rows.length) return new Map();
-  const placeholders = rows.map(() => '?').join(',');
-  const [direct, legacy] = await Promise.all([
-    db.prepare(`SELECT city_id AS id,SUM(address_count) AS address_count FROM residential_coverage
-      WHERE country_code=? AND city_id IN (${placeholders}) GROUP BY city_id`)
-      .bind(country, ...rows.map((row) => row.id)).all<AvailabilityRow>(),
-    db.prepare(`SELECT city_name,address_count FROM residential_coverage
-      WHERE country_code=? AND city_id IS NULL AND city_name<>''`).bind(country).all<LegacyCityCoverageRow>()
-  ]);
-  const available = availabilityMap(direct.results || []);
-  const idsByName = new Map<string, Set<number>>();
-  for (const row of rows) {
-    for (const name of [row.name, row.native_name]) {
-      const key = legacyCityKey(name);
-      if (!key) continue;
-      const ids = idsByName.get(key) || new Set<number>();
-      ids.add(Number(row.id));
-      idsByName.set(key, ids);
-    }
-  }
-  for (const coverage of legacy.results || []) {
-    for (const id of idsByName.get(legacyCityKey(coverage.city_name)) || []) {
-      available.set(id, (available.get(id) || 0) + Number(coverage.address_count || 0));
-    }
-  }
-  return available;
-};
-
-// Publication gate for pool addresses, kept in sync with the /v1/generate
-// residential path so displayed availability matches generatable records.
-const residentialPoolClause = (alias = 'address'): string => `${alias}.active=1
-  AND ${alias}.property_type IN ('residential','apartment') AND ${alias}.quality_score>=0.7
-  AND EXISTS (SELECT 1 FROM address_pool_evidence evidence WHERE evidence.address_id=${alias}.id
-    AND evidence.evidence_type='address_existence' AND evidence.is_current=1)
-  AND EXISTS (SELECT 1 FROM address_pool_evidence evidence WHERE evidence.address_id=${alias}.id
-    AND evidence.evidence_type='residential_use' AND evidence.is_current=1)`;
-
-const postcodeAvailability = async (db: Database, country: CountryCode, rows: PostcodeRow[]): Promise<Map<number, number>> => {
-  if (!rows.length) return new Map();
-  const placeholders = rows.map(() => '?').join(',');
-  // Use the persisted normalized key so PostgreSQL can use the country/postcode index.
-  const result = await db.prepare(`SELECT postcode.id AS id, COUNT(address.id) AS address_count
-    FROM catalog_postcodes postcode LEFT JOIN address_pool address
-      ON address.country_code=? AND address.postcode_key=LOWER(REPLACE(postcode.code,' ',''))
-      AND ${residentialPoolClause('address')}
-    WHERE postcode.id IN (${placeholders}) GROUP BY postcode.id`)
-    .bind(country, ...rows.map((row) => row.id)).all<AvailabilityRow>();
-  return availabilityMap(result.results || []);
+const generationLocations = async (db: Database, input: CatalogQuery): Promise<GenerationLocationGroup[]> =>
+  (await db.prepare(`SELECT admin1_key,admin1_code_key,locality_key,postal_locality_key,COUNT(*) AS address_count
+    FROM address_generation_index WHERE country_code=? AND active=1${input.residential ? ' AND residential_ready=1' : ''}
+    GROUP BY admin1_key,admin1_code_key,locality_key,postal_locality_key`)
+    .bind(input.country).all<GenerationLocationGroup>()).results;
+const regionMatches = (group: GenerationLocationGroup, names: string[]): boolean =>
+  !names.length || names.includes(group.admin1_key) || names.includes(group.admin1_code_key);
+const selectedRegion = async (db: Database, input: CatalogQuery): Promise<number | undefined> => {
+  if (input.regionId && !catalogId(input.regionId)) return undefined;
+  return findRegion(db, input.country, input.region, catalogId(input.regionId));
 };
 
 const regionLabel = (row: RegionRow, country: CountryCode): string => {
@@ -193,8 +132,7 @@ const queryRegions = async (db: Database, input: CatalogQuery, limit: number, of
     }
     const matching = [...unique.values()].filter((row) => !query
       || [row.name, row.native_name, row.zh_name, row.code].some((value) => value.toLocaleLowerCase().includes(query)));
-    const rows = matching.filter((row) => !input.residential
-      || [row.name, row.native_name, row.zh_name].some((value) => (availability.get(value.toLocaleLowerCase()) || 0) > 0));
+    const rows = matching.filter((row) => [row.name, row.native_name, row.zh_name].some((value) => (availability.get(value.toLocaleLowerCase()) || 0) > 0));
     const current = page(rows.slice(offset, offset + limit), rows.length, offset);
     return {
       options: current.rows.map((row) => {
@@ -220,123 +158,81 @@ const queryRegions = async (db: Database, input: CatalogQuery, limit: number, of
       source: 'postgres'
     };
   }
-  const query = (input.query || '').trim();
-  const pattern = searchPattern(query);
-  const search = query
-    ? `AND (LOWER(r.name) LIKE ? ESCAPE '\\' OR LOWER(r.native_name) LIKE ? ESCAPE '\\' OR LOWER(r.zh_name) LIKE ? ESCAPE '\\' OR LOWER(r.code) LIKE ? ESCAPE '\\')`
-    : '';
-  const where = `r.country_code = ? AND r.parent_id IS NULL ${search}`;
-  const bindings = query ? [input.country, pattern, pattern, pattern, pattern] : [input.country];
-  const count = await db.prepare(`SELECT COUNT(*) AS total FROM (
-    SELECT 1 FROM catalog_regions r WHERE ${where} GROUP BY LOWER(r.name)
-  ) grouped_regions`).bind(...bindings).first<{ total: number }>();
-  const availableCount = await db.prepare(`SELECT COUNT(DISTINCT r.id) AS total
-      FROM catalog_regions r
-      JOIN catalog_regions linked ON linked.country_code=r.country_code
-        AND (linked.id=r.id OR linked.path LIKE r.path||'/%')
-      JOIN residential_coverage coverage ON coverage.country_code=r.country_code AND coverage.region_id=linked.id
-      WHERE ${where}`).bind(...bindings).first<{ total: number }>();
-  const result = await db.prepare(`SELECT MIN(r.id) AS id, NULL AS parent_id, MIN(r.code) AS code,
-    MIN(r.name) AS name, MIN(r.native_name) AS native_name, MIN(r.zh_name) AS zh_name
-    FROM catalog_regions r WHERE ${where} GROUP BY LOWER(r.name) ORDER BY MIN(r.name) LIMIT ? OFFSET ?`)
-    .bind(...bindings, limit, offset).all<RegionRow>();
-  const total = Number(count?.total || 0);
-  const current = page(result.results || [], total, offset);
-  const available = await regionAvailability(db, input.country, current.rows);
+  const [catalog, groups] = await Promise.all([
+    loadCatalogRegions(db, input.country),
+    generationLocations(db, input)
+  ]);
+  const regionNames = regionAliasResolver(catalog);
+  const query = (input.query || '').trim().toLocaleLowerCase();
+  const unique = new Map<string, RegionRow & { availableCount: number }>();
+  for (const row of catalog.filter((row) => row.parent_id == null)) {
+    if (query && ![row.name, row.native_name, row.zh_name, row.code].some((value) => value.toLocaleLowerCase().includes(query))) continue;
+    const names = poolLocationAliases(regionNames(row.id));
+    const availableCount = groups.reduce((count, group) => count + (regionMatches(group, names) ? Number(group.address_count) : 0), 0);
+    const key = row.name.toLocaleLowerCase();
+    if (availableCount && !unique.has(key)) unique.set(key, { ...row, availableCount });
+  }
+  const rows = [...unique.values()];
+  const current = page(rows.slice(offset, offset + limit), rows.length, offset);
   return {
-    options: current.rows.map((row) => {
-      const availableCount = available.get(Number(row.id)) || 0;
-      return { value: row.name, label: regionLabel(row, input.country), availableCount, disabled: input.residential && availableCount === 0,
-        id: String(row.id), parentId: row.parent_id == null ? undefined : String(row.parent_id), regionCode: row.code || undefined,
-        native: row.native_name, en: row.name, zhCN: row.zh_name };
-    }),
-    total,
-    availableTotal: Number(availableCount?.total || 0),
-    nextCursor: current.nextCursor,
-    source: 'postgres'
-  };
-};
-
-const regionScope = (regionId?: string): { sql: string; bindings: number[] } => {
-  const id = Number.parseInt(regionId || '', 10);
-  if (!Number.isFinite(id)) return { sql: '', bindings: [] };
-  return {
-    sql: `AND c.region_id IN (SELECT child.id FROM catalog_regions selected JOIN catalog_regions child ON child.path LIKE selected.path || '%' WHERE selected.id = ?)`,
-    bindings: [id]
+    options: current.rows.map((row) => ({
+      value: row.name, label: regionLabel(row, input.country), availableCount: row.availableCount, disabled: false,
+      id: String(row.id), regionCode: row.code || undefined, native: row.native_name, en: row.name, zhCN: row.zh_name
+    })),
+    total: rows.length, availableTotal: rows.length, nextCursor: current.nextCursor, source: 'postgres'
   };
 };
 
 const queryCities = async (db: Database, input: CatalogQuery, limit: number, offset: number): Promise<CatalogPage> => {
-  const query = (input.query || '').trim();
-  const pattern = searchPattern(query);
-  const scope = regionScope(input.regionId);
-  const search = query
-    ? `AND (LOWER(c.name) LIKE ? ESCAPE '\\' OR LOWER(c.native_name) LIKE ? ESCAPE '\\' OR LOWER(c.zh_name) LIKE ? ESCAPE '\\')`
-    : '';
-  const where = `c.country_code = ? ${scope.sql} ${search}`;
-  const bindings = query
-    ? [input.country, ...scope.bindings, pattern, pattern, pattern]
-    : [input.country, ...scope.bindings];
-  const count = await db.prepare(`SELECT COUNT(*) AS total FROM (
-    SELECT 1 FROM catalog_cities c LEFT JOIN catalog_regions r ON r.id = c.region_id
-    WHERE ${where} GROUP BY LOWER(c.name), LOWER(COALESCE(r.name, ''))
-  ) grouped_cities`).bind(...bindings).first<{ total: number }>();
-  const availableCount = await db.prepare(`WITH legacy_names AS (
-      SELECT LOWER(city_name) AS name FROM residential_coverage
-        WHERE country_code=? AND city_id IS NULL AND city_name<>''
-      UNION SELECT LOWER(city_name||' City') FROM residential_coverage
-        WHERE country_code=? AND city_id IS NULL AND city_name<>''
-      UNION SELECT LOWER(SUBSTRING(city_name, 1, LENGTH(city_name) - 5)) FROM residential_coverage
-        WHERE country_code=? AND city_id IS NULL AND LOWER(city_name) LIKE '% city'
-    ), available_ids AS (
-      SELECT c.id FROM catalog_cities c JOIN residential_coverage coverage
-        ON coverage.country_code=c.country_code AND coverage.city_id=c.id WHERE ${where}
-      UNION
-      SELECT c.id FROM catalog_cities c JOIN legacy_names legacy
-        ON LOWER(c.name)=legacy.name OR LOWER(c.native_name)=legacy.name WHERE ${where}
-    ) SELECT COUNT(*) AS total FROM available_ids`)
-    .bind(input.country, input.country, input.country, ...bindings, ...bindings).first<{ total: number }>();
-  const result = await db.prepare(`SELECT c.id, c.region_id, c.name, c.native_name, c.zh_name,
-    c.region_name, c.region_native_name, c.region_zh_name, c.region_code FROM (
-      SELECT MIN(c.id) AS id, MIN(c.region_id) AS region_id,
-        MIN(c.name) AS name, MIN(c.native_name) AS native_name, MIN(c.zh_name) AS zh_name,
-        MIN(r.name) AS region_name, MIN(r.native_name) AS region_native_name,
-        MIN(r.zh_name) AS region_zh_name, MIN(r.code) AS region_code, MAX(COALESCE(c.population, 0)) AS population
-      FROM catalog_cities c LEFT JOIN catalog_regions r ON r.id = c.region_id
-      WHERE ${where} GROUP BY LOWER(c.name), LOWER(COALESCE(r.name, ''))
-    ) c ORDER BY c.population DESC, c.name, c.id LIMIT ? OFFSET ?`)
-    .bind(...bindings, limit, offset).all<CityRow>();
-  const total = Number(count?.total || 0);
-  const current = page(result.results || [], total, offset);
-  const available = await cityAvailability(db, input.country, current.rows);
+  const regionId = await selectedRegion(db, input);
+  if ((input.region || input.regionId) && regionId === undefined) return emptyPage;
+  const scope = regionId === undefined ? '' : `AND c.region_id IN (
+    SELECT child.id FROM catalog_regions selected JOIN catalog_regions child
+      ON child.country_code=selected.country_code AND ${catalogDescendantClause}
+    WHERE selected.id=?)`;
+  const [catalog, groups, regionRows] = await Promise.all([
+    db.prepare(`SELECT c.id, c.region_id, c.name, c.native_name, c.zh_name,
+      r.name AS region_name,r.native_name AS region_native_name,r.zh_name AS region_zh_name,r.code AS region_code
+      FROM catalog_cities c LEFT JOIN catalog_regions r ON r.id=c.region_id
+      WHERE c.country_code=? ${scope} ORDER BY COALESCE(c.population,0) DESC,c.name,c.id`)
+      .bind(input.country, ...(regionId === undefined ? [] : [regionId])).all<CityRow>(),
+    generationLocations(db, input), loadCatalogRegions(db, input.country)
+  ]);
+  const regionNames = regionAliasResolver(regionRows);
+  const byCity = new Map<string, Set<GenerationLocationGroup>>();
+  for (const group of groups) for (const key of new Set([group.locality_key, group.postal_locality_key])) {
+    if (!key) continue;
+    const matches = byCity.get(key) || new Set<GenerationLocationGroup>();
+    matches.add(group); byCity.set(key, matches);
+  }
+  const query = (input.query || '').trim().toLocaleLowerCase();
+  const unique = new Map<string, CityRow & { availableCount: number }>();
+  for (const row of catalog.results) {
+    if (query && ![row.name, row.native_name, row.zh_name].some((value) => value.toLocaleLowerCase().includes(query))) continue;
+    const regions = poolLocationAliases(row.region_id == null ? [] : regionNames(row.region_id, true));
+    const matches = new Set<GenerationLocationGroup>();
+    for (const name of poolLocationAliases(cityAliases(row.name, row.native_name, row.zh_name))) {
+      for (const group of byCity.get(name) || []) if (regionMatches(group, regions)) matches.add(group);
+    }
+    const availableCount = [...matches].reduce((sum, group) => sum + Number(group.address_count), 0);
+    const key = `${row.name.toLocaleLowerCase()}:${(row.region_name || row.region_code || '').toLocaleLowerCase()}`;
+    if (availableCount && !unique.has(key)) unique.set(key, { ...row, availableCount });
+  }
+  const rows = [...unique.values()];
+  const current = page(rows.slice(offset, offset + limit), rows.length, offset);
   return {
     options: current.rows.map((row) => ({
-      value: row.name,
-      label: cityLabel(row, input.country),
-      availableCount: available.get(Number(row.id)) || 0,
-      disabled: input.residential && (available.get(Number(row.id)) || 0) === 0,
-      id: String(row.id),
-      parentId: row.region_id == null ? undefined : String(row.region_id),
+      value: row.name, label: cityLabel(row, input.country), availableCount: row.availableCount, disabled: false,
+      id: String(row.id), parentId: row.region_id == null ? undefined : String(row.region_id),
       parentValue: row.region_name || undefined,
       parentLabel: row.region_name ? regionLabel({
-        id: row.region_id || 0,
-        parent_id: null,
-        code: row.region_code || '',
-        name: row.region_name,
-        native_name: row.region_native_name || row.region_name,
-        zh_name: row.region_zh_name || row.region_name
+        id: row.region_id || 0, parent_id: null, code: row.region_code || '', name: row.region_name,
+        native_name: row.region_native_name || row.region_name, zh_name: row.region_zh_name || row.region_name
       }, input.country) : undefined,
-      regionId: row.region_id == null ? undefined : String(row.region_id),
-      regionValue: row.region_name || undefined,
-      regionCode: row.region_code || undefined,
-      native: row.native_name,
-      en: row.name,
-      zhCN: row.zh_name
+      regionId: row.region_id == null ? undefined : String(row.region_id), regionValue: row.region_name || undefined,
+      regionCode: row.region_code || undefined, native: row.native_name, en: row.name, zhCN: row.zh_name
     })),
-    total,
-    availableTotal: Number(availableCount?.total || 0),
-    nextCursor: current.nextCursor,
-    source: 'postgres'
+    total: rows.length, availableTotal: rows.length, nextCursor: current.nextCursor, source: 'postgres'
   };
 };
 
@@ -369,14 +265,16 @@ export const decodeSyntheticCityId = (id: string | undefined): string | undefine
   if (!id?.startsWith(CN_SYNTHETIC_CITY_PREFIX)) return undefined;
   const hex = id.slice(CN_SYNTHETIC_CITY_PREFIX.length);
   if (!/^[0-9a-f]+$/u.test(hex) || hex.length % 2 !== 0) return undefined;
-  return Buffer.from(hex, 'hex').toString('utf8');
+  const value = Buffer.from(hex, 'hex').toString('utf8');
+  return value.trim() && Buffer.from(value, 'utf8').toString('hex') === hex ? value : undefined;
 };
 const syntheticDistrictId = (district: string): string => `${CN_SYNTHETIC_DISTRICT_PREFIX}${Buffer.from(district, 'utf8').toString('hex')}`;
 export const decodeSyntheticDistrictId = (id: string | undefined): string | undefined => {
   if (!id?.startsWith(CN_SYNTHETIC_DISTRICT_PREFIX)) return undefined;
   const hex = id.slice(CN_SYNTHETIC_DISTRICT_PREFIX.length);
   if (!/^[0-9a-f]+$/u.test(hex) || hex.length % 2 !== 0) return undefined;
-  return Buffer.from(hex, 'hex').toString('utf8');
+  const value = Buffer.from(hex, 'hex').toString('utf8');
+  return value.trim() && Buffer.from(value, 'utf8').toString('hex') === hex ? value : undefined;
 };
 const searchableKey = (value: string): string => (value || '')
   .normalize('NFKD').replace(/[̀-ͯ]/g, '').toLocaleLowerCase().replace(/[\s\-'･·]/g, '');
@@ -585,74 +483,96 @@ const queryDistricts = async (db: Database, input: CatalogQuery, limit: number, 
 };
 
 const queryPostcodes = async (db: Database, input: CatalogQuery, limit: number, offset: number): Promise<CatalogPage> => {
-  const pattern = searchPattern(input.query);
-  const cityId = Number.parseInt(input.cityId || '', 10);
-  const regionId = Number.parseInt(input.regionId || '', 10);
-  const parentSql = Number.isFinite(cityId)
-    ? `AND (p.city_id = ? OR LOWER(p.locality_name) IN (
-        SELECT LOWER(name) FROM catalog_cities WHERE id = ?
-        UNION SELECT LOWER(native_name) FROM catalog_cities WHERE id = ?
-      ))`
-    : Number.isFinite(regionId)
-      ? `AND COALESCE(p.region_id, c.region_id) IN (SELECT child.id FROM catalog_regions selected JOIN catalog_regions child ON child.path LIKE selected.path || '%' WHERE selected.id = ?)`
-      : '';
-  const parentBindings = Number.isFinite(cityId) ? [cityId, cityId, cityId] : Number.isFinite(regionId) ? [regionId] : [];
-  const where = `p.country_code = ? ${parentSql} AND (LOWER(p.code) LIKE ? ESCAPE '\\' OR LOWER(p.locality_name) LIKE ? ESCAPE '\\')`;
-  const bindings = [input.country, ...parentBindings, pattern, pattern];
-  const count = await db.prepare(`SELECT COUNT(DISTINCT p.code) AS total FROM catalog_postcodes p LEFT JOIN catalog_cities c ON c.id = p.city_id WHERE ${where}`).bind(...bindings).first<{ total: number }>();
-  const availableCount = await db.prepare(`SELECT COUNT(DISTINCT p.code) AS total FROM catalog_postcodes p
-    LEFT JOIN catalog_cities c ON c.id=p.city_id WHERE ${where} AND LOWER(REPLACE(p.code,' ','')) IN (
-      SELECT address.postcode_key FROM address_pool address
-      WHERE address.country_code=? AND ${residentialPoolClause('address')}
-    )`).bind(...bindings, input.country).first<{ total: number }>();
-  const result = await db.prepare(`SELECT MIN(p.id) AS id, MAX(p.city_id) AS city_id, p.code,
-    MAX(p.locality_name) AS locality_name, MAX(c.name) AS city_name, MAX(c.native_name) AS city_native_name,
-    MAX(c.zh_name) AS city_zh_name, MAX(COALESCE(p.region_id, c.region_id)) AS region_id,
-    MAX(r.name) AS region_name, MAX(r.native_name) AS region_native_name, MAX(r.zh_name) AS region_zh_name,
-    MAX(r.code) AS region_code
-    FROM catalog_postcodes p
-    LEFT JOIN catalog_cities c ON c.id = p.city_id
-    LEFT JOIN catalog_regions r ON r.id = COALESCE(p.region_id, c.region_id)
-    WHERE ${where} GROUP BY p.code ORDER BY p.code LIMIT ? OFFSET ?`)
-    .bind(...bindings, limit, offset).all<PostcodeRow>();
+  const hasParent = Boolean(input.region || input.regionId || input.city || input.cityId);
+  const target = hasParent ? await resolveCatalogTarget(db, input.country, input, 'catalog-options') : undefined;
+  if (hasParent && !target) return emptyPage;
+  const clauses = ['country_code=?', 'active=1', "postcode_key<>''"];
+  const generationBindings: unknown[] = [input.country];
+  if (input.residential) clauses.push('residential_ready=1');
+  const regionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'],
+    poolLocationAliases([input.region, ...target?.regionAliases || []]));
+  if (regionClause) {
+    clauses.push(regionClause.sql);
+    generationBindings.push(...regionClause.values);
+  }
+  const cityClause = aliasClauseValues(['locality_key', 'postal_locality_key'],
+    poolLocationAliases([input.city, ...target?.cityAliases || []]));
+  if (cityClause) {
+    clauses.push(cityClause.sql);
+    generationBindings.push(...cityClause.values);
+  }
+  const where = ['p.country_code=?'];
+  const bindings: unknown[] = [input.country];
+  if (target?.regionId) {
+    where.push(`COALESCE(p.region_id,c.region_id) IN (SELECT child.id FROM catalog_regions selected
+      JOIN catalog_regions child ON child.country_code=selected.country_code
+        AND ${catalogDescendantClause} WHERE selected.id=?)`);
+    bindings.push(target.regionId);
+  }
+  if (target?.cityId) {
+    where.push(`(p.city_id=? OR LOWER(p.locality_name) IN (SELECT LOWER(name) FROM catalog_cities WHERE id=?
+      UNION SELECT LOWER(native_name) FROM catalog_cities WHERE id=?))`);
+    bindings.push(target.cityId, target.cityId, target.cityId);
+  }
+  const search = input.query?.trim()
+    ? 'WHERE available.postcode_key LIKE ? OR LOWER(p.locality_name) LIKE ?' : '';
+  const searchBindings = search ? [searchPattern(input.query!.replace(/\s/gu, '')), searchPattern(input.query)] : [];
+  const cte = `WITH available_postcodes AS (
+      SELECT postcode_key,COUNT(*) AS address_count FROM address_generation_index
+      WHERE ${clauses.join(' AND ')} GROUP BY postcode_key
+    ), catalog_matches AS (
+      SELECT p.id,p.code,p.city_id,p.locality_name,COALESCE(p.region_id,c.region_id) AS region_id
+      FROM catalog_postcodes p LEFT JOIN catalog_cities c ON c.id=p.city_id
+      WHERE ${where.join(' AND ')}
+    ), available_options AS (
+      SELECT available.postcode_key,MIN(p.id) AS id,MAX(available.address_count) AS address_count,
+        CASE WHEN COUNT(DISTINCT p.city_id)=1 AND COUNT(p.city_id)=COUNT(*) THEN 1 ELSE 0 END AS city_count,
+        CASE WHEN COUNT(DISTINCT p.region_id)=1 AND COUNT(p.region_id)=COUNT(*) THEN 1 ELSE 0 END AS region_count
+      FROM available_postcodes available LEFT JOIN catalog_matches p
+        ON available.postcode_key=LOWER(REPLACE(p.code,' ',''))
+      ${search} GROUP BY available.postcode_key
+    )`;
+  const values = [...generationBindings, ...bindings, ...searchBindings];
+  const count = await db.prepare(`${cte} SELECT COUNT(*) AS total FROM available_options`).bind(...values).first<{ total: number }>();
   const total = Number(count?.total || 0);
+  if (!total) return emptyPage;
+  const result = await db.prepare(`${cte} SELECT p.id,p.city_id,COALESCE(p.code,UPPER(available.postcode_key)) AS code,p.locality_name,
+      c.name AS city_name,c.native_name AS city_native_name,c.zh_name AS city_zh_name,
+      COALESCE(p.region_id,c.region_id) AS region_id,r.name AS region_name,r.native_name AS region_native_name,
+      r.zh_name AS region_zh_name,r.code AS region_code,available.address_count,available.city_count,available.region_count
+    FROM available_options available LEFT JOIN catalog_postcodes p ON p.id=available.id
+    LEFT JOIN catalog_cities c ON c.id=p.city_id LEFT JOIN catalog_regions r ON r.id=COALESCE(p.region_id,c.region_id)
+    ORDER BY available.postcode_key,available.id LIMIT ? OFFSET ?`).bind(...values, limit, offset).all<PostcodeRow>();
   const current = page(result.results || [], total, offset);
-  const available = await postcodeAvailability(db, input.country, current.rows);
   return {
-    options: current.rows.map((row) => ({
-      value: row.code,
-      label: [row.code, row.locality_name, row.region_name].filter(Boolean).join(' · '),
-      availableCount: available.get(Number(row.id)) || 0,
-      disabled: input.residential && (available.get(Number(row.id)) || 0) === 0,
-      id: String(row.id),
-      parentId: row.city_id == null ? undefined : String(row.city_id),
-      parentValue: row.city_name || row.locality_name || undefined,
-      parentLabel: row.city_name || row.locality_name || undefined,
-      regionId: row.region_id == null ? undefined : String(row.region_id),
-      regionValue: row.region_name || undefined,
-      regionLabel: row.region_name ? regionLabel({
-        id: row.region_id || 0,
-        parent_id: null,
-        code: row.region_code || '',
-        name: row.region_name,
-        native_name: row.region_native_name || row.region_name,
-        zh_name: row.region_zh_name || row.region_name
-      }, input.country) : undefined,
-      regionCode: row.region_code || undefined,
-      native: [row.code, row.city_native_name || row.locality_name].filter(Boolean).join(' · '),
-      en: [row.code, row.city_name || row.locality_name].filter(Boolean).join(' · '),
-      zhCN: [row.code, row.city_zh_name || row.locality_name].filter(Boolean).join(' · ')
-    })),
-    total,
-    availableTotal: Number(availableCount?.total || 0),
-    nextCursor: current.nextCursor,
-    source: 'postgres'
+    options: current.rows.map((row) => {
+      const cityKnown = Number(row.city_count) === 1;
+      const regionKnown = Number(row.region_count) === 1;
+      return {
+        value: row.code, label: [row.code, cityKnown && row.locality_name, regionKnown && row.region_name].filter(Boolean).join(' · '),
+        availableCount: Number(row.address_count), disabled: false, id: row.id == null ? undefined : String(row.id),
+        parentId: cityKnown && row.city_id != null ? String(row.city_id) : undefined,
+        parentValue: cityKnown ? row.city_name || row.locality_name || undefined : undefined,
+        parentLabel: cityKnown ? row.city_name || row.locality_name || undefined : undefined,
+        regionId: regionKnown && row.region_id != null ? String(row.region_id) : undefined,
+        regionValue: regionKnown ? row.region_name || undefined : undefined,
+        regionLabel: regionKnown && row.region_name ? regionLabel({
+          id: row.region_id || 0, parent_id: null, code: row.region_code || '', name: row.region_name,
+          native_name: row.region_native_name || row.region_name, zh_name: row.region_zh_name || row.region_name
+        }, input.country) : undefined,
+        regionCode: regionKnown ? row.region_code || undefined : undefined,
+        native: [row.code, cityKnown && (row.city_native_name || row.locality_name)].filter(Boolean).join(' · '),
+        en: [row.code, cityKnown && (row.city_name || row.locality_name)].filter(Boolean).join(' · '),
+        zhCN: [row.code, cityKnown && (row.city_zh_name || row.locality_name)].filter(Boolean).join(' · ')
+      };
+    }),
+    total, availableTotal: total, nextCursor: current.nextCursor, source: 'postgres'
   };
 };
 
 const locationCatalogCache = new WeakMap<Database, Map<string, { expiresAt: number; promise: Promise<CatalogPage> }>>();
 const catalogCacheKey = (input: CatalogQuery): string => JSON.stringify([
-  input.country, input.field, input.query || '', input.region || '', input.regionId || '', input.cityId || '',
+  input.country, input.field, input.query || '', input.region || '', input.regionId || '', input.cityId || '', input.city || '',
   Boolean(input.residential), input.cursor || '', input.limit ?? null
 ]);
 
@@ -661,7 +581,10 @@ export const invalidateLocationCatalogCache = (db: Database): void => {
 };
 
 export const queryLocationCatalog = async (db: Database, input: CatalogQuery): Promise<CatalogPage> => {
-  const key = catalogCacheKey(input);
+  if (input.field === 'district' && input.country !== 'CN') return { ...emptyPage, revision: '' };
+  const revision = await db.prepare('SELECT version FROM address_pool_revisions WHERE kind=?')
+    .bind(`generation:${input.country}`).first<string>('version');
+  const key = `${catalogCacheKey(input)}:${revision || ''}`;
   let cache = locationCatalogCache.get(db);
   if (!cache) {
     cache = new Map();
@@ -671,10 +594,11 @@ export const queryLocationCatalog = async (db: Database, input: CatalogQuery): P
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
   const limit = normalizeLimit(input.limit, 200);
   const offset = normalizeOffset(input.cursor);
-  const promise = input.field === 'region' ? queryRegions(db, input, limit, offset)
+  const pagePromise = input.field === 'region' ? queryRegions(db, input, limit, offset)
     : input.field === 'city' ? (input.country === 'CN' ? queryChinaCities(db, input, limit, offset) : queryCities(db, input, limit, offset))
       : input.field === 'district' ? queryDistricts(db, input, limit, offset)
         : queryPostcodes(db, input, limit, offset);
+  const promise = pagePromise.then((page) => ({ ...page, revision: revision || '' }));
   cache.set(key, { expiresAt: Number.POSITIVE_INFINITY, promise });
   if (cache.size > 500) {
     const now = Date.now();
@@ -718,7 +642,7 @@ export const recordResidentialCoverage = async (
   }
   await db.prepare(`INSERT INTO residential_coverage(country_code, region_name, city_name, address_count, last_verified_at, region_id, city_id)
     VALUES (?, ?, ?, 1, ?, ?, ?)
-    ON CONFLICT(country_code, region_name, city_name) DO UPDATE SET
+    ON CONFLICT(country_code, region_name, city_name, identity_key) DO UPDATE SET
       address_count = address_count + 1,
       last_verified_at = excluded.last_verified_at,
       region_id = COALESCE(excluded.region_id, residential_coverage.region_id),

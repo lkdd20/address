@@ -23,6 +23,10 @@ import {
 } from '../sync/address-policy.mjs';
 import { evaluateCountryGoals } from '../sync/country-goals.mjs';
 import { queryLocationCatalog, type CatalogField } from '../api/repositories/location-catalog';
+import {
+  fetchOpenAICompatibleModelCatalog, translateOpenAICompatible
+} from '../credential-broker/openai-compatible.mjs';
+import { preservesAddressIdentifiers, preservesAddressNumbers } from '../../src/domain/address-localization.mjs';
 
 const adminCookie = 'address_admin_session';
 const adminCsrfCookie = 'address_admin_csrf';
@@ -90,8 +94,28 @@ const isMapProvider = (provider: CredentialProviderName): provider is ProviderNa
 export const testServiceCredential = async (
   provider: ServiceProviderName,
   secret: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  options: { prompt?: string } = {}
 ): Promise<{ success: boolean; resultCount: number }> => {
+  if (provider === 'deepl') throw new ProviderRequestError('invalid', 'DEEPL_REQUIRES_BROKER');
+  if (provider === 'openai-compatible') {
+    const values = ['Beijing', 'Block D1-12', '100000'];
+    let translations: string[];
+    try {
+      translations = await translateOpenAICompatible(secret, values, 'en', fetcher, undefined, { prompt: options.prompt });
+    } catch (error) {
+      const cause = error as { outcome?: string; code?: string; retryAt?: string | null };
+      const outcome = ['qps', 'quota', 'auth', 'network', 'invalid'].includes(cause.outcome || '')
+        ? cause.outcome as 'qps' | 'quota' | 'auth' | 'network' | 'invalid' : 'invalid';
+      throw new ProviderRequestError(outcome, String(cause.code || 'OPENAI_COMPATIBLE_TEST_FAILED'),
+        String(cause.code || ''), cause.retryAt || null, outcome === 'quota' ? 'day' : undefined);
+    }
+    if (translations.length !== values.length || translations.some((value, index) =>
+      !preservesAddressNumbers(values[index], value) || !preservesAddressIdentifiers(values[index], value))) {
+      throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+    }
+    return { success: true, resultCount: translations.length };
+  }
   if (provider === 'youdao') {
     const credentials = parseYoudaoSecret(secret);
     if (!credentials) throw new ProviderRequestError('invalid', 'INVALID_PROVIDER_CREDENTIAL');
@@ -219,15 +243,30 @@ export const proxyAmapServiceRequest = async (
 };
 
 export const createAdminApi = ({
-  control, china, addressDb, trustProxy = false, triggerCountrySync, warmReadModels = false
+  control, china, addressDb, trustProxy = false, triggerCountrySync, warmReadModels = false, credentialBroker
 }: {
   control: ControlStore; china: ChinaDataService; addressDb: Database; trustProxy?: boolean;
   triggerCountrySync?: (countryCode: string) => Promise<Record<string, unknown>>;
   warmReadModels?: boolean;
+  credentialBroker?: { request: (operation: string, parameters: Record<string, unknown>, options?: Record<string, unknown>) => Promise<unknown> } | null;
 }) => {
   const app = new Hono<{ Bindings: RequestBindings }>();
+  const modelFetchRateLimiter = createAmapProxyRateLimiter(30, 10 * 60_000);
   const wakeChina = async (): Promise<void> => {
     if (typeof china.wake === 'function') await china.wake(0);
+  };
+  let credentialWake: Promise<void> | undefined;
+  let credentialWakeRequested = false;
+  const notifyCredentialChange = (provider: CredentialProviderName): void => {
+    if (!isMapProvider(provider)) return;
+    credentialWakeRequested = true;
+    credentialWake ||= Promise.resolve().then(async () => {
+      while (credentialWakeRequested) {
+        credentialWakeRequested = false;
+        try { await wakeChina(); }
+        catch { console.error('CHINA_CREDENTIAL_WAKE_FAILED'); }
+      }
+    }).finally(() => { credentialWake = undefined; });
   };
   interface SyncQueueUpstream { generatedAt?: string; job?: unknown; entries?: Array<Record<string, unknown>> }
   let syncQueueUpstreamSnapshot: { expiresAt: number; promise: Promise<SyncQueueUpstream | null> } | undefined;
@@ -478,7 +517,8 @@ export const createAdminApi = ({
 
   app.get('/admin/api/dashboard', async (context) => {
     const [addressCount, chinaStatus, credentials, runs, addressBytes, controlBytes] = await Promise.all([
-      addressDb.prepare('SELECT COUNT(*) AS total FROM address_pool WHERE active=1').first<number>('total'),
+      addressDb.prepare(`SELECT COALESCE(SUM(residential_count),0) AS total
+        FROM admin_coverage_stats WHERE level=0`).first<number>('total'),
       china.status(), control.listCredentials(), control.runs(10),
       addressDb.prepare(`SELECT COALESCE(SUM(pg_total_relation_size((schemaname||'.'||tablename)::regclass)),0) AS total
         FROM pg_tables WHERE schemaname='address'`).first<number>('total'),
@@ -654,7 +694,7 @@ export const createAdminApi = ({
       country,
       field,
       query,
-      residential: true,
+      residential: country === 'CN',
       cursor: context.req.query('cursor') || undefined,
       limit: 100
     });
@@ -689,14 +729,24 @@ export const createAdminApi = ({
   });
 
   app.get('/admin/api/settings/translation', async (context) => context.json({ data: {
-    googleTranslationEnabled: Boolean(await control.setting('google_translation_enabled', true))
+    googleTranslationEnabled: Boolean(await control.setting('google_translation_enabled', true)),
+    routes: await control.translationRoutes()
   } }));
   app.put('/admin/api/settings/translation', async (context) => {
     const input = await context.req.json<{ googleTranslationEnabled?: unknown }>();
     if (typeof input.googleTranslationEnabled !== 'boolean') return context.json({ error: 'INVALID_TRANSLATION_CONFIG' }, 400);
+    const googleRoute = (await control.translationRoutes()).find((route) => route.provider === 'google');
+    if (googleRoute) await control.updateTranslationRoutes([{ id: googleRoute.id, priority: googleRoute.priority, enabled: input.googleTranslationEnabled }]);
     await control.setSetting('google_translation_enabled', input.googleTranslationEnabled);
     await control.audit('admin', 'settings.translation.update', 'translation', { googleTranslationEnabled: input.googleTranslationEnabled });
-    return context.json({ data: { googleTranslationEnabled: input.googleTranslationEnabled } });
+    return context.json({ data: { googleTranslationEnabled: input.googleTranslationEnabled, routes: await control.translationRoutes() } });
+  });
+  app.put('/admin/api/settings/translation/routes', async (context) => {
+    const input = await context.req.json<{ routes?: unknown }>().catch(() => ({ routes: undefined }));
+    if (!Array.isArray(input.routes)) return context.json({ error: 'INVALID_TRANSLATION_ROUTES' }, 400);
+    const routes = await control.updateTranslationRoutes(input.routes);
+    await control.audit('admin', 'settings.translation.routes.update', 'translation', { routeCount: routes.length });
+    return context.json({ data: routes });
   });
 
   app.get('/admin/api/settings/youdao', async (context) => context.json({ data: await control.youdaoCredentialStatus() }));
@@ -774,29 +824,66 @@ export const createAdminApi = ({
     const input = await context.req.json<CredentialInput>();
     const id = await control.addCredential(input);
     await control.audit('admin', 'provider_key.create', id, { provider: input.provider });
-    if (isMapProvider(input.provider)) await wakeChina();
+    notifyCredentialChange(input.provider);
     return context.json({ data: { id } }, 201);
   });
   app.put('/admin/api/providers/:id', async (context) => {
-    await control.updateCredential(context.req.param('id'), await context.req.json<Record<string, unknown>>());
+    const provider = await control.updateCredential(context.req.param('id'), await context.req.json<Record<string, unknown>>());
     await control.audit('admin', 'provider_key.update', context.req.param('id'));
-    await wakeChina();
+    notifyCredentialChange(provider);
     return context.json({ data: { success: true } });
   });
   app.delete('/admin/api/providers/:id', async (context) => {
-    await control.deleteCredential(context.req.param('id'));
+    const provider = await control.deleteCredential(context.req.param('id'));
     await control.audit('admin', 'provider_key.delete', context.req.param('id'));
-    await wakeChina();
+    notifyCredentialChange(provider);
     return context.json({ data: { success: true } });
   });
   app.post('/admin/api/providers/:id/reveal', async (context) => {
     return context.json({ data: await control.revealCredential(context.req.param('id')) });
   });
   app.post('/admin/api/providers/:id/reveal-fields', async (context) => {
-    return context.json({ data: await control.revealYoudaoCredential(context.req.param('id')) });
+    return context.json({ data: await control.revealCredentialFields(context.req.param('id')) });
+  });
+  app.post('/admin/api/providers/openai-compatible/models', async (context) => {
+    const client = requestClientAddress(context.req.raw, context.env?.remoteAddress, trustProxy);
+    if (!modelFetchRateLimiter(client)) return context.json({ error: 'MODEL_FETCH_RATE_LIMITED' }, 429, { 'Retry-After': '600' });
+    const input = await context.req.json<Record<string, unknown>>().catch(() => undefined);
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).some((key) => !['credentialId', 'apiKey', 'baseUrl', 'model', 'reasoningEffort'].includes(key))) {
+      return context.json({ error: 'INVALID_MODEL_FETCH_REQUEST' }, 400);
+    }
+    const credentialId = typeof input.credentialId === 'string' ? input.credentialId.trim() : '';
+    if (credentialId && !/^[a-f\d-]{36}$/iu.test(credentialId)) return context.json({ error: 'INVALID_MODEL_FETCH_REQUEST' }, 400);
+    try {
+      const stored = credentialId ? await control.revealOpenAICompatibleCredential(credentialId) : undefined;
+      const apiKey = typeof input.apiKey === 'string' && input.apiKey.trim() ? input.apiKey.trim() : stored?.apiKey;
+      const baseUrl = typeof input.baseUrl === 'string' && input.baseUrl.trim() ? input.baseUrl.trim() : stored?.baseUrl;
+      const catalog = await fetchOpenAICompatibleModelCatalog({ apiKey, baseUrl }, fetch);
+      await control.audit('admin', 'provider_models.fetch', credentialId || 'temporary', { modelCount: catalog.models.length });
+      return context.json({ data: catalog });
+    } catch (error) {
+      const cause = error as { code?: string; outcome?: string; retryAt?: string | null };
+      const code = cause.code || 'MODEL_FETCH_FAILED';
+      const status = code === 'INVALID_OPENAI_COMPATIBLE_CREDENTIAL' ? 400
+        : cause.outcome === 'qps' ? 429 : 502;
+      return context.json({ error: code, ...(cause.outcome ? { outcome: cause.outcome } : {}) }, status,
+        cause.retryAt ? { 'Retry-After': String(Math.max(1, Math.ceil((Date.parse(cause.retryAt) - Date.now()) / 1000))) } : undefined);
+    }
   });
   app.post('/admin/api/providers/:credential/test', async (context) => {
     const value = context.req.param('credential');
+    const selected = (await control.listCredentials()).find((item) => item.id === value);
+    if (value === 'deepl' || selected?.provider === 'deepl') {
+      if (!credentialBroker) return context.json({ error: 'DEEPL_REQUIRES_BROKER' }, 503);
+      try {
+        const quota = await credentialBroker.request('deepl.usage', selected ? { credentialId: value } : {}, { maxDispatches: 1 });
+        await control.audit('admin', 'provider_key.test', value);
+        return context.json({ data: { success: true, resultCount: 0, quota } });
+      } catch {
+        return context.json({ error: 'PROVIDER_TEST_FAILED' }, 502);
+      }
+    }
     const provider = value as CredentialProviderName;
     const credential = (credentialProviderNames as readonly string[]).includes(provider)
       ? await control.acquireCredential(provider)
@@ -809,15 +896,17 @@ export const createAdminApi = ({
         let quota: ProviderQuotaObservation | undefined;
         const result = await providerFetcher[credential.provider]('北京市', 1, credential.secret, fetch, (value) => { quota = value; });
         resolved = { success: true, resultCount: result.candidates.length, quota };
-      } else resolved = await testServiceCredential(credential.provider, credential.secret);
+      } else resolved = await testServiceCredential(credential.provider, credential.secret, fetch,
+        credential.provider === 'openai-compatible'
+          ? { prompt: (await control.translationRouteForCredential(credential.id))?.prompt || undefined } : {});
       await control.reportCredential(credential.id, 'success', 'quota' in resolved ? resolved.quota : undefined);
-      if (isMapProvider(credential.provider)) await wakeChina();
+      notifyCredentialChange(credential.provider);
       return context.json({ data: resolved });
     } catch (error) {
       const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
       await control.reportCredential(credential.id, outcome, error instanceof ProviderRequestError
         ? { retryAt: error.retryAt, period: error.quotaPeriod } : undefined);
-      if (isMapProvider(credential.provider)) await wakeChina();
+      notifyCredentialChange(credential.provider);
       return context.json({ error: 'PROVIDER_TEST_FAILED', outcome }, 502);
     }
   });

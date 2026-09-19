@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { pinyin } from 'pinyin-pro';
+import { chinaEnglishComponent, chinaEnglishPremiseNumber } from '../../../src/domain/china-address-language';
 import type { Database } from '../../database/database.mjs';
 import type { AddressComponents, AddressEvidence, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters } from './address-repository';
@@ -8,7 +8,7 @@ import { chinaDeliveryAddressClause, normalizeChinaProviderAddress } from '../..
 
 interface CommunityCandidateRow {
   id: string; canonical_name: string; province: string; city: string; district: string; township: string;
-  provider_address: string; latitude: number; longitude: number; verification_level: 'L1' | 'L2' | 'L3';
+  postcode: string; provider_address: string; latitude: number; longitude: number; verification_level: 'L1' | 'L2' | 'L3';
   source_count: number; last_seen_at: string;
 }
 
@@ -38,8 +38,15 @@ export const chinaFreshSourceCountClause = (communityAlias = 'community', source
 export const chinaCommunityPublicationClause = (alias = 'community'): string => [
   `${alias}.active=1`,
   `${alias}.province IN (${mainlandProvinceSql})`,
+  `(${alias}.city <> ${alias}.district OR concat(${alias}.province,'/',${alias}.city) IN (
+    SELECT concat(direct_province.name,'/',direct_city.name) FROM cn_admin_areas direct_district
+    JOIN cn_admin_areas direct_city ON direct_city.adcode=direct_district.parent_adcode AND direct_city.level='city'
+    JOIN cn_admin_areas direct_province ON direct_province.adcode=direct_city.parent_adcode AND direct_province.level='province'
+    WHERE direct_district.level='district' AND direct_city.name=direct_district.name
+  ))`,
   chinaFreshTimestampClause(`${alias}.last_seen_at`),
   chinaDeliveryAddressClause(alias),
+  `(${alias}.postcode ~ '^[0-9]{6}$' OR NOT EXISTS (SELECT 1 FROM catalog_postcodes WHERE country_code='CN'))`,
   `${alias}.provider_address ~ '^[^A-Za-z]+[0-9A-Za-z]+((弄|巷)[0-9A-Za-z]+)?([-之][0-9A-Za-z]+)*(号|號)(院|楼|栋|棟)?$'`,
   `${alias}.canonical_name ~ '^([^A-Za-z]|[A-Za-z](区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))*$'`,
   `${alias}.id IN (SELECT publication_source.community_id FROM cn_community_sources publication_source
@@ -47,9 +54,10 @@ export const chinaCommunityPublicationClause = (alias = 'community'): string => 
       ON strict_candidate.provider=publication_source.provider
       AND strict_candidate.provider_poi_id=publication_source.provider_poi_id
       AND strict_candidate.decision='accepted'
-      AND strict_candidate.strategy_version IN ('community-poi-v6','community-poi-v7')
+      AND strict_candidate.strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible')
     WHERE ${chinaFreshTimestampClause('publication_source.last_seen_at')}
-      AND (publication_source.provider='amap' OR strict_candidate.provider IS NOT NULL))`
+      AND (publication_source.provider='amap' OR strict_candidate.provider IS NOT NULL
+        OR publication_source.accepted_strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible')))`
 ].join(' AND ');
 
 const seedIndex = (seed: string, length: number): number => Number.parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 8), 16) % length;
@@ -65,8 +73,6 @@ const communityDistanceKm = (left: { latitude: number; longitude: number }, righ
   return 6371 * 2 * Math.atan2(Math.sqrt(Math.min(1, Math.max(0, value))), Math.sqrt(Math.max(0, 1 - value)));
 };
 const MAX_COMMUNITY_DISTANCE_KM = 25;
-const romanize = (value: string): string => pinyin(value, { toneType: 'none', type: 'array', nonZh: 'consecutive' })
-  .map((part) => part.trim()).filter(Boolean).join(' ').replace(/^\p{Ll}/u, (value) => value.toUpperCase());
 const providerHome: Record<string, string> = {
   amap: 'https://www.amap.com/', baidu: 'https://map.baidu.com/', tencent: 'https://map.qq.com/'
 };
@@ -78,28 +84,26 @@ const splitChinaDeliveryAddress = (value: string): { street: string; houseNumber
   return { street: match[1], houseNumber: match[2].replace(/號/gu, '号') };
 };
 
-const chinaEnglishHouseNumber = (value: string): string => value
-  .replace(/[弄巷]/gu, '-')
-  .replace(/(?:号|號)(?:院|楼|栋|棟)?$/u, '');
-
 const rowToAddress = (row: CommunityRow): VerifiedAddress => {
   const providerAddress = normalizeChinaProviderAddress(row.provider_address, row);
   const delivery = splitChinaDeliveryAddress(providerAddress);
   const native: AddressComponents = {
     houseNumber: delivery.houseNumber, street: delivery.street, buildingName: row.canonical_name,
     locality: row.city, postalLocality: row.city, district: row.district,
-    ...(row.township ? { dependentLocality: row.township } : {}), admin1: row.province, postcode: ''
+    ...(row.township ? { dependentLocality: row.township } : {}), admin1: row.province, postcode: row.postcode || ''
   };
   const english: AddressComponents = {
     ...native,
-    houseNumber: chinaEnglishHouseNumber(delivery.houseNumber), street: romanize(delivery.street),
-    buildingName: romanize(row.canonical_name), locality: romanize(row.city),
-    postalLocality: romanize(row.city), district: romanize(row.district),
-    ...(row.township ? { dependentLocality: romanize(row.township) } : {}), admin1: romanize(row.province)
+    houseNumber: chinaEnglishPremiseNumber(delivery.houseNumber), street: chinaEnglishComponent('street', delivery.street),
+    buildingName: chinaEnglishComponent('buildingName', row.canonical_name), locality: chinaEnglishComponent('locality', row.city),
+    postalLocality: chinaEnglishComponent('locality', row.city), district: chinaEnglishComponent('district', row.district),
+    postcode: row.postcode || '',
+    ...(row.township ? { dependentLocality: chinaEnglishComponent('township', row.township) } : {}), admin1: chinaEnglishComponent('admin1', row.province)
   };
-  const nativeAddress = `${row.province}${row.city}${row.district}${row.township}${providerAddress}${row.canonical_name}`;
-  const englishAddress = [english.buildingName, [english.houseNumber, english.street].filter(Boolean).join(' '), english.dependentLocality, english.district, english.locality, english.admin1, 'China']
-    .filter(Boolean).join(', ');
+  const administration = [...new Set([row.province, row.city, row.district, row.township].filter(Boolean))].join('');
+  const nativeAddress = `${administration}${providerAddress}${row.canonical_name}${row.postcode ? ` ${row.postcode}` : ''}`;
+  const englishAddress = [english.buildingName, [english.houseNumber, english.street].filter(Boolean).join(' '), english.dependentLocality, english.district, english.locality, english.admin1, english.postcode, 'China']
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index).join(', ');
   const evidence: AddressEvidence[] = [...new Set(row.providers.split(',').filter(Boolean))].flatMap((provider) => {
     const sourceUrl = providerHome[provider] || '';
     const common = { sourceId: provider, sourceName: providerName[provider] || provider, sourceUrl, sourceFamily: provider, observedAt: row.last_seen_at };
@@ -136,11 +140,10 @@ const rowToAddress = (row: CommunityRow): VerifiedAddress => {
 
 export const countChinaCommunities = async (database?: Database): Promise<number> => {
   if (!database) return 0;
-  try {
-    return Number(await database.prepare(`SELECT COUNT(*) AS total FROM cn_communities_v2 community
-      WHERE ${chinaCommunityPublicationClause('community')}`).first('total') || 0);
-  }
-  catch { return 0; }
+  const statement = database.prepare(`SELECT COUNT(*) AS total FROM cn_communities_v2 community
+    WHERE ${chinaCommunityPublicationClause('community')}`);
+  if (typeof (statement as unknown as { first?: unknown }).first !== 'function') return 0;
+  return Number(await statement.first('total') || 0);
 };
 
 export const loadChinaCommunityAddressById = async (
@@ -149,17 +152,12 @@ export const loadChinaCommunityAddressById = async (
 ): Promise<VerifiedAddress | undefined> => {
   if (!database || !addressId.startsWith('cn-community-')) return undefined;
   const communityId = addressId.slice('cn-community-'.length).split(':')[0];
-  try {
-    const row = await database.prepare(`SELECT community.* FROM cn_communities_v2 community
-      WHERE community.id=? AND ${chinaCommunityPublicationClause('community')}
-      LIMIT 1`).bind(communityId).first<CommunityCandidateRow>();
-    if (!row) return undefined;
-    const providers = await loadCommunityProviders(database, row.id);
-    return providers ? rowToAddress({ ...row, providers }) : undefined;
-  } catch (error) {
-    if (process.env.NODE_ENV === 'test') throw error;
-    return undefined;
-  }
+  const row = await database.prepare(`SELECT community.* FROM cn_communities_v2 community
+    WHERE community.id=? AND ${chinaCommunityPublicationClause('community')}
+    LIMIT 1`).bind(communityId).first<CommunityCandidateRow>();
+  if (!row) return undefined;
+  const providers = await loadCommunityProviders(database, row.id);
+  return providers ? rowToAddress({ ...row, providers }) : undefined;
 };
 
 export const pickChinaCommunityAddress = async (
@@ -171,39 +169,60 @@ export const pickChinaCommunityAddress = async (
   if (!database) return undefined;
   const clauses = [chinaCommunityPublicationClause('community')];
   const bindings: unknown[] = [];
-  if (filters.region) { clauses.push('(community.province=? OR REPLACE(community.province,\'省\',\'\')=REPLACE(?,\'省\',\'\'))'); bindings.push(filters.region, filters.region); }
-  if (filters.city) { clauses.push('(community.city=? OR REPLACE(community.city,\'市\',\'\')=REPLACE(?,\'市\',\'\'))'); bindings.push(filters.city, filters.city); }
-  if (filters.district) { clauses.push('(community.district=? OR REPLACE(community.district,\'区\',\'\')=REPLACE(?,\'区\',\'\'))'); bindings.push(filters.district, filters.district); }
+  let scopes: Array<{ clauses: string[]; bindings: unknown[] }> = [{ clauses: [], bindings: [] }];
+  for (const [filter, column, suffix] of [
+    ['region', 'province', '省'], ['city', 'city', '市'], ['district', 'district', '区']
+  ] as const) {
+    const value = filters[filter]?.trim();
+    if (!value) continue;
+    const stem = value.endsWith(suffix) ? value.slice(0, -suffix.length) : value;
+    const values = [...new Set([value, stem, `${stem}${suffix}`])];
+    if (coordinates) {
+      clauses.push(`community.${column} IN (${values.map(() => '?').join(',')})`);
+      bindings.push(...values);
+    } else {
+      scopes = scopes.flatMap((scope) => values.map((alias) => ({
+        clauses: [...scope.clauses, `published.${column}=?`], bindings: [...scope.bindings, alias]
+      })));
+    }
+  }
+  if (filters.postcode) { clauses.push('community.postcode=?'); bindings.push(filters.postcode.replace(/\s/gu, '')); }
   if (filters.q) { clauses.push('(community.canonical_name LIKE ? OR community.provider_address LIKE ?)'); bindings.push(`%${filters.q}%`, `%${filters.q}%`); }
   if (coordinates) {
     clauses.push('community.latitude BETWEEN ? AND ?', 'community.longitude BETWEEN ? AND ?');
     bindings.push(coordinates.latitude - 1, coordinates.latitude + 1, coordinates.longitude - 1, coordinates.longitude + 1);
   }
   let rows: CommunityCandidateRow[];
-  try {
-    if (coordinates) {
-      rows = (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
-        WHERE ${clauses.join(' AND ')} ORDER BY community.source_count DESC,community.id LIMIT 500`)
-        .bind(...bindings).all<CommunityCandidateRow>()).results;
-    } else {
-      const pivot = seedKey(`${seed}:china-community`);
-      const randomKey = communityRandomKey();
-      const loadWindow = async (operator: '>=' | '<'): Promise<CommunityCandidateRow[]> =>
-        (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
-          WHERE ${clauses.join(' AND ')} AND ${randomKey} ${operator} ?
-          ORDER BY ${randomKey},community.id LIMIT ${COMMUNITY_CANDIDATE_LIMIT}`)
-          .bind(...bindings, pivot).all<CommunityCandidateRow>()).results;
-      const forward = await loadWindow('>=');
-      if (forward.length >= COMMUNITY_CANDIDATE_LIMIT || typeof (database as { exec?: unknown }).exec !== 'function') rows = forward;
-      else {
-        const seen = new Set(forward.map(({ id }) => id));
-        const wrapped = await loadWindow('<');
-        rows = [...forward, ...wrapped.filter(({ id }) => !seen.has(id))].slice(0, COMMUNITY_CANDIDATE_LIMIT);
-      }
+  if (coordinates) {
+    rows = (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
+      WHERE ${clauses.join(' AND ')} ORDER BY community.source_count DESC,community.id LIMIT 500`)
+      .bind(...bindings).all<CommunityCandidateRow>()).results;
+  } else {
+    const pivot = seedKey(`${seed}:china-community`);
+    const randomKey = communityRandomKey('published');
+      const order = `ORDER BY ${randomKey},published.id LIMIT ${COMMUNITY_CANDIDATE_LIMIT}`;
+      const loadWindow = async (operator: '>=' | '<'): Promise<CommunityCandidateRow[]> => {
+        const windows = scopes.map((scope) => `SELECT published.* FROM published_communities published
+          WHERE ${scope.clauses.join(' AND ') || 'TRUE'} AND ${randomKey} ${operator} ? ${order}`);
+        const windowSource = windows.length === 1
+          ? `(${windows[0]})`
+          : `(${windows.map((window) => `(${window})`).join(' UNION ALL ')})`;
+        const sql = `WITH published_communities AS (
+          SELECT community.* FROM cn_communities_v2 community
+          WHERE ${clauses.join(' AND ')}
+        )
+        SELECT published.* FROM ${windowSource} published ${order}`;
+      return (await database.prepare(sql).bind(...bindings,
+        ...scopes.flatMap((scope) => [...scope.bindings, pivot]))
+        .all<CommunityCandidateRow>()).results;
+    };
+    const forward = await loadWindow('>=');
+    if (forward.length >= COMMUNITY_CANDIDATE_LIMIT || typeof (database as { exec?: unknown }).exec !== 'function') rows = forward;
+    else {
+      const seen = new Set(forward.map(({ id }) => id));
+      const wrapped = await loadWindow('<');
+      rows = [...forward, ...wrapped.filter(({ id }) => !seen.has(id))].slice(0, COMMUNITY_CANDIDATE_LIMIT);
     }
-  } catch (error) {
-    if (process.env.NODE_ENV === 'test') throw error;
-    return undefined;
   }
   if (!rows.length) return undefined;
   const allowedRows = rows.filter((row) => !matchesCustomBlacklist([
@@ -217,11 +236,6 @@ export const pickChinaCommunityAddress = async (
     : allowedRows;
   if (!coordinateRows.length) return undefined;
   const selected = coordinates ? coordinateRows[0] : coordinateRows[seedIndex(`${seed}:candidate`, coordinateRows.length)];
-  try {
-    const providers = await loadCommunityProviders(database, selected.id);
-    return providers ? rowToAddress({ ...selected, providers }) : undefined;
-  } catch (error) {
-    if (process.env.NODE_ENV === 'test') throw error;
-    return undefined;
-  }
+  const providers = await loadCommunityProviders(database, selected.id);
+  return providers ? rowToAddress({ ...selected, providers }) : undefined;
 };

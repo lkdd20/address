@@ -17,6 +17,7 @@ export interface ChinaAddressDataStatus {
   syncState?: string;
   nextAttemptAt?: string | null;
   waitReason?: string | null;
+  counts?: { total?: number | string | null };
 }
 
 export interface AddressDataQueueState {
@@ -85,6 +86,7 @@ interface CountryRow {
   coverage_ratio: number;
   level1_min: number;
   level2_min: number;
+  total_count: number | null;
   residential_count: number | null;
   country_status: string | null;
   country_next_sync_at: string | null;
@@ -245,7 +247,7 @@ export const listAddressData = async (
     database.prepare(`SELECT policy.country_code,policy.enabled,policy.target_count,
         policy.level1_limit,policy.level2_limit,policy.level3_limit,policy.level4_limit,
         policy.min_per_node,policy.coverage_ratio,policy.level1_min,policy.level2_min,
-        coverage.residential_count,country.status AS country_status,
+        coverage.total_count,coverage.residential_count,country.status AS country_status,
         country.next_sync_at AS country_next_sync_at,country.last_success_at AS country_last_success_at,
         country.last_error AS country_last_error
       FROM sync_country_policies policy
@@ -278,7 +280,9 @@ export const listAddressData = async (
   const sourcesByCountry = groupSources(sourceResult.results);
   return countryResult.results.map((row) => {
     const goal = goals.get(row.country_code);
-    const currentCount = goal?.current ?? Number(row.residential_count || 0);
+    const chinaPublishedCount = row.country_code === 'CN' ? Number(china?.counts?.total) : Number.NaN;
+    const currentCount = row.country_code === 'CN' && Number.isFinite(chinaPublishedCount)
+      ? chinaPublishedCount : goal?.current ?? Number(row.total_count || 0);
     const targetCount = goal?.target ?? Number(row.target_count);
     const shards = shardsByCountry.get(row.country_code) || [];
     const minPerNode = Number(row.min_per_node ?? 5);

@@ -25,6 +25,10 @@ NON_RESIDENTIAL_POI_KEYS = {
     "amenity", "craft", "healthcare", "industrial", "leisure", "military",
     "office", "public_transport", "shop", "tourism"
 }
+STREET_HIGHWAYS = {
+    "primary", "secondary", "tertiary", "unclassified", "residential",
+    "living_street", "service", "pedestrian", "road"
+}
 
 
 class CompiledBoundary:
@@ -58,11 +62,14 @@ def rank(value):
 
 
 class SeedSampler:
-    def __init__(self, maximum, boundary, exclude_boundary, targets=None, require_source_address=False):
+    def __init__(self, maximum, boundary, exclude_boundary, targets=None, require_source_address=False,
+                 include_streets=False):
         self.maximum = maximum
         self.boundary = boundary
         self.exclude_boundary = exclude_boundary
         self.require_source_address = require_source_address
+        self.include_streets = include_streets
+        self.seen_streets = set()
         self.candidates = []
         self.targets = sorted(targets or [], key=lambda value: (
             int(value.get("priority", 99)), -int(value.get("deficit", 0)), str(value.get("id", ""))
@@ -80,6 +87,24 @@ class SeedSampler:
 
     def way(self, way):
         tags = {tag.k: tag.v for tag in way.tags}
+        if self.include_streets and tags.get("highway") in STREET_HIGHWAYS and tags.get("name", "").strip():
+            locations = [node.location for node in way.nodes]
+            if len(locations) < 2 or not all(location.valid() for location in locations):
+                return
+            point = LineString([(location.lon, location.lat) for location in locations]).interpolate(0.5, normalized=True)
+            street = tags["name"].strip()
+            identity = (street.casefold(), tags.get("addr:state", ""), tags.get("addr:city", ""),
+                        math.floor(point.x * 20), math.floor(point.y * 20))
+            if identity in self.seen_streets or not self.inside(point.x, point.y):
+                return
+            self.seen_streets.add(identity)
+            self.capture({
+                "id": f"way/{way.id}", "match_level": "street", "street": street,
+                "longitude": point.x, "latitude": point.y,
+                "admin1": tags.get("addr:state", ""), "locality": tags.get("addr:city", ""),
+                "district": tags.get("addr:district", "")
+            })
+            return
         building_class = tags.get("building", "").strip().casefold()
         if building_class not in RESIDENTIAL_BUILDINGS:
             return
@@ -107,8 +132,6 @@ class SeedSampler:
         if not self.inside(longitude, latitude):
             return
         identifier = f"way/{way.id}"
-        tile = f"{math.floor(longitude * 20)}:{math.floor(latitude * 20)}"
-        priority = rank(f"{tile}:{identifier}")
         record = {
             "id": identifier,
             "building_id": identifier,
@@ -120,6 +143,13 @@ class SeedSampler:
         if self.require_source_address:
             record["number"] = number
             record["street"] = street
+        self.capture(record)
+
+    def capture(self, record):
+        identifier = record["id"]
+        longitude, latitude = record["longitude"], record["latitude"]
+        tile = f"{math.floor(longitude * 20)}:{math.floor(latitude * 20)}"
+        priority = rank(f"{tile}:{identifier}")
         candidate = (-priority, identifier, record)
         if self.target_tree is not None:
             target_index = int(self.target_tree.nearest(Point(longitude, latitude)))
@@ -198,6 +228,7 @@ def main():
     parser.add_argument("--coverage-targets")
     parser.add_argument("--max-records", required=True, type=int)
     parser.add_argument("--require-source-address", action="store_true")
+    parser.add_argument("--include-streets", action="store_true")
     args = parser.parse_args()
 
     exclude_geometries = [boundary_from_geojson(path).geometry for path in args.exclude_boundary]
@@ -207,7 +238,8 @@ def main():
         boundary_from_geojson(args.boundary),
         exclude_boundary,
         targets_from_json(args.coverage_targets),
-        args.require_source_address
+        args.require_source_address,
+        args.include_streets
     )
     location_index = None
     location_storage = "flex_mem"
@@ -216,7 +248,9 @@ def main():
         location_index.unlink(missing_ok=True)
         location_storage = f"sparse_file_array,{location_index}"
     try:
-        processor = osmium.FileProcessor(args.input).with_locations(location_storage).with_filter(KeyFilter("building"))
+        processor = osmium.FileProcessor(args.input).with_locations(location_storage).with_filter(
+            KeyFilter("building", "highway") if args.include_streets else KeyFilter("building")
+        )
         try:
             for entity in processor:
                 if entity.is_way():

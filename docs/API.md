@@ -61,12 +61,12 @@ console.log(payload);
 | `GET` | `/health` | Lightweight API health check |
 | `GET` | `/ready` | PostgreSQL readiness check |
 | `GET` | `/openapi.json` | OpenAPI 3.1 contract |
-| `GET` | `/countries` | Country registry, synchronized counts, and strict residential coverage |
+| `GET` | `/countries` | Country registry, published totals, and residential coverage |
 | `GET` | `/availability` | Public generation availability for every configured country |
 | `GET` | `/client-context` | Resolve the request IP or an explicit IP to a supported region |
 | `GET` | `/locations/search` | Search region, city, and postcode options |
 | `GET` | `/locations/hierarchy` | Navigate parent-child administrative and postcode options |
-| `GET` | `/generate` | Generate a verified residential address and related test profile |
+| `GET` | `/generate` | Generate a verified address and related test profile |
 | `POST` | `/generate/batch` | Generate up to 50 addresses with structured filters and uniqueness control |
 | `GET` | `/addresses/{id}` | Retrieve a currently published address by generated ID |
 | `GET` | `/coverage` | Inspect the three country synchronization completion rules |
@@ -90,7 +90,7 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/countries \
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
-The response is `{ "data": [...] }`. Each country includes its code, localized name, supported filters, total synchronized count, verified residential count, residential availability, and `generationMode`. Public generation uses only the verified residential pool; total counts remain visible for migration and health reporting. Counts are `null` when no database is attached.
+The response is `{ "data": [...] }`. `addressCount` is the eligible generation total; `residentialCount` is its evidence-backed residential subset. China uses residential communities. Other countries also include verified streets. Counts are `null` when no database is attached.
 
 ## Availability
 
@@ -99,7 +99,7 @@ curl -fsS -H "Authorization: Bearer YOUR_API_TOKEN" \
   https://YOUR_DOMAIN.example/api/v1/availability
 ```
 
-The response reports whether each configured country currently has publication-gated residential records available for generation.
+`available` reports any eligible address; `residentialAvailable` reports the residential subset. Only countries with an available pool are listed.
 
 ## Client context
 
@@ -129,7 +129,7 @@ The response may contain `publicIp`, country, region, city, postcode, latitude, 
 | `region` | empty | Parent region text |
 | `regionId` | empty | Stable parent region ID |
 | `cityId` | empty | Stable parent city ID |
-| `residential` | `false` (catalog compatibility) | Set `true` to list only verified residential coverage; `/generate` always uses residential records |
+| `residential` | `false` | Set `true` to count only verified residential coverage |
 | `cursor` | empty | Pagination cursor returned by the previous request |
 | `limit` | `100` | Requested page size from `20` through `200` |
 
@@ -140,22 +140,26 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=US&field=
 
 The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a catalog database is available, `total`, `nextCursor`, and `source`.
 
+Postcode options come from eligible published addresses, including complete codes missing from the postal catalog. Such options have no catalog ID; send their `value` as `postcode`. Prefixes are not substitutes for full codes. Explicit region/city filters remain exact. China city and district IDs may be opaque, community-backed identifiers; send them unchanged.
+
 ## Generate
 
 | Parameter | Default | Description |
 |---|---|---|
 | `country` | `US` | Country code; ignored when IP mode resolves a country |
-| `mode` | `residential` | Set `ip-region` for IP coordinate/city matching |
-| `ip` | request IP | Explicit IP used with `mode=ip-region` |
-| `residential` | `true` | Legacy compatibility flag; `true` and `false` are accepted, while public generation always enforces residential evidence |
-| `region`, `city`, `district`, `postcode` | empty | Human-readable location filters |
-| `regionId`, `cityId`, `districtId`, `postcodeId` | empty | Stable catalog IDs |
-| `q` | empty | Free-text location hint |
+| `mode` | country default | Set `ip-region` for IP coordinate/city matching |
+| `ip` | request IP | Explicit IP used with `mode=ip-region`; at most 64 characters |
+| `residential` | `true` for CN; otherwise `false` | Set `true` to require residential evidence; China always requires it |
+| `region`, `city`, `district`, `postcode` | empty | Human-readable location filters; at most 300 characters each |
+| `regionId`, `cityId`, `districtId`, `postcodeId` | empty | IDs returned by the location API; at most 160 characters each |
+| `q` | empty | Free-text location hint; at most 300 characters |
 | `strategy` | `random` | Select an eligible verified record with `random` or `instant`; it never synthesizes address fields |
-| `seed` | generated UUID | Deterministic generation seed |
-| `requestId` | generated UUID | Caller correlation ID |
+| `seed` | generated UUID | Deterministic generation seed; at most 300 characters |
+| `requestId` | generated UUID | Caller correlation ID; at most 160 characters |
 
-Verified residential generation:
+`address.matchLevel` is `street`, `premise` or `subpremise`. Non-China street records have no house, building or unit and may have an empty postcode. Native, English and Simplified Chinese variants retain the same facts. Batch `filters.residential` accepts a boolean with the same country defaults.
+
+Verified address generation:
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US" \
@@ -178,7 +182,7 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8
 
 The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Normal generation also returns `eligibleCount`, the number of publication-gated database records in the exact selection scope. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
 
-Unfiltered country requests map the seed to a dense PostgreSQL generation rank so every eligible record has the same selection probability. Filtered requests use bounded circular index windows spanning the complete matching scope. Neither path uses a fixed subset or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected residential pool over time.
+Unfiltered country requests map the seed to a dense PostgreSQL generation rank so every eligible record has the same selection probability. Filtered requests use bounded circular index windows spanning the complete matching scope. Neither path uses a fixed subset or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected address pool over time.
 
 ## Batch generation and structured queries
 

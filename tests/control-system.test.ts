@@ -25,6 +25,39 @@ describe('control database security', () => {
   });
   afterEach(() => database.close());
 
+  it.each(['deepl', 'amap'] as const)('responds to committed %s credential mutations without waiting for China sync', async (provider) => {
+    const secret = provider === 'deepl' ? '00000000-0000-4000-8000-000000000001:fx' : 'map-fixture';
+    const id = await store.addCredential({ provider, label: 'Mutation fixture', secret });
+    const session = await store.createSession('admin');
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json'
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const wake = vi.fn(() => gate);
+    const admin = createAdminApi({ control: store, china: { wake } as never, addressDb: database });
+    try {
+      for (const method of ['PUT', 'DELETE']) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const response = await Promise.race([
+          admin.request(`/admin/api/providers/${id}`, {
+            method, headers, ...(method === 'PUT' ? { body: JSON.stringify({ label: 'Updated fixture' }) } : {})
+          }),
+          new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 500); })
+        ]).finally(() => clearTimeout(timer));
+        expect(response, `${method} must not wait for synchronization`).not.toBeNull();
+        expect(response?.status).toBe(200);
+      }
+      expect(await store.listCredentials()).toEqual([]);
+      if (provider === 'deepl') expect(wake).not.toHaveBeenCalled();
+      else expect(wake).toHaveBeenCalled();
+    } finally {
+      release();
+      await gate;
+    }
+  });
+
   it('hashes passwords and encrypts provider secrets', async () => {
     const password = await hashPassword('a sufficiently long password');
     expect(await verifyPassword('a sufficiently long password', password.hash, password.salt)).toBe(true);
@@ -33,6 +66,15 @@ describe('control database security', () => {
     expect(encrypted.ciphertext).not.toContain('provider-secret-value');
     expect(decryptSecret(encrypted, masterKey)).toBe('provider-secret-value');
     expect(masterKeyFrom(masterKey.toString('base64'))).toEqual(masterKey);
+  });
+
+  it('changes sync input revisions for credential configuration but not quota usage', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'revision', secret: 'revision-fixture' });
+    const before = await store.credentialConfigurationRevision(['amap']);
+    await store.reportCredential(id, 'success');
+    expect(await store.credentialConfigurationRevision(['amap'])).toBe(before);
+    await store.updateCredential(id, { secret: 'replacement-fixture' });
+    expect(await store.credentialConfigurationRevision(['amap'])).not.toBe(before);
   });
 
   it('bootstraps the default administrator and optional frontend password only once', async () => {
@@ -369,6 +411,15 @@ describe('control database security', () => {
       database.prepare(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id)
         VALUES ('US','California','Los Angeles',7,?,5001,5002)`).bind(new Date().toISOString())
     ]);
+    for (let index = 0; index < 7; index += 1) {
+      const id = `shortcut-fixture-${index}`;
+      await database.prepare(`INSERT INTO address_pool(id,country_code,street,latitude,longitude,native_language,
+        component_variants_json,address_variants_json,quality_score,generation,coverage,random_key,first_seen_at,last_seen_at)
+        VALUES (?,'US','Fixture Road',34,-118,'en','{}','{}',.95,'fixture','fixture',1,'2026-01-01','2026-01-01')`).bind(id).run();
+      await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,admin1_key,
+        admin1_code_key,locality_key,postal_locality_key,random_key,updated_at)
+        VALUES (?,'US','california','ca','los angeles','los angeles',1,'2026-01-01')`).bind(id).run();
+    }
     const optionResponse = await admin.request('/admin/api/settings/country-shortcuts/US/options?field=region', { headers });
     expect(optionResponse.status).toBe(200);
     expect(await optionResponse.json()).toEqual({ data: expect.objectContaining({
@@ -659,6 +710,68 @@ describe('control database security', () => {
     expect(await store.acquireCredential('amap')).toBeNull();
   });
 
+  it('serializes direct credential reports without losing failure increments', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Concurrent report', secret: 'report-key' });
+    const query = database.query.bind(database);
+    let reads = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = database.transaction.bind(database);
+    let transactionTail = Promise.resolve();
+    database.transaction = async (work) => {
+      const previous = transactionTail;
+      let unlock!: () => void;
+      transactionTail = new Promise<void>((resolve) => { unlock = resolve; });
+      await previous;
+      try { return await transaction(work); }
+      finally { unlock(); }
+    };
+    database.query = async (statement, bindings) => {
+      const result = await query(statement, bindings);
+      if (String(statement).startsWith('SELECT * FROM provider_credentials WHERE id=')
+        && !String(statement).includes('FOR UPDATE')) {
+        reads += 1;
+        if (reads === 2) release();
+        await barrier;
+      }
+      return result;
+    };
+    await Promise.all([store.reportCredential(id, 'network'), store.reportCredential(id, 'network')]);
+    expect(await database.prepare('SELECT failure_count FROM provider_credentials WHERE id=?').bind(id).first('failure_count')).toBe(2);
+    expect(await database.prepare('SELECT rejected_count FROM provider_usage_daily WHERE credential_id=?').bind(id).first('rejected_count')).toBe(2);
+  });
+
+  it('atomically leases one credential across concurrent direct acquisitions', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Concurrent lease', secret: 'lease-key', qpsLimit: 1 });
+    const query = database.query.bind(database);
+    let reads = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = database.transaction.bind(database);
+    let transactionTail = Promise.resolve();
+    database.transaction = async (work) => {
+      const previous = transactionTail;
+      let unlock!: () => void;
+      transactionTail = new Promise<void>((resolve) => { unlock = resolve; });
+      await previous;
+      try { return await transaction(work); }
+      finally { unlock(); }
+    };
+    database.query = async (statement, bindings) => {
+      const result = await query(statement, bindings);
+      if (String(statement).startsWith('SELECT * FROM provider_credentials credential WHERE credential.provider=')
+        && !String(statement).includes('FOR UPDATE')) {
+        reads += 1;
+        if (reads === 2) release();
+        await barrier;
+      }
+      return result;
+    };
+    const acquired = await Promise.all([store.acquireCredential('amap'), store.acquireCredential('amap')]);
+    expect(acquired.filter(Boolean)).toHaveLength(1);
+    expect(acquired.find((value) => value)?.id).toBe(id);
+  });
+
   it('excludes credentials already attempted in the current rotation for every provider type', async () => {
     const first = await store.addCredential({ provider: 'geoapify', label: 'A', secret: 'geo-key-a', qpsLimit: 100 });
     const second = await store.addCredential({ provider: 'geoapify', label: 'B', secret: 'geo-key-b', qpsLimit: 100 });
@@ -775,6 +888,7 @@ describe('control database security', () => {
       qps: 5, period: 'month', limit: GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, timezoneOffset: -480
     });
     expect(GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT).toBe(10_000);
+    expect(GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET).toBe(GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT);
   });
 
   it('adds pre-existing Google usage to shared local usage without granting extra quota per key', async () => {
@@ -890,6 +1004,14 @@ describe('control database security', () => {
     expect((await store.authorizeApiTokenDetailed('invalid', 'generate')).status).toBe('unauthorized');
   });
 
+  it('enforces an API token rate limit atomically under concurrent authorization', async () => {
+    const created = await store.createApiToken({ name: 'concurrent-limited', scopes: ['generate'], rateLimit: 1 });
+    const results = await Promise.all(Array.from({ length: 40 }, () =>
+      store.authorizeApiTokenDetailed(created.token, 'generate')));
+    expect(results.filter((result) => result.status === 'authorized')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rate_limited')).toHaveLength(39);
+  });
+
   it('imports translation and geocoding service credentials from the environment', () => {
     expect(credentialsFromEnvironment({
       GEOAPIFY_API_KEY: ' geo-key ', GOOGLE_GEOCODING_API_KEY: 'google-geo-key',
@@ -911,6 +1033,18 @@ describe('control database security', () => {
     expect(second).toEqual({ id: first.id, created: false });
     expect(parseYoudaoSecret((await store.acquireCredential('youdao'))?.secret)).toEqual({ appKey: 'app-key', appSecret: 'app-secret' });
     await expect(store.updateCredential(first.id, { secret: '{"appKey":"only"}' })).rejects.toThrow('INVALID_PROVIDER_CREDENTIAL');
+  });
+
+  it('serializes concurrent Youdao settings upserts without creating duplicate credentials', async () => {
+    await Promise.all([
+      store.upsertYoudaoCredential('first-app-key', 'first-app-secret'),
+      store.upsertYoudaoCredential('second-app-key', 'second-app-secret')
+    ]);
+    const rows = (await database.prepare("SELECT id FROM provider_credentials WHERE provider='youdao'").all()).results;
+    expect(rows).toHaveLength(1);
+    expect(parseYoudaoSecret((await store.acquireCredential('youdao'))?.secret)).toEqual(
+      expect.objectContaining({ appKey: expect.stringMatching(/^(first|second)-app-key$/u) })
+    );
   });
 
   it('resolves service credentials from the store with caching and environment fallback', async () => {
@@ -961,6 +1095,22 @@ describe('control database security', () => {
       .rejects.toMatchObject({ outcome: 'network', message: 'NETWORK_ERROR' });
   });
 
+  it('tests DeepL only through the broker without translating or exposing the key', async () => {
+    const secret = '00000000-0000-0000-0000-000000000001:fx';
+    const id = await store.addCredential({ provider: 'deepl', label: 'Fixture', secret });
+    const session = await store.createSession('admin');
+    const headers = { Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`, 'X-CSRF-Token': session.csrf };
+    const request = vi.fn(async () => ({ used: 4, limit: 100, remaining: 96, resetAt: null }));
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database, credentialBroker: { request } as never });
+    const response = await admin.request(`/admin/api/providers/${id}/test`, { method: 'POST', headers });
+    expect(response.status).toBe(200);
+    expect(request).toHaveBeenCalledWith('deepl.usage', { credentialId: id }, { maxDispatches: 1 });
+    expect(await response.text()).not.toContain(secret);
+    const withoutBroker = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    expect((await withoutBroker.request(`/admin/api/providers/${id}/test`, { method: 'POST', headers })).status).toBe(503);
+    await expect(testServiceCredential('deepl', secret)).rejects.toThrow('DEEPL_REQUIRES_BROKER');
+  });
+
   it('manages service credentials and the translation toggle through the admin API', async () => {
     const session = await store.createSession('admin');
     const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
@@ -977,7 +1127,9 @@ describe('control database security', () => {
     expect(listing.data).toEqual([expect.objectContaining({ provider: 'geoapify', quotaPeriod: 'day', quotaLimit: 3_000 })]);
     expect(JSON.stringify(listing)).not.toContain('geoapify-secret-sentinel');
     expect(await (await admin.request('/admin/api/settings/translation', { headers: { Cookie: headers.Cookie } })).json())
-      .toEqual({ data: { googleTranslationEnabled: true } });
+      .toMatchObject({ data: { googleTranslationEnabled: true, routes: expect.arrayContaining([
+        expect.objectContaining({ id: 'google', provider: 'google', status: 'healthy', priority: 40 })
+      ]) } });
     const updated = await admin.request('/admin/api/settings/translation', {
       method: 'PUT', headers, body: JSON.stringify({ googleTranslationEnabled: false })
     });
@@ -1025,6 +1177,7 @@ describe('control database security', () => {
     });
     expect(await replaced.json()).toEqual({ data: { configured: true, appKeyMask: 'next****' } });
     expect((await store.listCredentials()).filter((credential) => credential.provider === 'youdao')).toHaveLength(1);
+    expect((await store.translationRoutes()).find(({ provider }) => provider === 'youdao')).toMatchObject({ status: 'healthy', enabled: true });
     const status = await (await admin.request('/admin/api/settings/youdao', { headers: { Cookie: headers.Cookie } })).json();
     expect(JSON.stringify(status)).not.toContain('app-secret');
   });

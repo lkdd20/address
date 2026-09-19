@@ -14,6 +14,8 @@ import { ChinaDataService } from '../china/service';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 import { InFlightLimiter, isGenerationPath } from './in-flight-limiter';
 import { parseAllowedOrigins } from '../lib/origin-policy';
+import { TranslationRouteScheduler } from '../translation/routing.mjs';
+import { translateGoogleBatch } from './services/google-translator.ts';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -44,10 +46,13 @@ const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
 const releaseId = process.env.ADDRESS_RELEASE?.trim() || 'development';
 const generationInFlightLimit = integer(process.env.API_MAX_INFLIGHT_GENERATIONS, 4);
 const generationLimiter = new InFlightLimiter(Math.min(generationInFlightLimit, 128));
+const batchGenerationLimiter = new InFlightLimiter(Math.min(
+  Math.max(1, Number.parseInt(process.env.BATCH_GENERATION_CONCURRENCY || '4', 10) || 4), 32
+));
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.trim() || process.env.ALLOWED_ORIGIN?.trim() || '*';
 parseAllowedOrigins(allowedOrigins);
 const runGenerationRequest = async (path: string, task: () => Promise<Response>): Promise<Response> => {
-  if (!isGenerationPath(path)) return task();
+  if (!isGenerationPath(path) || path.endsWith('/batch')) return task();
   if (!generationLimiter.tryAcquire()) {
     return Response.json({ error: 'GENERATION_BUSY' }, {
       status: 429,
@@ -76,7 +81,7 @@ const triggerCountrySync = async (countryCode: string): Promise<Record<string, u
 };
 const adminApi = createAdminApi({
   control, china, addressDb: database, trustProxy, triggerCountrySync,
-  warmReadModels: true
+  warmReadModels: true, credentialBroker
 });
 const accessApi = createAccessApi(control, { trustProxy, addressDb: database });
 const amapProxyRateLimit = createAmapProxyRateLimiter();
@@ -97,6 +102,8 @@ const environment = {
   ADDRESS_DB: database,
   LOCATION_DB: database,
   BATCH_GENERATION_CONCURRENCY: process.env.BATCH_GENERATION_CONCURRENCY || '4',
+  GENERATION_SLOT: { tryAcquire: () => generationLimiter.tryAcquire(), release: () => generationLimiter.release() },
+  BATCH_GENERATION_SLOT: { tryAcquire: () => batchGenerationLimiter.tryAcquire(), release: () => batchGenerationLimiter.release() },
   ALLOWED_ORIGINS: allowedOrigins,
   AMAP_API_KEY: process.env.AMAP_API_KEY,
   GEOAPIFY_API_KEY: process.env.GEOAPIFY_API_KEY,
@@ -115,16 +122,58 @@ const environment = {
 // Service credentials live in the control store (admin console) with the
 // environment as fallback; the 60-second resolver cache keeps request latency flat.
 const serviceCredential = createServiceCredentialResolver(control, process.env);
+const translationRouteScheduler = new TranslationRouteScheduler();
 const requestEnvironment = async () => {
-  const youdao = parseYoudaoSecret(await serviceCredential('youdao'));
+  const youdao = credentialBroker ? undefined : parseYoudaoSecret(await serviceCredential('youdao'));
+  const googleTranslationEnabled = Boolean(await control.setting('google_translation_enabled', true));
+  const translationRoutes = credentialBroker
+    ? translationRouteScheduler.order((await control.translationRoutes()).filter((route) => route.enabled
+      && !['disabled', 'needs_review', 'unconfigured'].includes(route.status)
+      && (route.provider !== 'google' || googleTranslationEnabled))).map((route) => ({
+        id: route.id, provider: route.provider,
+        translate: async (values: string[], target: string) => {
+          if (route.provider === 'google') return translateGoogleBatch(values, 'auto', target, fetch);
+          if (route.provider === 'deepl') {
+            const result = await credentialBroker.request('deepl.translate', { values, target, credentialId: route.credentialId }, { maxDispatches: 2 }) as { translations: Array<{ text: string }> };
+            return result.translations.map((item: { text: string }) => item.text);
+          }
+          if (route.provider === 'youdao') {
+            const result = await credentialBroker.request('youdao.translate', { values, target, credentialId: route.credentialId }, { maxDispatches: 1 }) as {
+              errorCode?: string; translateResults?: Array<{ translation?: string }>;
+            };
+            if (result.errorCode !== '0' || result.translateResults?.length !== values.length) return undefined;
+            return result.translateResults.map((item) => String(item.translation || '').trim());
+          }
+          if (!route.credentialId) return undefined;
+            const result = await credentialBroker.request('openai-compatible.translate', {
+              values, target, credentialId: route.credentialId,
+              ...(route.prompt ? { prompt: route.prompt } : {})
+            }, { maxDispatches: 1 }) as { translations?: unknown };
+          return Array.isArray(result.translations) && result.translations.every((item) => typeof item === 'string')
+            ? result.translations as string[] : undefined;
+        }
+      }))
+    : undefined;
   return {
     ...environment,
     GEOAPIFY_API_KEY: await serviceCredential('geoapify'),
     GOOGLE_GEOCODING_API_KEY: await serviceCredential('google-geocoding'),
-    GOOGLE_TRANSLATION_ENABLED: Boolean(await control.setting('google_translation_enabled', true)),
+    GOOGLE_TRANSLATION_ENABLED: googleTranslationEnabled,
+    DEEPL_TRANSLATE: credentialBroker ? async (values: string[], target: string) => {
+      const result = await credentialBroker.request('deepl.translate', { values, target }, { maxDispatches: 2 }) as { translations: Array<{ text: string }> };
+      return result.translations.map((item: { text: string }) => item.text);
+    } : undefined,
+    OPENAI_COMPATIBLE_TRANSLATE: credentialBroker ? async (values: string[], target: string) => {
+      const result = await credentialBroker.request('openai-compatible.translate', { values, target }, { maxDispatches: 2 }) as { translations?: unknown };
+      if (!Array.isArray(result?.translations) || result.translations.some((item) => typeof item !== 'string')) {
+        throw new Error('OPENAI_COMPATIBLE_INVALID_RESPONSE');
+      }
+      return result.translations;
+    } : undefined,
     YOUDAO_APP_KEY: youdao?.appKey,
     YOUDAO_APP_SECRET: youdao?.appSecret,
-    SERVICE_CREDENTIALS: serviceCredential
+    SERVICE_CREDENTIALS: serviceCredential,
+    ...(translationRoutes ? { TRANSLATION_ROUTES: translationRoutes } : {})
   };
 };
 

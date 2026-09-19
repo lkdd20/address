@@ -66,6 +66,8 @@ export class SyncCoordinator {
     this.processIsAlive = processIsAlive;
     this.currentJob = null;
     this.currentTask = null;
+    this.currentAbort = null;
+    this.shutdownCancelled = false;
     this.recoveredJobs = [];
     this.initialized = false;
   }
@@ -126,6 +128,7 @@ export class SyncCoordinator {
 
   async execute(job, lock) {
     const abort = new AbortController();
+    this.currentAbort = abort;
     let timeout;
     let runTask;
     const heartbeat = setInterval(() => {
@@ -210,7 +213,7 @@ export class SyncCoordinator {
         phase: 'failed',
         completedAt: this.now().toISOString(),
         error: errorText(error),
-        errorCode: errorCode(error),
+        errorCode: this.shutdownCancelled ? 'SYNC_JOB_INTERRUPTED' : errorCode(error),
         failurePhase,
         actualShards: error?.selectedShards || job.actualShards || job.shards,
         sourceOutcomes: sanitizeOutcomes(error?.reports || job.sourceOutcomes)
@@ -230,6 +233,7 @@ export class SyncCoordinator {
         } finally {
           this.currentJob = null;
           this.currentTask = null;
+          if (this.currentAbort === abort) this.currentAbort = null;
         }
       }
     }
@@ -397,6 +401,32 @@ export class SyncCoordinator {
     }))).sort((left, right) => right.modifiedAt - left.modifiedAt);
     if (!jobs.length) return null;
     return JSON.parse(await readFile(jobs[0].file, 'utf8'));
+  }
+
+  async cancelActive() {
+    const task = this.currentTask;
+    if (!task || !this.currentAbort) return false;
+    this.shutdownCancelled = true;
+    this.currentAbort.abort(Object.assign(new Error('Synchronization cancelled for shutdown'), { code: 'SYNC_JOB_CANCELLED' }));
+    let stopped = false;
+    let graceTimer;
+    await Promise.race([
+      task.then(() => { stopped = true; }, () => { stopped = true; }),
+      new Promise((resolveGrace) => {
+        graceTimer = setTimeout(resolveGrace, this.cancelGraceMs);
+        graceTimer.unref?.();
+      })
+    ]);
+    clearTimeout(graceTimer);
+    if (!stopped) {
+      const error = Object.assign(
+        new Error(`Synchronization worker did not stop within ${this.cancelGraceMs}ms after shutdown cancellation`),
+        { code: 'SYNC_WORKER_STUCK' }
+      );
+      try { this.fatal(error); } catch {}
+      return false;
+    }
+    return true;
   }
 
   async waitForIdle() {

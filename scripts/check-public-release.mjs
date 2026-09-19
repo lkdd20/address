@@ -37,6 +37,8 @@ for (const path of historicalPaths) {
 const secretShapes = [
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u],
   ['github-token', /(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}/u],
+  ['openai-compatible-key', /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}\b/u],
+  ['command-code-key', /\buser_[A-Za-z0-9]{60,}\b/u],
   ['aws-access-key', /AKIA[0-9A-Z]{16}/u],
   ['slack-token', /xox[baprs]-[A-Za-z0-9-]{20,}/u],
   ['jwt-token', /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u],

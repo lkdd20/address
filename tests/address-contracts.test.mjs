@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { requiresAdminCode, validateAddressContract, validateNativeScript } from '../src/domain/address-contracts.mjs';
+import { isValidPostcode } from '../src/domain/postcode-patterns.mjs';
 
 describe('country address contracts', () => {
+  it('requires Singapore postcodes at every precision while retaining the Hong Kong exception', () => {
+    for (const matchLevel of ['premise', 'street']) {
+      expect(validateAddressContract('SG', { street: 'Fixture Road' }, { matchLevel }).reasons).toContain('missing_postcode');
+      expect(validateAddressContract('SG', { street: 'Fixture Road', postcode: '018989' }, { matchLevel }).valid).toBe(true);
+    }
+    expect(validateAddressContract('HK', { admin1: '香港島', locality: '中西區' }).valid).toBe(true);
+  });
   it('limits postal administrative codes to the six postal-code systems', () => {
     for (const code of ['US', 'CA', 'AU', 'BR', 'MX', 'IT']) expect(requiresAdminCode(code)).toBe(true);
     for (const code of ['DE', 'JP', 'HK', 'TW', 'IN', 'SA']) expect(requiresAdminCode(code)).toBe(false);
+  });
+
+  it('accepts the Saudi extended postcode format used by the live audit', () => {
+    expect(isValidPostcode('SA', '12345')).toBe(true);
+    expect(isValidPostcode('SA', '12345-6789')).toBe(true);
+    expect(isValidPostcode('SA', '1234')).toBe(false);
   });
 
   it('rejects incomplete contract fields and accepts a complete record', () => {
@@ -54,7 +68,7 @@ describe('country address contracts', () => {
   });
 
   it('allows alphanumeric building identifiers in otherwise native text', () => {
-    const china = { houseNumber: '12', street: '星博国际D1-12号', admin1: '贵州省', locality: '安顺市', district: '普定县', postcode: '' };
+    const china = { houseNumber: '12', street: '星博国际D1-12号', admin1: '贵州省', locality: '安顺市', district: '普定县', postcode: '561000' };
     expect(validateAddressContract('CN', china, { strict: true }).valid).toBe(true);
     expect(validateAddressContract('CN', { ...china, street: '工农路888号万达悦府B区13号楼' }, { strict: true }).valid).toBe(true);
     expect(validateAddressContract('CN', { ...china, street: 'Xingbo International' }, { strict: true }).valid).toBe(false);

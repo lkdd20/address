@@ -26,6 +26,7 @@ parser.add_argument("--per-locality", type=int, required=True)
 parser.add_argument("--assets-file", required=True)
 parser.add_argument("--building-assets-file", required=True)
 parser.add_argument("--bounds", type=float, nargs=4, required=True)
+parser.add_argument("--bounds-extra", type=float, nargs=4, action="append", default=[])
 parser.add_argument("--candidate-jsonl")
 args = parser.parse_args()
 
@@ -73,10 +74,34 @@ connection.execute("SET memory_limit='2GB'")
 connection.execute(f"SET temp_directory={sql_string(str(temporary_directory))}")
 output = sql_string(str(output_path))
 country = sql_string(args.country.upper())
-minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = args.bounds
-if not (-180 <= minimum_longitude < maximum_longitude <= 180
-        and -90 <= minimum_latitude < maximum_latitude <= 90):
+def valid_box(values):
+    return (len(values) == 4
+            and -180 <= values[0] < values[2] <= 180
+            and -90 <= values[1] < values[3] <= 90)
+
+
+if not valid_box(args.bounds):
     raise ValueError("bounds must be a valid minLon minLat maxLon maxLat box")
+if any(not valid_box(value) for value in args.bounds_extra):
+    raise ValueError("bounds-extra must contain valid minLon minLat maxLon maxLat boxes")
+box_areas = [tuple(args.bounds), *(tuple(value) for value in args.bounds_extra)]
+minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = args.bounds
+
+
+def box_predicate(longitude_column, latitude_column, boxes):
+    return "(" + " OR ".join(
+        f"({longitude_column} BETWEEN {box[0]} AND {box[2]}"
+        f" AND {latitude_column} BETWEEN {box[1]} AND {box[3]})"
+        for box in boxes
+    ) + ")"
+
+
+def bbox_predicate(longitude_min_column, longitude_max_column, latitude_min_column, latitude_max_column, boxes):
+    return "(" + " OR ".join(
+        f"({longitude_min_column} <= {box[2]} AND {longitude_max_column} >= {box[0]}"
+        f" AND {latitude_min_column} <= {box[3]} AND {latitude_max_column} >= {box[1]})"
+        for box in boxes
+    ) + ")"
 candidate_multiplier = 12 if args.candidate_jsonl else 4
 candidate_limit = min(max(args.max_records, args.max_records * candidate_multiplier), 250000)
 residential_grid_scale = 4
@@ -90,13 +115,17 @@ CREATE TEMP TABLE address_candidates AS
   SELECT
     0 AS priority,
     id, country, admin1, locality, postal_city, district,
-    address_levels, postcode, street, number, unit,
+    address_levels, CASE WHEN nullif(trim(number), '') IS NULL THEN '' ELSE coalesce(postcode, '') END AS postcode,
+    street, coalesce(number, '') AS number,
+    CASE WHEN nullif(trim(number), '') IS NULL THEN '' ELSE coalesce(unit, '') END AS unit,
+    CASE WHEN nullif(trim(number), '') IS NULL THEN 'street' WHEN nullif(trim(unit), '') IS NULL THEN 'premise' ELSE 'subpremise' END AS match_level,
     longitude, latitude, source_dataset, source_record_id,
     ST_Point(longitude, latitude) AS geometry
   FROM read_json_auto({sql_string(str(candidate_file))}, format='newline_delimited')
   WHERE country = {country}
-    AND longitude BETWEEN {minimum_longitude} AND {maximum_longitude}
-    AND latitude BETWEEN {minimum_latitude} AND {maximum_latitude}
+    AND nullif(trim(street), '') IS NOT NULL
+    AND (country <> 'CN' OR nullif(trim(number), '') IS NOT NULL)
+    AND {box_predicate('longitude', 'latitude', box_areas)}
   LIMIT {candidate_limit};
 """
 else:
@@ -117,10 +146,11 @@ else:
       coalesce(postal_city, '') AS postal_city,
       coalesce(address_levels[-1].value, '') AS district,
       list_transform(address_levels, address_level -> coalesce(address_level.value, '')) AS address_levels,
-      coalesce(postcode, '') AS postcode,
+      CASE WHEN nullif(trim(number), '') IS NULL THEN '' ELSE coalesce(postcode, '') END AS postcode,
       street,
-      number,
-      coalesce(unit, '') AS unit,
+      coalesce(number, '') AS number,
+      CASE WHEN nullif(trim(number), '') IS NULL THEN '' ELSE coalesce(unit, '') END AS unit,
+      CASE WHEN nullif(trim(number), '') IS NULL THEN 'street' WHEN nullif(trim(unit), '') IS NULL THEN 'premise' ELSE 'subpremise' END AS match_level,
       ST_X(geometry) AS longitude,
       ST_Y(geometry) AS latitude,
       coalesce(sources[1].dataset, 'Overture Maps addresses') AS source_dataset,
@@ -128,12 +158,9 @@ else:
       geometry
     FROM read_parquet({sql_string(asset)}, union_by_name=true)
     WHERE country = {country}
-      AND bbox.xmin >= {minimum_longitude}
-      AND bbox.xmax <= {maximum_longitude}
-      AND bbox.ymin >= {minimum_latitude}
-      AND bbox.ymax <= {maximum_latitude}
+      AND {bbox_predicate('bbox.xmin', 'bbox.xmax', 'bbox.ymin', 'bbox.ymax', box_areas)}
       AND nullif(trim(street), '') IS NOT NULL
-      AND nullif(trim(number), '') IS NOT NULL
+      AND (country <> 'CN' OR nullif(trim(number), '') IS NOT NULL)
       AND geometry IS NOT NULL
     LIMIT {per_asset_limit}
     )
@@ -149,6 +176,16 @@ CREATE TEMP TABLE address_candidates AS
   LIMIT {candidate_limit};
 """
 connection.execute(candidate_query)
+connection.execute("""
+CREATE OR REPLACE TEMP TABLE address_candidates AS
+SELECT * FROM address_candidates
+QUALIFY row_number() OVER (
+  PARTITION BY CASE WHEN match_level='street' THEN
+    concat('street:', country, chr(31), lower(trim(admin1)), chr(31), lower(trim(locality)), chr(31),
+           lower(trim(district)), chr(31), lower(trim(street))) ELSE concat('address:', id) END
+  ORDER BY id
+) = 1;
+""")
 
 residential_grids = []
 if building_assets:
@@ -222,6 +259,7 @@ COPY (
     FROM address_candidates
     JOIN residential_buildings
       ON ST_Intersects(address_candidates.geometry, residential_buildings.geometry)
+      AND address_candidates.match_level <> 'street'
   ), classified AS (
     SELECT address_id, building_id, building_class
     FROM matches
@@ -229,9 +267,10 @@ COPY (
   ), residential_candidates AS (
     SELECT
       address_candidates.*,
-      CASE WHEN classified.building_class = 'apartments' THEN 'apartment' ELSE 'residential' END AS property_type,
-      classified.building_id AS residential_building_id,
-      classified.building_class AS residential_building_class,
+      CASE WHEN classified.building_class = 'apartments' THEN 'apartment'
+        WHEN classified.building_id IS NOT NULL THEN 'residential' ELSE 'unknown' END AS property_type,
+      coalesce(classified.building_id, '') AS residential_building_id,
+      coalesce(classified.building_class, '') AS residential_building_class,
       row_number() OVER (
         PARTITION BY coalesce(nullif(trim(address_candidates.admin1), ''), '*')
         ORDER BY hash(address_candidates.id)
@@ -243,14 +282,12 @@ COPY (
         ORDER BY hash(address_candidates.id)
       ) AS residential_locality_rank
     FROM address_candidates
-    JOIN classified ON classified.address_id = address_candidates.id
+    LEFT JOIN classified ON classified.address_id = address_candidates.id
   ), balanced AS (
-    SELECT 0 AS residential_priority, * EXCLUDE (residential_region_rank, residential_locality_rank)
-    FROM residential_candidates WHERE residential_region_rank = 1
-    UNION ALL
-    SELECT 1 AS residential_priority, * EXCLUDE (residential_region_rank, residential_locality_rank)
+    SELECT CASE WHEN residential_region_rank = 1 THEN 0 ELSE 1 END AS residential_priority,
+      * EXCLUDE (residential_region_rank, residential_locality_rank)
     FROM residential_candidates
-    WHERE residential_region_rank > 1 AND residential_locality_rank <= {args.per_locality}
+    WHERE residential_region_rank = 1 OR residential_locality_rank <= {args.per_locality}
   )
   SELECT
     balanced.* EXCLUDE (priority, residential_priority, geometry)
@@ -260,7 +297,17 @@ COPY (
 ) TO {output} (FORMAT JSON, ARRAY false);
 """
     try:
-        connection.execute(classified_query)
+        try:
+            connection.execute(classified_query)
+        except duckdb.InternalException as error:
+            if "Failed to bind column reference" not in str(error):
+                raise
+            pathlib.Path(args.output).unlink(missing_ok=True)
+            connection.execute("SET disabled_optimizers='unused_columns'")
+            try:
+                connection.execute(classified_query)
+            finally:
+                connection.execute("SET disabled_optimizers=''")
     except Exception as error:
         pathlib.Path(args.output).unlink(missing_ok=True)
         print(f"Residential building classification failed; exporting address-only fallback: {error}", file=sys.stderr)

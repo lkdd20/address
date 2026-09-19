@@ -3,7 +3,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent
 } from 'react';
 import {
-  Activity, ArrowDown, ArrowUp, Braces, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Database, FlaskConical, Globe2, History, House, KeyRound, Languages,
+  Activity, ArrowDown, ArrowUp, Braces, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Database, Download, FlaskConical, Globe2, History, House, KeyRound, Languages,
   LayoutDashboard, ListOrdered, LogOut, MapPin, Maximize2, Pencil, Plus, Power, RefreshCw, RotateCcw, Save, Search, ShieldBan,
   ShieldCheck, Target, Trash2, TrendingUp, X
 } from 'lucide-react';
@@ -12,7 +12,8 @@ import { generatedAdminText } from '../domain/admin-i18n.generated';
 import { countryByCode, isCountryCode } from '../domain/countries';
 import { localeDefinitions, localizedCountryName, pathForLocale } from '../domain/locales';
 import type { CountryShortcutConfig, Locale, LocationOption, LocationShortcut } from '../domain/types';
-import { WorldCoverageMap } from './WorldCoverageMap';
+import { useMapDialogFocus, WorldCoverageMap } from './WorldCoverageMap';
+import type { OpenAICompatibleModel } from '../../server/credential-broker/openai-compatible.mjs';
 
 type View = 'dashboard' | 'blacklist' | 'access' | 'providers' | 'addressData' | 'syncQueue' | 'syncHistory' | 'shortcuts' | 'tokens';
 const adminViews = new Set<View>(['dashboard', 'blacklist', 'access', 'providers', 'addressData', 'syncQueue', 'syncHistory', 'shortcuts', 'tokens']);
@@ -26,8 +27,11 @@ interface SyncAdminProps { locale: Locale }
 interface Credential {
   id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
   fieldMasks?: { appKey: string; appSecret: string };
+  openAICompatible?: { apiKeyMask: string; baseUrl: string; model: string; reasoningEffort: string; maxTokens: number };
+  translationRouteId?: string; translationPriority?: number; translationRouteEnabled?: boolean; translationPrompt?: string;
   quotaService: string; quotaPeriod: 'day' | 'month'; quotaUsed: number; quotaLimit: number; quotaRemaining: number;
   officialQuotaLimit?: number; quotaBaseline?: number;
+  characterQuota?: { used: number; limit: number; remaining: number; providerUsed: number; providerLimit: number; observedAt: string | null; resetAt: string | null };
   quotaResetAt: string; quotaUsageSource: 'provider' | 'local'; providerReportedAt?: string | null; lastSuccessAt?: string;
   quotaWindows?: Array<{ service: string; period: 'day' | 'month'; used: number; limit: number; remaining: number; resetAt: string; usageSource: 'provider' | 'local'; exhausted: boolean }>;
 }
@@ -44,8 +48,13 @@ interface DashboardMetrics {
 interface DashboardData { nodes: CoverageNode[]; countries: CoverageNode[]; metrics: DashboardMetrics }
 interface AmapBrowserStatus { configured: boolean; enabled: boolean; label: string; mask: string; securityMask: string; status: string; lastUsedAt: string | null; updatedAt: string | null }
 interface MapSettings { google: { china: boolean; international: boolean }; amap: { china: boolean; international: boolean }; amapBrowser: AmapBrowserStatus }
-interface TranslationSettings { googleTranslationEnabled: boolean }
-interface ProviderViewData { credentials: Credential[]; maps: MapSettings; translation: TranslationSettings }
+interface TranslationRoute {
+  id: string; provider: string; credentialId: string | null; label: string; priority: number; enabled: boolean;
+  prompt: string; status: string; model: string; baseUrl: string; reasoningEffort: string; maxTokens: number | null;
+  lastUsedAt: string | null; updatedAt: string;
+}
+interface TranslationSettings { googleTranslationEnabled: boolean; routes: TranslationRoute[] }
+interface ProviderViewData { credentials?: Credential[]; maps?: MapSettings; translation?: TranslationSettings }
 interface ApiTokenView { id: string; name: string; scopes: string[]; rate_limit_per_minute: number; expires_at: string | null; revoked_at: string | null; token_mask: string; token_revealable: boolean }
 type Mutate = <T = unknown>(path: string, method: string, body?: unknown, success?: string) => Promise<T | undefined>;
 type Reveal = (path: string) => Promise<Record<string, string>>;
@@ -120,7 +129,7 @@ interface SyncQueueData {
 const baseAdminText = {
   'zh-CN': {
     labels: { dashboard: '仪表盘', blacklist: '地址黑名单', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌' },
-    providers: { amap: '高德地图', baidu: '百度地图', tencent: '腾讯地图', onemap: 'OneMap', youdao: '有道翻译', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' },
+    providers: { amap: '高德地图', baidu: '百度地图', tencent: '腾讯地图', onemap: 'OneMap', youdao: '有道翻译', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls', 'openai-compatible': 'OpenAI 兼容接口' },
     brandName: '地址', brand: '管理系统', loginTitle: '管理员登录', password: '管理员密码', login: '登录', loggingIn: '登录中…', backGenerator: '返回生成器',
     bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', retry: '重新加载', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据总览', dashboardDescription: '全面掌握全球真实地址数据的分布与增长情况', totalResidential: '真实住宅总量', countriesCovered: '国家数', regionsCovered: '行政区覆盖率', qualifiedRegions: '今日更新', countryRanking: 'Top 国家排行', coverageDetails: '行政区覆盖明细', allCountries: '全部国家', region: '区域', level: '行政层级', residential: '真实住宅', children: '下级区域', administrativeCoverage: '行政区覆盖', qualifiedCoverage: '至少5条', updated: '更新数据', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
@@ -128,7 +137,7 @@ const baseAdminText = {
     blacklistTitle: '地址黑名单', blacklistDescription: '内置机构规则固定启用；可在下方追加全局排除关键词。', builtinRules: '内置排除规则', customKeywords: '自定义关键词', customKeywordHint: '一行一个关键词，匹配小区名、建筑名、街道或完整地址；最多 500 条。', blacklistSaved: '地址黑名单已保存', saveBlacklist: '保存黑名单', noCustomKeywords: '当前没有自定义关键词',
     accessTitle: '访问策略', accessDescription: '设置前端访问方式和管理员密码。', frontendPasswordEnabled: '启用前端访问密码', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
     providersTitle: '地图密钥', providersDescription: '管理地图 API 凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: 'API 名称', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功', quotaBaseline: '本月已有用量', quotaBaselineHint: '填写接入本项目之前在同一 Google 结算账户产生的 Geocoding 用量。', googleOfficialQuota: 'Google 官方免费用量：每个结算账户每月 10,000 次；项目自动同步默认最多使用 9,000 次。', googleSyncBudget: '自动同步月度预算',
-    youdaoAppKey: '应用 ID（AppKey）', youdaoAppSecret: '应用密钥（AppSecret）', youdaoSaved: '有道翻译密钥已保存', youdaoConfigured: '已配置', youdaoNotConfigured: '未配置', translationTitle: '在线翻译', googleTranslationToggle: '启用谷歌翻译', translationSaved: '在线翻译设置已保存', geoapifyWorkerHint: '此处保存的 Geoapify Key 会用于韩国住宅地址同步和 API 查询，并按额度与冷却状态自动轮换。',
+    youdaoAppKey: '应用 ID（AppKey）', youdaoAppSecret: '应用密钥（AppSecret）', youdaoSaved: '有道翻译密钥已保存', youdaoConfigured: '已配置', youdaoNotConfigured: '未配置', openAIAdd: '添加 OpenAI 兼容接口', openAISaved: 'OpenAI 兼容翻译配置已保存', openAINotice: '仅调用兼容 OpenAI Chat Completions 的接口翻译地址组件。API Key 只在服务端加密保存；模型输出仍需通过数字、标识符和语言门禁。', openAIKey: 'API Key', openAIEndpoint: '接口地址', openAIModel: '模型', openAIReasoning: '推理档位', openAIReasoningNone: '关闭', openAIReasoningLow: '低', openAIReasoningMedium: '中', openAIMaxTokens: '输出预算', openAIFetchModels: '获取模型', openAIFetchingModels: '获取中', openAIModelFetchEmpty: '接口未返回可用模型', openAIModelFetchFailed: '模型获取失败', openAIPriority: '密钥优先级', openAIPrompt: '模型提示词', openAIPromptHint: '仅用于补充翻译风格；固定地址事实和 JSON 约束始终生效。', translationRoutingTitle: '翻译路由优先级', translationRoutingHint: '数字越小越优先；相同优先级按轮询使用，失败或额度等待会自动跳过。', translationRoute: '路由', translationPriority: '优先级', translationRouteEnabled: '启用', translationRouteSaved: '翻译路由已保存', translationTitle: '在线翻译', googleTranslationToggle: '启用谷歌翻译', translationSaved: '在线翻译设置已保存', geoapifyWorkerHint: '此处保存的 Geoapify Key 会用于韩国住宅地址同步和 API 查询，并按额度与冷却状态自动轮换。',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
     amapBrowserTitle: '高德前端地图凭据', configureAmapBrowser: '配置凭据', editAmapBrowser: '修改凭据', amapBrowserDialog: '配置高德前端地图凭据', amapBrowserLabel: '凭据名称', amapBrowserPlaceholder: '高德前端地图', amapApiKey: 'JS API Key', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德前端地图凭据已保存', amapBrowserRemoved: '高德前端地图凭据已删除', amapBrowserEmpty: '尚未配置高德前端地图凭据', amapBrowserSecurity: '用于在地址结果页加载高德 JavaScript 地图，与服务端地址同步使用的高德地图密钥相互独立。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德前端地图凭据吗？',
     chinaTitle: '中国同步', chinaDescription: '查看合格住宅小区和行政区覆盖。', chinaTotal: '合格住宅小区', cities: '覆盖城市', districts: '覆盖区县', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '暂无区县数据', allProvinces: '全部省级', allCities: '全部城市', allDistricts: '全部区县', pageSize: '每页数量', previousPage: '上一页', nextPage: '下一页', pageSummary: '第 {page} / {pages} 页，共 {total} 条',
@@ -138,7 +147,7 @@ const baseAdminText = {
   },
   en: {
     labels: { dashboard: 'Dashboard', blacklist: 'Address Blacklist', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens' },
-    providers: { amap: 'AMap', baidu: 'Baidu Maps', tencent: 'Tencent Maps', onemap: 'OneMap', youdao: 'Youdao Translate', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' },
+    providers: { amap: 'AMap', baidu: 'Baidu Maps', tencent: 'Tencent Maps', onemap: 'OneMap', youdao: 'Youdao Translate', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls', 'openai-compatible': 'OpenAI-compatible' },
     brandName: 'ADDRESS', brand: 'Admin Console', loginTitle: 'Administrator sign in', password: 'Administrator password', login: 'Sign in', loggingIn: 'Signing in…', backGenerator: 'Back to generator',
     bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', retry: 'Reload', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address Data Overview', dashboardDescription: 'Monitor the distribution and growth of verified global address data', totalResidential: 'Verified residences', countriesCovered: 'Countries', regionsCovered: 'Administrative coverage', qualifiedRegions: 'Updated today', countryRanking: 'Top countries', coverageDetails: 'Administrative coverage', allCountries: 'All countries', region: 'Region', level: 'Administrative level', residential: 'Verified residential', children: 'Child regions', administrativeCoverage: 'Administrative coverage', qualifiedCoverage: 'At least 5', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
@@ -146,7 +155,7 @@ const baseAdminText = {
     blacklistTitle: 'Address blacklist', blacklistDescription: 'Built-in institution rules remain enabled. Add global exclusion keywords below.', builtinRules: 'Built-in exclusion rules', customKeywords: 'Custom keywords', customKeywordHint: 'One keyword per line. Matches community, building, street, or complete address. Maximum 500.', blacklistSaved: 'Address blacklist saved', saveBlacklist: 'Save blacklist', noCustomKeywords: 'No custom keywords configured',
     accessTitle: 'Access policy', accessDescription: 'Configure frontend access and administrator passwords.', frontendPasswordEnabled: 'Require a frontend password', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
     providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success', quotaBaseline: 'Usage before setup', quotaBaselineHint: 'Enter Geocoding usage already incurred this month under the same Google billing account.', googleOfficialQuota: 'Google free usage: 10,000 monthly events per billing account; automatic sync uses at most 9,000 by default.', googleSyncBudget: 'Monthly sync budget',
-    youdaoAppKey: 'Application key', youdaoAppSecret: 'Application secret', youdaoSaved: 'Youdao credential saved', youdaoConfigured: 'Configured', youdaoNotConfigured: 'Not configured', translationTitle: 'Online translation', googleTranslationToggle: 'Enable Google translation', translationSaved: 'Translation settings saved', geoapifyWorkerHint: 'Geoapify keys saved here are used for Korea residential synchronization and API lookups, with automatic quota and cooldown rotation.',
+    youdaoAppKey: 'Application key', youdaoAppSecret: 'Application secret', youdaoSaved: 'Youdao credential saved', youdaoConfigured: 'Configured', youdaoNotConfigured: 'Not configured', openAIAdd: 'Add OpenAI-compatible endpoint', openAISaved: 'OpenAI-compatible translation saved', openAINotice: 'Only an OpenAI Chat Completions-compatible endpoint is used for address-component translation. The API key is encrypted server-side; model output still passes digit, identifier, and language gates.', openAIKey: 'API key', openAIEndpoint: 'Endpoint', openAIModel: 'Model', openAIReasoning: 'Reasoning', openAIReasoningNone: 'Off', openAIReasoningLow: 'Low', openAIReasoningMedium: 'Medium', openAIMaxTokens: 'Output budget', openAIFetchModels: 'Fetch models', openAIFetchingModels: 'Fetching', openAIModelFetchEmpty: 'The endpoint returned no usable models', openAIModelFetchFailed: 'Model discovery failed', openAIPriority: 'Key priority', openAIPrompt: 'Model prompt', openAIPromptHint: 'Use this only for translation style; fixed address facts and JSON constraints always apply.', translationRoutingTitle: 'Translation route priority', translationRoutingHint: 'Lower numbers run first; equal priorities rotate, and failed or quota-blocked routes are skipped.', translationRoute: 'Route', translationPriority: 'Priority', translationRouteEnabled: 'Enabled', translationRouteSaved: 'Translation routes saved', translationTitle: 'Online translation', googleTranslationToggle: 'Enable Google translation', translationSaved: 'Translation settings saved', geoapifyWorkerHint: 'Geoapify keys saved here are used for Korea residential synchronization and API lookups, with automatic quota and cooldown rotation.',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
     amapBrowserTitle: 'AMap frontend map credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap frontend map credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap frontend map', amapApiKey: 'JS API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap frontend map credential saved', amapBrowserRemoved: 'AMap frontend map credential deleted', amapBrowserEmpty: 'No AMap frontend map credential configured', amapBrowserSecurity: 'Used to render AMap on address result pages. It is separate from the AMap keys used for server-side address synchronization.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap frontend map credential?',
     chinaTitle: 'China sync', chinaDescription: 'Review qualified residential communities and administrative coverage.', chinaTotal: 'Qualified residential communities', cities: 'Cities covered', districts: 'Districts covered', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'No district data', allProvinces: 'All provinces', allCities: 'All cities', allDistricts: 'All districts', pageSize: 'Rows per page', previousPage: 'Previous', nextPage: 'Next', pageSummary: 'Page {page} of {pages}, {total} total',
@@ -240,9 +249,10 @@ const labelsFor = (locale: AdminLocale): Record<View, string> => ({
 });
 const viewIcons = { dashboard: LayoutDashboard, blacklist: ShieldBan, providers: KeyRound, addressData: RefreshCw, syncQueue: ListOrdered, syncHistory: History, shortcuts: MapPin, access: ShieldCheck, tokens: Braces } as const;
 const providerLabel = (locale: AdminLocale, provider: string): string => {
+  if (provider === 'deepl') return 'DeepL API Free';
   if (locale === 'zh-CN' || locale === 'en') return adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
   if (locale === 'zh-TW') {
-    const names: Record<string, string> = { amap: '高德地圖', baidu: '百度地圖', tencent: '騰訊地圖', onemap: 'OneMap', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' };
+    const names: Record<string, string> = { amap: '高德地圖', baidu: '百度地圖', tencent: '騰訊地圖', onemap: 'OneMap', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls', 'openai-compatible': 'OpenAI 相容介面' };
     return names[provider] || provider;
   }
   return adminText.en.providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
@@ -256,6 +266,7 @@ const credentialDisplayLabel = (locale: AdminLocale, label: string): string => (
   GEOAPIFY_API_KEY: providerLabel(locale, 'geoapify'),
   GOOGLE_GEOCODING_API_KEY: providerLabel(locale, 'google-geocoding'),
   MAPPLS_API_KEY: providerLabel(locale, 'mappls'),
+  OPENAI_COMPATIBLE_MODEL: providerLabel(locale, 'openai-compatible'),
   AMAP_JS_API_KEY: adminText[locale].amapBrowserTitle
 } as Record<string, string>)[label] || label;
 const interpolate = (value: string, replacements: Record<string, string | number>): string => Object.entries(replacements).reduce((result, [key, replacement]) => result.replace(`{${key}}`, String(replacement)), value);
@@ -378,6 +389,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const t = adminText[locale];
   const [authenticated, setAuthenticated] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
+  const [sessionRetry, setSessionRetry] = useState(0);
   const [initialized, setInitialized] = useState(true);
   const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
   const [password, setPassword] = useState('');
@@ -385,7 +397,9 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const [dataByView, setDataByView] = useState<Partial<Record<View, unknown>>>({});
   const [loadingView, setLoadingView] = useState<View | null>(null);
   const [mutating, setMutating] = useState(false);
+  const mutationPending = useRef(false);
   const [loginBusy, setLoginBusy] = useState(false);
+  const loginPending = useRef(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [coverageTrail, setCoverageTrail] = useState<CoverageNode[]>([]);
@@ -413,7 +427,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
       headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...options.headers },
       credentials: 'same-origin'
     });
-    const body = await response.json() as { data?: T; error?: string; detail?: string };
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { data?: T; error?: string; detail?: string };
     if (response.status === 401) setAuthenticated(false);
     if (!response.ok) throw new Error(errorMessage(body.detail || body.error || `HTTP ${response.status}`, locale));
     return body.data as T;
@@ -428,20 +442,26 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     loadControllers.current[selected]?.abort();
     const controller = new AbortController();
     loadControllers.current[selected] = controller;
-    if (!background) setLoadingView(selected);
-    setError(''); if (clearMessages) setNotice('');
+    if (!background) { setLoadingView(selected); setError(''); }
+    if (clearMessages) setNotice('');
     try {
       const paths: Record<View, string> = {
         dashboard: `/dashboard/overview${coverageParent.current ? `?parent=${encodeURIComponent(coverageParent.current)}` : ''}`,
         blacklist: '/settings/blacklist', access: '/settings/access', providers: '/providers', addressData: '/address-data', syncQueue: '/sync/queue', syncHistory: '/sync/history', shortcuts: '/settings/country-shortcuts', tokens: '/tokens'
       };
-      const result = selected === 'providers'
-        ? await Promise.all([
-          request('/providers', { signal: controller.signal }),
-          request('/settings/maps', { signal: controller.signal }),
-          request('/settings/translation', { signal: controller.signal })
-        ]).then(([credentials, maps, translation]) => ({ credentials, maps, translation }))
-        : await request(paths[selected], { signal: controller.signal });
+      if (selected === 'providers') {
+        const parts = [['credentials', '/providers'], ['maps', '/settings/maps'], ['translation', '/settings/translation']] as const;
+        const results = await Promise.allSettled(parts.map(async ([key, path]) => {
+          const value = await request(path, { signal: controller.signal });
+          if (id === loadIds.current[selected] && !controller.signal.aborted) {
+            setDataByView((values) => ({ ...values, providers: { ...(values.providers as ProviderViewData), [key]: value } }));
+          }
+        }));
+        const failure = results.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected') throw failure.reason;
+        return !controller.signal.aborted;
+      }
+      const result = await request(paths[selected], { signal: controller.signal });
       if (id === loadIds.current[selected]) setDataByView((values) => ({ ...values, [selected]: result }));
       return true;
     } catch (value) {
@@ -457,19 +477,24 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   useEffect(() => () => Object.values(loadControllers.current).forEach((controller) => controller?.abort()), []);
 
   useEffect(() => {
-    void fetch('/admin/api/status').then((response) => response.json()).then((body) => setInitialized(Boolean(body.data?.initialized)))
-      .catch((value) => setError(errorMessage(value, locale)));
-    void fetch('/admin/api/session', { credentials: 'same-origin' }).then((response) => response.json()).then((body) => {
-      const forceChange = Boolean(body.data?.passwordChangeRequired);
+    const controller = new AbortController();
+    void request<{ initialized: boolean }>('/status', { signal: controller.signal })
+      .then((value) => { if (!controller.signal.aborted) setInitialized(Boolean(value.initialized)); })
+      .catch((value) => { if (!controller.signal.aborted) setError(errorMessage(value, locale)); });
+    void request<{ authenticated: boolean; passwordChangeRequired?: boolean }>('/session', { signal: controller.signal }).then((body) => {
+      if (controller.signal.aborted) return;
+      const forceChange = Boolean(body.passwordChangeRequired);
       const selected: View = forceChange ? 'access' : viewFromLocation();
       viewRef.current = selected;
       setView(selected);
-      const active = Boolean(body.data?.authenticated);
+      const active = Boolean(body.authenticated);
       setAuthenticated(active);
       setPasswordChangeRequired(active && forceChange);
       if (active) void load(selected);
-    }).catch((value) => setError(errorMessage(value, locale))).finally(() => setSessionReady(true));
-  }, [load, locale]);
+    }).catch((value) => { if (!controller.signal.aborted) setError(errorMessage(value, locale)); })
+      .finally(() => { if (!controller.signal.aborted) setSessionReady(true); });
+    return () => controller.abort();
+  }, [load, locale, request, sessionRetry]);
 
   const selectView = useCallback((selected: View, history: 'push' | 'none' = 'push') => {
     if (passwordChangeRequired && selected !== 'access') return;
@@ -500,41 +525,76 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const addressDataRunning = ((dataByView.addressData || []) as AddressDataCountry[]).some((country) => country.status === 'running');
   useEffect(() => {
     if (!authenticated || view !== 'addressData' || !addressDataRunning) return;
-    const interval = window.setInterval(() => void load('addressData', false, true), 10_000);
-    return () => window.clearInterval(interval);
+    let cancelled = false;
+    let timer: number;
+    const poll = () => { timer = window.setTimeout(async () => {
+      if (!loadControllers.current.addressData) await load('addressData', false, true);
+      if (!cancelled) poll();
+    }, 10_000); };
+    poll();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [addressDataRunning, authenticated, load, view]);
 
   const login = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault(); setLoginBusy(true); setError('');
+    event.preventDefault();
+    if (loginPending.current) return;
+    loginPending.current = true;
+    setLoginBusy(true); setError('');
     try {
-      const result = await fetch('/admin/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }), credentials: 'same-origin' });
-      const body = await result.json() as { data?: { passwordChangeRequired?: boolean }; error?: string };
-      if (!result.ok) throw new Error(errorMessage(body.error || 'LOGIN_FAILED', locale));
-      const forceChange = Boolean(body.data?.passwordChangeRequired);
+      const body = await request<{ passwordChangeRequired?: boolean }>('/login', { method: 'POST', body: JSON.stringify({ password }) });
+      const forceChange = Boolean(body.passwordChangeRequired);
       const selected: View = forceChange ? 'access' : viewRef.current;
       setAuthenticated(true); setPasswordChangeRequired(forceChange); setPassword('');
       viewRef.current = selected; setView(selected);
       setTimeout(() => void load(selected), 0);
     } catch (value) { setError(errorMessage(value, locale)); }
-    finally { setLoginBusy(false); }
+    finally { loginPending.current = false; setLoginBusy(false); }
   };
 
   const mutate: Mutate = async <T,>(path: string, method: string, body?: unknown, success = locale === 'zh-CN' ? '操作已完成' : 'Operation completed'): Promise<T | undefined> => {
+    if (mutationPending.current) return undefined;
+    mutationPending.current = true;
     const selected = viewRef.current;
+    loadIds.current[selected] += 1;
+    loadControllers.current[selected]?.abort();
+    setLoadingView(null);
     setMutating(true); setError(''); setNotice('');
     try {
       const result = await request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (path === '/settings/access' && result && typeof result === 'object' && 'passwordChangeRequired' in result) {
         setPasswordChangeRequired(Boolean((result as { passwordChangeRequired?: boolean }).passwordChangeRequired));
       }
-      if (await load(selected, false, true)) setNotice(success);
+      setDataByView((values) => {
+        const providers = values.providers as ProviderViewData | undefined;
+        const credentialId = /^\/providers\/([^/]+)$/.exec(path)?.[1];
+        const tokenId = /^\/tokens\/([^/]+)$/.exec(path)?.[1];
+        if (credentialId && providers) {
+          const patch = body as { label?: string; enabled?: boolean } | undefined;
+          return { ...values, providers: { ...providers, credentials: (providers.credentials || []).flatMap((item) => {
+            if (item.id !== credentialId) return [item];
+            if (method === 'DELETE') return [];
+            return [{ ...item, ...(patch?.label !== undefined ? { label: patch.label } : {}),
+              ...(patch?.enabled !== undefined ? { enabled: patch.enabled, status: patch.enabled ? (item.status === 'disabled' ? 'healthy' : item.status) : 'disabled' } : {}) }];
+          }) } };
+        }
+        if (tokenId && method === 'DELETE') return { ...values, tokens: ((values.tokens || []) as ApiTokenView[]).filter((item) => item.id !== tokenId) };
+        if (tokenId && method === 'PUT') return { ...values, tokens: result };
+        if (path === '/settings/maps') return { ...values, providers: { ...providers, maps: result } };
+        if (path === '/settings/translation') return { ...values, providers: { ...providers, translation: result } };
+        if (path === '/maps/amap-browser') return { ...values, providers: { ...providers, maps: { ...providers?.maps, amapBrowser: result } } };
+        if (path.startsWith('/settings/country-shortcuts/')) return { ...values, shortcuts: ((values.shortcuts || []) as AdminCountryShortcutConfig[]).map((item) => item.countryCode === path.split('/').at(-1) ? result : item) };
+        if (path === '/settings/access') return { ...values, access: result };
+        if (path === '/settings/blacklist') return { ...values, blacklist: { ...(values.blacklist as BlacklistViewData), ...(result as Pick<BlacklistViewData, 'keywords'>) } };
+        return values;
+      });
+      if (selected === viewRef.current) setNotice(success);
+      void load(selected, false, true);
       return result;
     } catch (value) {
-      await load(selected, false, true);
-      setError(errorMessage(value, locale));
+      if (selected === viewRef.current) setError(errorMessage(value, locale));
       return undefined;
     }
-    finally { setMutating(false); }
+    finally { mutationPending.current = false; setMutating(false); }
   };
 
   if (!sessionReady) return <main className="admin-login"><div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div></main>;
@@ -546,7 +606,9 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
       {!initialized && <div className="admin-warning">{t.bootstrap}</div>}
       <label><span>{t.password}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
       <button disabled={loginBusy || !password}>{loginBusy ? t.loggingIn : t.login}</button>
-      {error && <div className="admin-error" role="alert">{error}</div>}
+      {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span>
+        <button type="button" disabled={loginBusy} onClick={() => { setError(''); setSessionReady(false); setSessionRetry((value) => value + 1); }}>{t.retry}</button>
+      </div>}
       <a href={`/${pageLocale}/`}>{t.backGenerator}</a>
     </form>
   </main>;
@@ -591,7 +653,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
           <button className="icon-action danger-control" title={t.logout} aria-label={t.logout} onClick={() => void logout()}><LogOut size={17} /></button>
         </div>
       </header>
-      {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span>{data === undefined && <button onClick={() => void load(view)}>{t.retry}</button>}</div>}
+      {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span><button disabled={mutating || loadingView === view} onClick={() => void load(view)}>{t.retry}</button></div>}
       {notice && <div className="admin-notice">{notice}</div>}
       {data === undefined ? (view === 'dashboard' ? <DashboardLoading label={t.loading} /> : <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div>) : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
         coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
@@ -607,6 +669,7 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
   const t = adminText[locale];
   const [providerDialog, setProviderDialog] = useState<'create' | Credential | null>(null);
   const [youdaoDialog, setYoudaoDialog] = useState<'create' | Credential | null>(null);
+  const [openAICompatibleDialog, setOpenAICompatibleDialog] = useState<'create' | Credential | null>(null);
   const [newProvider, setNewProvider] = useState('amap');
   const [amapBrowserDialog, setAmapBrowserDialog] = useState(false);
   const [tokenEditor, setTokenEditor] = useState<{ mode: 'create' | 'edit'; value?: ApiTokenView } | null>(null);
@@ -623,19 +686,22 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
   }
   if (view === 'providers') {
     const value = data as ProviderViewData;
-    const credentials = (value.credentials || []).filter((credential) => credential.provider !== 'youdao')
+    const credentials = (value.credentials || []).filter((credential) => !['deepl', 'youdao', 'openai-compatible'].includes(credential.provider))
       .slice().sort((left, right) => left.provider.localeCompare(right.provider) || left.label.localeCompare(right.label));
     const youdaoCredentials = (value.credentials || []).filter((credential) => credential.provider === 'youdao')
       .slice().sort((left, right) => left.label.localeCompare(right.label));
+    const openAICompatibleCredentials = (value.credentials || []).filter((credential) => credential.provider === 'openai-compatible')
+      .slice().sort((left, right) => left.label.localeCompare(right.label));
     const maps = value.maps;
-    return <><MapDisplayPanel value={maps} locale={locale} busy={busy} mutate={mutate} openAmapBrowser={() => setAmapBrowserDialog(true)} />
+    return <>{maps && <><MapDisplayPanel value={maps} locale={locale} busy={busy} mutate={mutate} openAmapBrowser={() => setAmapBrowserDialog(true)} />
       <Panel title={t.amapBrowserTitle} actions={<button type="button" className="primary-action" onClick={() => setAmapBrowserDialog(true)}>{maps.amapBrowser.configured ? t.editAmapBrowser : t.configureAmapBrowser}</button>}>
         <AmapBrowserSummary value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} reveal={reveal} openEditor={() => setAmapBrowserDialog(true)} />
-      </Panel>
+      </Panel></>}
       <ProviderCredentialsPanel values={credentials} locale={locale} reveal={reveal} busy={busy} mutate={mutate} openEditor={setProviderDialog} openProvider={(provider) => { setNewProvider(provider); setProviderDialog('create'); }} />
-      <TranslationSettingsPanel value={value.translation} credentials={youdaoCredentials} locale={locale} busy={busy} mutate={mutate} reveal={reveal} openEditor={setYoudaoDialog} />
-      {amapBrowserDialog && <AmapBrowserDialog value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} close={() => setAmapBrowserDialog(false)} />}
+      {value.translation && <TranslationSettingsPanel value={value.translation} credentials={youdaoCredentials} deeplCredentials={(value.credentials || []).filter((item) => item.provider === 'deepl')} openAICompatibleCredentials={openAICompatibleCredentials} locale={locale} busy={busy} mutate={mutate} reveal={reveal} openEditor={setYoudaoDialog} openDeepL={(item) => { setNewProvider('deepl'); setProviderDialog(item); }} openOpenAICompatible={setOpenAICompatibleDialog} />}
+      {amapBrowserDialog && maps && <AmapBrowserDialog value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} close={() => setAmapBrowserDialog(false)} />}
       {youdaoDialog && <YoudaoCredentialDialog value={youdaoDialog === 'create' ? undefined : youdaoDialog} locale={locale} busy={busy} mutate={mutate} close={() => setYoudaoDialog(null)} />}
+      {openAICompatibleDialog && <OpenAICompatibleCredentialDialog value={openAICompatibleDialog === 'create' ? undefined : openAICompatibleDialog} locale={locale} busy={busy} mutate={mutate} close={() => setOpenAICompatibleDialog(null)} />}
       {providerDialog && <ProviderCredentialDialog value={providerDialog === 'create' ? undefined : providerDialog} initialProvider={newProvider} locale={locale} busy={busy} mutate={mutate} close={() => setProviderDialog(null)} />}</>;
   }
   if (view === 'addressData') {
@@ -702,21 +768,17 @@ function WorldDistributionMap({ countries, selected, locale, open, expanded = fa
     ariaLabel={selected ? coverageRegionName(selected, locale) : adminText[locale].globalDistribution}
     onSelect={open}
     expanded={expanded}
+    mapText={{ loading: adminText[locale].loading, retry: adminText[locale].retry,
+      error: locale === 'zh-CN' ? '地图加载失败，仍可使用数据列表。' : 'The map could not load. You can still use the data list.' }}
   />;
 }
 
 function ExpandedMapDialog({ countries, selected, locale, open, close }: {
   countries: CoverageNode[]; selected?: CoverageNode; locale: AdminLocale; open: (node: CoverageNode) => void; close: () => void;
 }) {
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
-    const overflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    window.addEventListener('keydown', onKeyDown);
-    return () => { document.body.style.overflow = overflow; window.removeEventListener('keydown', onKeyDown); };
-  }, [close]);
+  const root = useMapDialogFocus(true, close);
   const title = selected ? coverageRegionName(selected, locale) : adminText[locale].globalDistribution;
-  return <div className="map-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}><section className="map-dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X size={18} /></button></header><WorldDistributionMap countries={countries} selected={selected} locale={locale} open={open} expanded /></section></div>;
+  return <div className="map-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}><section ref={root} tabIndex={-1} className="map-dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X size={18} /></button></header><WorldDistributionMap countries={countries} selected={selected} locale={locale} open={open} expanded /></section></div>;
 }
 
 function DashboardMetric({ label, value, icon: Icon, tone }: { label: string; value: string; icon: typeof Globe2; tone: string }) {
@@ -842,7 +904,12 @@ const blacklistCategoryLabels: Record<AdminLocale, Record<string, string>> = {
 function BlacklistSettings({ value, locale, busy, mutate }: { value: BlacklistViewData; locale: AdminLocale; busy: boolean; mutate: Mutate }) {
   const t = adminText[locale];
   const [keywords, setKeywords] = useState(value.keywords.join('\n'));
-  useEffect(() => setKeywords(value.keywords.join('\n')), [value.keywords.join('\n')]);
+  const serverKeywords = useRef(value.keywords.join('\n'));
+  useEffect(() => {
+    const previous = serverKeywords.current;
+    serverKeywords.current = value.keywords.join('\n');
+    setKeywords((current) => current === previous ? serverKeywords.current : current);
+  }, [value.keywords.join('\n')]);
   return <Panel title={t.blacklistTitle}>
     <div className="blacklist-settings">
       <p>{t.blacklistDescription}</p>
@@ -853,7 +920,8 @@ function BlacklistSettings({ value, locale, busy, mutate }: { value: BlacklistVi
       <form onSubmit={async (event) => {
         event.preventDefault();
         const values = keywords.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
-        await mutate('/settings/blacklist', 'PUT', { keywords: values }, t.blacklistSaved);
+        const result = await mutate<Pick<BlacklistViewData, 'keywords'>>('/settings/blacklist', 'PUT', { keywords: values }, t.blacklistSaved);
+        if (result) setKeywords((current) => current === keywords ? result.keywords.join('\n') : current);
       }}><label><span>{t.customKeywords}</span><textarea value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder={t.noCustomKeywords} /></label><small>{t.customKeywordHint}</small><button className="primary-action" disabled={busy}>{t.saveBlacklist}</button></form>
     </div>
   </Panel>;
@@ -1028,11 +1096,11 @@ function AmapBrowserDialog({ value, locale, busy, mutate, close }: { value: Amap
 
 const providerQuotaDefaults: Record<string, number> = {
   amap: 5_000, baidu: 100, tencent: 10_000, onemap: 100_000_000,
-  youdao: 100_000, geoapify: 3_000, 'google-geocoding': 9_000, mappls: 1_000
+  deepl: 500_000, youdao: 100_000, geoapify: 3_000, 'google-geocoding': 9_000, mappls: 1_000, 'openai-compatible': 1_000
 };
 const providerQuotaPeriods: Record<string, 'day' | 'month'> = {
   amap: 'month', baidu: 'day', tencent: 'day', onemap: 'day', geoapify: 'day',
-  youdao: 'month', 'google-geocoding': 'month', mappls: 'day'
+  deepl: 'month', youdao: 'month', 'google-geocoding': 'month', mappls: 'day', 'openai-compatible': 'day'
 };
 const googleQuotaText = (locale: AdminLocale) => locale === 'zh-CN'
   ? { budget: '自动同步月度预算', baseline: '本月已有用量', hint: '填写接入本项目之前在同一 Google 结算账户产生的 Geocoding 用量。', official: 'Google 官方免费用量：每个结算账户每月 10,000 次；项目自动同步默认最多使用 9,000 次。' }
@@ -1040,21 +1108,102 @@ const googleQuotaText = (locale: AdminLocale) => locale === 'zh-CN'
     ? { budget: '自動同步月度預算', baseline: '本月已有用量', hint: '填寫接入本專案之前在同一 Google 結算帳戶產生的 Geocoding 用量。', official: 'Google 官方免費用量：每個結算帳戶每月 10,000 次；專案自動同步預設最多使用 9,000 次。' }
     : { budget: 'Monthly sync budget', baseline: 'Usage before setup', hint: 'Enter Geocoding usage already incurred this month under the same Google billing account.', official: 'Google free usage: 10,000 monthly events per billing account; automatic sync uses at most 9,000 by default.' };
 
-function TranslationSettingsPanel({ value, credentials, locale, busy, mutate, reveal, openEditor }: {
+const translationCostText = (locale: AdminLocale) => locale === 'zh-CN'
+  ? {
+    google: '优先使用缓存；在线服务按下方配置的优先级执行。OpenAI 兼容接口按你配置的供应商计费；谷歌是免密钥网页接口（非 Cloud Translation 计费 API），可能限流或不可用。',
+    youdao: '有道按量收费，试用额度用完后可能扣费，测试和自动翻译也可能产生费用。项目限额不代表供应商免费额度；若不接受费用，请勿添加或启用凭据。'
+  }
+  : locale === 'zh-TW'
+    ? {
+      google: '優先使用快取；線上服務依下方設定的優先順序執行。OpenAI 相容介面按你設定的供應商計費；Google 是免密鑰網頁介面（非 Cloud Translation 計費 API），可能限流或無法使用。',
+      youdao: '有道按量收費，試用額度用完後可能扣費，測試和自動翻譯也可能產生費用。專案限額不代表供應商免費額度；若不接受費用，請勿新增或啟用憑據。'
+    }
+    : {
+      google: 'Cache first; online services follow the priorities configured below. OpenAI-compatible usage follows your configured provider billing; Google uses the keyless web interface, not the billed Cloud Translation API, and may rate-limit or be unavailable.',
+      youdao: 'Youdao is usage-based and may charge after trial credits run out, including tests and automatic translation. Project limits are not free-credit guarantees. Do not add or enable credentials unless you accept the charges.'
+    };
+
+const deeplText = (locale: AdminLocale) => locale === 'zh-CN'
+  ? { notice: '仅支持 DeepL API Free，不切换付费版。以账户实际额度和项目上限中较小者为准；所有 DeepL 密钥共用项目字符账本。测试按钮只查询额度，不消耗翻译字符。', budget: '字符使用上限（当前额度周期）', characters: '字符', provider: '账户已用 / 上限', observed: '额度查询时间', unknown: '尚未查询额度', reset: '供应商未提供重置日期，不按月初清零。', add: '添加 DeepL 密钥' }
+  : locale === 'zh-TW'
+    ? { notice: '僅支援 DeepL API Free，不切換付費版。以帳戶實際額度和專案上限中較小者為準；所有 DeepL 金鑰共用專案字元帳本。測試按鈕僅查詢額度，不消耗翻譯字元。', budget: '字元使用上限（目前額度週期）', characters: '字元', provider: '帳戶已用 / 上限', observed: '額度查詢時間', unknown: '尚未查詢額度', reset: '供應商未提供重置日期，不按月初歸零。', add: '新增 DeepL 金鑰' }
+    : { notice: 'DeepL API Free only; never switches to Pro. The lower of the account allowance and project cap applies. All DeepL keys share one project character ledger. The test button checks usage without translating.', budget: 'Character cap (current quota period)', characters: 'characters', provider: 'Account used / limit', observed: 'Usage checked', unknown: 'Usage not checked', reset: 'Provider reset date unavailable; usage is not cleared at calendar month boundaries.', add: 'Add DeepL key' };
+
+const openAIText = (locale: AdminLocale) => {
+  const value = adminText[locale];
+  const fallback = adminText.en;
+  return {
+    add: value.openAIAdd || fallback.openAIAdd,
+    saved: value.openAISaved || fallback.openAISaved,
+    notice: value.openAINotice || fallback.openAINotice,
+    key: value.openAIKey || fallback.openAIKey,
+    endpoint: value.openAIEndpoint || fallback.openAIEndpoint,
+    model: value.openAIModel || fallback.openAIModel,
+    reasoning: value.openAIReasoning || fallback.openAIReasoning,
+    none: value.openAIReasoningNone || fallback.openAIReasoningNone,
+    low: value.openAIReasoningLow || fallback.openAIReasoningLow,
+    medium: value.openAIReasoningMedium || fallback.openAIReasoningMedium,
+    maxTokens: value.openAIMaxTokens || fallback.openAIMaxTokens,
+    fetchModels: value.openAIFetchModels || fallback.openAIFetchModels,
+    fetchingModels: value.openAIFetchingModels || fallback.openAIFetchingModels,
+    modelsEmpty: value.openAIModelFetchEmpty || fallback.openAIModelFetchEmpty,
+    modelsFailed: value.openAIModelFetchFailed || fallback.openAIModelFetchFailed,
+    priority: value.openAIPriority || fallback.openAIPriority,
+    prompt: value.openAIPrompt || fallback.openAIPrompt,
+    promptHint: value.openAIPromptHint || fallback.openAIPromptHint,
+    routingTitle: value.translationRoutingTitle || fallback.translationRoutingTitle,
+    routingHint: value.translationRoutingHint || fallback.translationRoutingHint,
+    route: value.translationRoute || fallback.translationRoute,
+    routePriority: value.translationPriority || fallback.translationPriority,
+    routeEnabled: value.translationRouteEnabled || fallback.translationRouteEnabled,
+    routeSaved: value.translationRouteSaved || fallback.translationRouteSaved
+  };
+};
+
+function TranslationSettingsPanel({ value, credentials, deeplCredentials, openAICompatibleCredentials, locale, busy, mutate, reveal, openEditor, openDeepL, openOpenAICompatible }: {
   value: TranslationSettings; credentials: Credential[]; locale: AdminLocale; busy: boolean; mutate: Mutate; reveal: Reveal;
+  deeplCredentials: Credential[]; openAICompatibleCredentials: Credential[]; openDeepL: (value: 'create' | Credential) => void;
+  openOpenAICompatible: (value: 'create' | Credential) => void;
   openEditor: (value: 'create' | Credential) => void;
 }) {
   const t = adminText[locale];
+  const cost = translationCostText(locale);
+  const openAI = openAIText(locale);
+  const googleRoute = value.routes?.find((route) => route.provider === 'google');
+  const googleEnabled = value.googleTranslationEnabled && googleRoute?.enabled !== false;
+  const [googlePriority, setGooglePriority] = useState(String(googleRoute?.priority ?? 40));
+  useEffect(() => setGooglePriority(String(googleRoute?.priority ?? 40)), [googleRoute?.priority]);
   return <Panel title={t.translationTitle}>
     <div className="translation-settings">
-      <div className="translation-toggle-row"><strong>{t.googleTranslationToggle}</strong><button type="button" className="toggle-switch" role="switch" aria-label={t.googleTranslationToggle} aria-checked={value.googleTranslationEnabled} disabled={busy}
-        onClick={() => void mutate('/settings/translation', 'PUT', { googleTranslationEnabled: !value.googleTranslationEnabled }, t.translationSaved)}><span aria-hidden="true" /></button></div>
+      <div className="translation-toggle-row"><strong>{t.googleTranslationToggle}</strong><button type="button" className="toggle-switch" role="switch" aria-label={t.googleTranslationToggle} aria-checked={googleEnabled} disabled={busy}
+        onClick={() => void mutate('/settings/translation', 'PUT', { googleTranslationEnabled: !googleEnabled }, t.translationSaved)}><span aria-hidden="true" /></button></div>
+      <p className="security-note translation-notice">{cost.google}</p>
+      <form className="translation-google-priority admin-form" onSubmit={async (event) => {
+        event.preventDefault();
+        await mutate('/settings/translation/routes', 'PUT', { routes: [{ id: 'google', priority: Number(googlePriority) }] }, t.translationSaved);
+      }}><label><span>{openAI.routePriority}</span><input name="googleTranslationPriority" type="number" min="1" max="10000" required value={googlePriority} onChange={(event) => setGooglePriority(event.target.value)} /></label><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{openAI.routingHint}</small></form>
+      <section className="translation-provider deepl-provider">
+        <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>DeepL API Free</h3><span className="provider-key-count">{providerCredentialCount(locale, deeplCredentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openDeepL('create')}><Plus size={14} aria-hidden="true" />{deeplText(locale).add}</button></header>
+        <p className="security-note translation-notice">{deeplText(locale).notice}</p>
+        {deeplCredentials.length ? <div className="provider-key-list">{deeplCredentials.map((credential) => <CredentialRowCompact key={credential.id} item={credential} locale={locale} reveal={reveal} actions={(item) => <>
+          <button type="button" className="provider-action" aria-label={t.edit} title={t.edit} disabled={busy} onClick={() => openDeepL(item)}><Pencil size={14} /></button>
+          <button type="button" className="provider-action" aria-label={item.enabled ? t.stop : t.enable} title={item.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate(`/providers/${item.id}`, 'PUT', { enabled: !item.enabled }, t.keySaved)}><Power size={14} /></button>
+          <button type="button" className="provider-action" aria-label={t.test} title={t.test} disabled={busy || !item.enabled} onClick={() => void mutate(`/providers/${item.id}/test`, 'POST', undefined, t.testSuccess)}><FlaskConical size={14} /></button>
+          <button type="button" className="provider-action danger" aria-label={t.remove} title={t.remove} disabled={busy} onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, item.label))) void mutate(`/providers/${item.id}`, 'DELETE', undefined, t.remove); }}><Trash2 size={14} /></button>
+        </>} />)}</div> : <div className="provider-empty-state translation-empty-state"><KeyRound size={15} aria-hidden="true" /><span>{t.youdaoNotConfigured}</span></div>}
+      </section>
       <section className="translation-provider">
         <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>{t.providers.youdao}</h3><span className={`provider-key-count${credentials.length ? '' : ' is-empty'}`}>{providerCredentialCount(locale, credentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openEditor('create')}><Plus size={14} aria-hidden="true" />{t.addKey}</button></header>
+        <p className="security-note translation-notice">{cost.youdao}</p>
         {credentials.length ? <div className="provider-key-list youdao-key-list">{credentials.map((credential) => <CredentialRowCompact key={credential.id} item={credential} locale={locale} reveal={reveal} revealPath={`/providers/${credential.id}/reveal-fields`} secrets={[
           { label: t.youdaoAppKey, mask: credential.fieldMasks?.appKey || credential.mask, field: 'appKey' },
           { label: t.youdaoAppSecret, mask: credential.fieldMasks?.appSecret || credential.mask, field: 'appSecret' }
         ]} actions={(item) => <><button type="button" className="provider-action" title={t.edit} aria-label={t.edit} disabled={busy} onClick={() => openEditor(item)}><Pencil size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={item.enabled ? t.stop : t.enable} aria-label={item.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate(`/providers/${item.id}`, 'PUT', { enabled: !item.enabled }, item.enabled ? t.stop : t.enable)}><Power size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={t.test} aria-label={t.test} disabled={busy} onClick={() => void mutate(`/providers/${item.id}/test`, 'POST', undefined, t.testSuccess)}><FlaskConical size={14} aria-hidden="true" /></button><button type="button" className="provider-action danger" title={t.remove} aria-label={t.remove} disabled={busy} onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, item.label))) void mutate(`/providers/${item.id}`, 'DELETE', undefined, t.remove); }}><Trash2 size={14} aria-hidden="true" /></button></>} />)}</div> : <div className="provider-empty-state translation-empty-state"><KeyRound size={15} aria-hidden="true" /><span>{t.youdaoNotConfigured}</span></div>}
+      </section>
+      <section className="translation-provider openai-provider">
+        <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>{providerLabel(locale, 'openai-compatible')}</h3><span className={`provider-key-count${openAICompatibleCredentials.length ? '' : ' is-empty'}`}>{providerCredentialCount(locale, openAICompatibleCredentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openOpenAICompatible('create')}><Plus size={14} aria-hidden="true" />{openAI.add}</button></header>
+        <p className="security-note translation-notice">{openAI.notice}</p>
+        {openAICompatibleCredentials.length ? <div className="provider-key-list">{openAICompatibleCredentials.map((credential) => <CredentialRowCompact key={credential.id} item={credential} locale={locale} reveal={reveal} revealPath={`/providers/${credential.id}/reveal-fields`} secrets={[{ label: openAI.key, mask: credential.openAICompatible?.apiKeyMask || credential.mask, field: 'apiKey' }]} actions={(item) => <><button type="button" className="provider-action" title={t.edit} aria-label={t.edit} disabled={busy} onClick={() => openOpenAICompatible(item)}><Pencil size={14} /></button><button type="button" className="provider-action" title={item.enabled ? t.stop : t.enable} aria-label={item.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate(`/providers/${item.id}`, 'PUT', { enabled: !item.enabled }, item.enabled ? t.stop : t.enable)}><Power size={14} /></button><button type="button" className="provider-action" title={t.test} aria-label={t.test} disabled={busy} onClick={() => void mutate(`/providers/${item.id}/test`, 'POST', undefined, t.testSuccess)}><FlaskConical size={14} /></button><button type="button" className="provider-action danger" title={t.remove} aria-label={t.remove} disabled={busy} onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, item.label))) void mutate(`/providers/${item.id}`, 'DELETE', undefined, t.remove); }}><Trash2 size={14} /></button></>} />)}</div> : <div className="provider-empty-state translation-empty-state"><KeyRound size={15} aria-hidden="true" /><span>{t.youdaoNotConfigured}</span></div>}
       </section>
     </div>
   </Panel>;
@@ -1072,6 +1221,7 @@ function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   const [visibleSecret, setVisibleSecret] = useState(false);
   const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults.youdao));
   const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
+  const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 30));
   const [enabled, setEnabled] = useState(value?.enabled ?? true);
   return <Dialog title={creating ? t.addKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
     event.preventDefault();
@@ -1081,16 +1231,188 @@ function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
     const body = {
       provider: 'youdao', label: label.trim() || `${t.providers.youdao} ${t.key}`,
       ...(key && secret ? { secret: JSON.stringify({ appKey: key, appSecret: secret }) } : {}),
-      quotaLimit: Number(quotaLimit), quotaPeriod, enabled
+      quotaLimit: Number(quotaLimit), quotaPeriod, translationPriority: Number(translationPriority), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.youdaoSaved);
     if (result) close();
   }}>
+    <p className="security-note translation-notice">{translationCostText(locale).youdao}</p>
     <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
     <label className="secret-input-field"><span>{t.youdaoAppKey}</span><div><input name="youdaoAppKey" type={visibleKey ? 'text' : 'password'} value={appKey} required={creating || Boolean(appSecret)} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setAppKey(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisibleKey((current) => !current)}>{visibleKey ? t.hideSecret : t.showSecret}</button></div></label>
     <label className="secret-input-field"><span>{t.youdaoAppSecret}</span><div><input name="youdaoAppSecret" type={visibleSecret ? 'text' : 'password'} value={appSecret} required={creating || Boolean(appKey)} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setAppSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisibleSecret((current) => !current)}>{visibleSecret ? t.hideSecret : t.showSecret}</button></div></label>
     <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
     <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>
+    <label><span>{openAIText(locale).priority}</span><input name="translationPriority" type="number" min="1" max="10000" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /></label>
+    <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
+    <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
+  </form></Dialog>;
+}
+
+const supportsChatCompletions = (model: OpenAICompatibleModel) => !model.supportedEndpoints
+  || model.supportedEndpoints.some((endpoint) => endpoint.endsWith('/chat/completions'));
+
+function TranslationModelPicker({ value, models, locale, fetching, fetchDisabled, onChange, onFetch }: {
+  value: string; models: OpenAICompatibleModel[]; locale: AdminLocale; fetching: boolean; fetchDisabled: boolean;
+  onChange: (value: string) => void; onFetch: () => void;
+}) {
+  const text = openAIText(locale);
+  const labels = locale === 'zh-CN'
+    ? { all: '查看全部模型', empty: '没有匹配项，可直接输入模型名称', unavailable: '不支持 Chat Completions', count: '个模型', blocked: '个不兼容', hint: '从列表选择，或直接输入模型名称。' }
+    : locale === 'zh-TW'
+      ? { all: '查看全部模型', empty: '沒有符合項目，可直接輸入模型名稱', unavailable: '不支援 Chat Completions', count: '個模型', blocked: '個不相容', hint: '從清單選取，或直接輸入模型名稱。' }
+      : { all: 'Show all models', empty: 'No matches. You can enter a model ID directly.', unavailable: 'Chat Completions unsupported', count: 'models', blocked: 'incompatible', hint: 'Choose from the list or enter a model ID.' };
+  const id = useId();
+  const input = useRef<HTMLInputElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [active, setActive] = useState(-1);
+  const visible = models.filter((item) => item.id.toLowerCase().includes(query.trim().toLowerCase()));
+  const incompatible = models.filter((item) => !supportsChatCompletions(item)).length;
+  useEffect(() => {
+    setOpen(models.length > 0); setQuery(''); setActive(-1);
+    if (models.length && root.current?.contains(document.activeElement)) input.current?.focus();
+  }, [models]);
+  useEffect(() => {
+    if (open && active >= 0) document.getElementById(`${id}-option-${active}`)?.scrollIntoView({ block: 'nearest' });
+  }, [open, active, id]);
+  const choose = (item: OpenAICompatibleModel) => {
+    if (!supportsChatCompletions(item)) return;
+    onChange(item.id); setOpen(false); setQuery(''); setActive(-1); input.current?.focus();
+  };
+  const showAll = () => { setQuery(''); setActive(-1); setOpen(true); input.current?.focus(); };
+  const keyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }
+    if (['ArrowDown', 'ArrowUp'].includes(event.key) && models.length) {
+      event.preventDefault();
+      const items = open ? visible : models;
+      const choices = items.map((item, index) => supportsChatCompletions(item) ? index : -1).filter((index) => index >= 0);
+      const current = open ? choices.indexOf(active) : -1;
+      const next = current < 0 ? event.key === 'ArrowDown' ? 0 : choices.length - 1
+        : (current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+      if (!open) setQuery('');
+      setOpen(true); setActive(choices[next] ?? -1);
+    } else if (event.key === 'Enter' && open) {
+      event.preventDefault();
+      if (visible[active]) choose(visible[active]); else setOpen(false);
+    }
+  };
+  return <div className="model-picker-field"><label htmlFor={id}><span>{text.model}</span></label>
+    <div ref={root} className="model-picker" onKeyDown={(event) => {
+      if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); }
+    }} onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+    }}>
+      <div className="model-picker-controls"><div className="model-picker-input">
+        <input ref={input} id={id} name="model" required autoComplete="off" role="combobox" aria-autocomplete="list"
+          aria-expanded={open && models.length > 0} aria-controls={`${id}-list`} aria-describedby={`${id}-hint`}
+          aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined} value={value}
+          onClick={() => { if (models.length) showAll(); }} onKeyDown={keyDown}
+          onChange={(event) => { onChange(event.target.value); setQuery(event.target.value); setActive(-1); setOpen(models.length > 0); }} />
+        {models.length > 0 && <button type="button" className="model-picker-toggle" aria-label={labels.all}
+          aria-expanded={open} aria-controls={`${id}-list`} onClick={() => open ? setOpen(false) : showAll()}><ChevronDown size={16} aria-hidden="true" /></button>}
+      </div><button type="button" className="model-fetch-button" title={fetching ? text.fetchingModels : text.fetchModels}
+        aria-label={fetching ? text.fetchingModels : text.fetchModels} aria-busy={fetching} disabled={fetchDisabled} onClick={onFetch}>
+        {fetching ? <RefreshCw size={18} className="is-spinning" aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}
+      </button></div>
+      {open && models.length > 0 && <div className="model-picker-dropdown">
+        <div className="model-picker-count">{visible.length} / {models.length} {labels.count}{incompatible > 0 && ` · ${incompatible} ${labels.blocked}`}</div>
+        <div id={`${id}-list`} role="listbox" aria-label={text.model} className="model-picker-options">
+          {visible.map((item, index) => <div key={item.id} id={`${id}-option-${index}`} role="option"
+            aria-selected={item.id === value} aria-disabled={!supportsChatCompletions(item)}
+            className={`model-picker-option${active === index ? ' is-active' : ''}`}
+            onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>
+            <span><span className="model-picker-name">{item.id}</span>{!supportsChatCompletions(item) && <small>{labels.unavailable}{item.supportedEndpoints?.length ? ` · ${item.supportedEndpoints.join(', ')}` : ''}</small>}</span>
+            {item.id === value && <Check size={16} aria-hidden="true" />}
+          </div>)}
+        </div>{!visible.length && <p className="model-picker-empty" role="status">{labels.empty}</p>}
+      </div>}
+    </div><small id={`${id}-hint`} role="status">{fetching ? text.fetchingModels : models.length ? `${models.length} ${labels.count} · ${labels.hint}` : labels.hint}</small>
+  </div>;
+}
+
+function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, close }: {
+  value?: Credential; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;
+}) {
+  const t = adminText[locale];
+  const text = openAIText(locale);
+  const creating = !value;
+  const [label, setLabel] = useState(value?.label || '');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState(value?.openAICompatible?.baseUrl || '');
+  const [model, setModel] = useState(value?.openAICompatible?.model || '');
+  const currentModel = useRef(model);
+  currentModel.current = model;
+  const savedEffort = value?.openAICompatible?.reasoningEffort;
+  const [reasoningEffort, setReasoningEffort] = useState(savedEffort && savedEffort !== 'default' ? savedEffort : 'low');
+  const [maxTokens, setMaxTokens] = useState(String(value?.openAICompatible?.maxTokens || 8192));
+  const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 10));
+  const [translationPrompt, setTranslationPrompt] = useState(value?.translationPrompt || '');
+  const [models, setModels] = useState<OpenAICompatibleModel[]>([]);
+  const modelFetchSequence = useRef(0);
+  const reasoningListId = useId();
+  const selectedModel = models.find((item) => item.id === model);
+  const modelCompatible = !selectedModel || supportsChatCompletions(selectedModel);
+  const selectModel = (id: string, available = models) => {
+    setModel(id);
+    const efforts = available.find((item) => item.id === id)?.reasoningEfforts?.filter((effort) => effort !== 'default');
+    setReasoningEffort(efforts?.length && !efforts.includes('low') ? efforts[0] : 'low');
+  };
+  const capabilityText = locale === 'zh-CN'
+    ? { unknown: '接口未提供思考强度列表。项目默认发送 low，可按供应商文档修改；这不代表供应商的默认值。', known: '候选值来自该模型的接口元数据，所填值将随请求发送。', incompatible: '不支持 Chat Completions', endpoint: '填写包含 API 路径前缀的基础地址（如 /v1），或完整的 /chat/completions、/models 地址。' }
+    : locale === 'zh-TW'
+      ? { unknown: '介面未提供思考強度清單。專案預設傳送 low，可依供應商文件修改；這不代表供應商的預設值。', known: '候選值來自模型的介面中繼資料，填入的值會隨請求傳送。', incompatible: '不支援 Chat Completions', endpoint: '填入含 API 路徑前綴的基礎網址（如 /v1），或完整的 /chat/completions、/models 網址。' }
+      : { unknown: 'The endpoint did not advertise reasoning levels. This project sends low initially; adjust it using the provider documentation. This is not the provider default.', known: 'Suggestions come from this model’s API metadata. The entered value is sent with requests.', incompatible: 'Chat Completions unsupported', endpoint: 'Enter the API base URL including its path prefix (such as /v1), or the full /chat/completions or /models URL.' };
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelFetchState, setModelFetchState] = useState<'idle' | 'empty' | 'error'>('idle');
+  const [visible, setVisible] = useState(false);
+  const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults['openai-compatible']));
+  const [enabled, setEnabled] = useState(value?.enabled ?? true);
+  const invalidateModels = () => { modelFetchSequence.current++; setFetchingModels(false); setModels([]); setModelFetchState('idle'); };
+  const fetchModels = async () => {
+    const sequence = ++modelFetchSequence.current;
+    setFetchingModels(true); setModels([]);
+    try {
+      const result = await mutate<{ models?: OpenAICompatibleModel[]; baseUrl?: string }>('/providers/openai-compatible/models', 'POST', {
+        ...(value ? { credentialId: value.id } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        baseUrl: baseUrl.trim()
+      }, '');
+      if (sequence !== modelFetchSequence.current) return;
+      if (result?.baseUrl) setBaseUrl(result.baseUrl);
+      const available = result?.models || [];
+      setModels(available);
+      if (!currentModel.current.trim()) selectModel(available.find(supportsChatCompletions)?.id || '', available);
+      setModelFetchState(result ? (available.length ? 'idle' : 'empty') : 'error');
+    } finally { if (sequence === modelFetchSequence.current) setFetchingModels(false); }
+  };
+  return <Dialog title={creating ? text.add : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
+    event.preventDefault();
+    if (!modelCompatible) return;
+    const key = apiKey.trim();
+    const body = {
+      provider: 'openai-compatible', label: label.trim() || `${providerLabel(locale, 'openai-compatible')} ${t.key}`,
+      ...(key ? { apiKey: key } : {}), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort,
+      maxTokens: Number(maxTokens), translationPriority: Number(translationPriority), translationPrompt: translationPrompt.trim(),
+      quotaLimit: Number(quotaLimit), quotaPeriod: 'day', enabled
+    };
+    const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, text.saved);
+    if (result) close();
+  }}>
+    <p className="security-note translation-notice">{text.notice}</p>
+    <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
+    <label className="secret-input-field"><span>{text.key}</span><div><input name="apiKey" type={visible ? 'text' : 'password'} value={apiKey} required={creating} autoComplete="new-password" placeholder={creating ? '' : value?.openAICompatible?.apiKeyMask || t.replaceSecret} onChange={(event) => { setApiKey(event.target.value); invalidateModels(); }} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
+    <label><span>{text.endpoint}</span><input name="baseUrl" type="url" required value={baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => { setBaseUrl(event.target.value); invalidateModels(); }} /><small>{capabilityText.endpoint}</small></label>
+    <TranslationModelPicker value={model} models={models} locale={locale} fetching={fetchingModels}
+      fetchDisabled={busy || fetchingModels || !baseUrl.trim() || creating && !apiKey.trim()}
+      onChange={selectModel} onFetch={() => void fetchModels()} />
+    {!modelCompatible && <p className="field-error" role="alert">{capabilityText.incompatible}</p>}
+    {modelFetchState === 'empty' && <p className="field-error" role="status">{text.modelsEmpty}</p>}
+    {modelFetchState === 'error' && <p className="field-error" role="alert">{text.modelsFailed}</p>}
+    <label><span>{text.reasoning}</span><input name="reasoningEffort" list={reasoningListId} required pattern={'[a-z][a-z0-9_\\-]{0,31}'} value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} /><datalist id={reasoningListId}>{selectedModel?.reasoningEfforts?.filter((effort) => effort !== 'default').map((effort) => <option key={effort} value={effort} />)}</datalist><small>{selectedModel?.reasoningEfforts ? capabilityText.known : capabilityText.unknown}</small></label>
+    <label><span>{text.maxTokens}</span><input name="maxTokens" type="number" min="1024" max="32768" step="1" required value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></label>
+    <label><span>{text.priority}</span><input name="translationPriority" type="number" min="1" max="10000" step="1" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /></label>
+    <label><span>{text.prompt}</span><textarea name="translationPrompt" maxLength={4000} value={translationPrompt} onChange={(event) => setTranslationPrompt(event.target.value)} /><small>{text.promptHint}</small></label>
+    <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -1108,6 +1430,7 @@ function ProviderCredentialDialog({ value, initialProvider = 'amap', locale, bus
   const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults[initialProvider] || providerQuotaDefaults.amap));
   const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
   const [quotaUsedBaseline, setQuotaUsedBaseline] = useState(String(value?.quotaBaseline || 0));
+  const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 20));
   const [enabled, setEnabled] = useState(value?.enabled ?? true);
   const creating = !value;
   const changeProvider = (next: string) => {
@@ -1116,7 +1439,7 @@ function ProviderCredentialDialog({ value, initialProvider = 'amap', locale, bus
     setQuotaPeriod(providerQuotaPeriods[next] || 'day');
     setQuotaUsedBaseline('0');
   };
-  return <Dialog title={creating ? t.addMapKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
+  return <Dialog title={creating ? provider === 'deepl' ? deeplText(locale).add : t.addMapKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
     event.preventDefault();
     const secretValue = secret.trim();
     const body = {
@@ -1124,19 +1447,21 @@ function ProviderCredentialDialog({ value, initialProvider = 'amap', locale, bus
       label: label.trim() || `${providerLabel(locale, provider)} ${t.key}`,
       ...(secretValue ? { secret: secretValue } : {}),
       quotaLimit: Number(quotaLimit), quotaPeriod,
+      ...(provider === 'deepl' ? { translationPriority: Number(translationPriority) } : {}),
       ...(provider === 'google-geocoding' ? { quotaUsedBaseline: Number(quotaUsedBaseline) } : {}), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.keySaved);
     if (result) close();
   }}>
-    <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{providerLabel(locale, 'amap')}</option><option value="baidu">{providerLabel(locale, 'baidu')}</option><option value="tencent">{providerLabel(locale, 'tencent')}</option><option value="onemap">{providerLabel(locale, 'onemap')}</option><option value="geoapify">{providerLabel(locale, 'geoapify')}</option><option value="google-geocoding">{providerLabel(locale, 'google-geocoding')}</option><option value="mappls">{providerLabel(locale, 'mappls')}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>
+    {provider === 'deepl' ? <p className="security-note">{deeplText(locale).notice}</p> : <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{providerLabel(locale, 'amap')}</option><option value="baidu">{providerLabel(locale, 'baidu')}</option><option value="tencent">{providerLabel(locale, 'tencent')}</option><option value="onemap">{providerLabel(locale, 'onemap')}</option><option value="geoapify">{providerLabel(locale, 'geoapify')}</option><option value="google-geocoding">{providerLabel(locale, 'google-geocoding')}</option><option value="mappls">{providerLabel(locale, 'mappls')}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>}
     <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
     <label className="secret-input-field"><span>{t.key}</span><div><input name="secret" type={visible ? 'text' : 'password'} value={secret} required={creating} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
     {provider === 'geoapify' && <p className="security-note">{t.geoapifyWorkerHint}</p>}
     {provider === 'google-geocoding' && <p className="security-note">{googleQuota.official}</p>}
-    <label><span>{provider === 'google-geocoding' ? googleQuota.budget : t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
-    <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>
+    <label><span>{provider === 'deepl' ? deeplText(locale).budget : provider === 'google-geocoding' ? googleQuota.budget : t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
+    {provider === 'deepl' ? <p className="security-note">{deeplText(locale).reset}</p> : <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>}
     {provider === 'google-geocoding' && <label><span>{googleQuota.baseline}</span><input name="quotaUsedBaseline" type="number" min="0" max={quotaLimit || '9000'} required value={quotaUsedBaseline} onChange={(event) => setQuotaUsedBaseline(event.target.value)} /><small>{googleQuota.hint}</small></label>}
+    {provider === 'deepl' && <label><span>{openAIText(locale).priority}</span><input name="translationPriority" type="number" min="1" max="10000" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /><small>{openAIText(locale).routingHint}</small></label>}
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -1150,12 +1475,17 @@ function SecretCell({ mask, locale, reveal, path, field }: { mask: string; local
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   const timer = useRef<number | undefined>(undefined);
+  const copyTimer = useRef<number | undefined>(undefined);
+  const requestId = useRef(0);
   const clear = useCallback(() => {
+    requestId.current += 1;
     if (timer.current) window.clearTimeout(timer.current);
+    if (copyTimer.current) window.clearTimeout(copyTimer.current);
     timer.current = undefined;
-    setValue(''); setVisible(false); setCopied(false); setError(false);
+    copyTimer.current = undefined;
+    setValue(''); setVisible(false); setCopied(false); setError(false); setBusy(false);
   }, []);
-  useEffect(() => { clear(); }, [clear, locale, mask, path]);
+  useEffect(() => { clear(); }, [clear, locale, mask, path, field]);
   useEffect(() => {
     const onVisibility = () => { if (document.hidden) clear(); };
     document.addEventListener('visibilitychange', onVisibility);
@@ -1164,23 +1494,29 @@ function SecretCell({ mask, locale, reveal, path, field }: { mask: string; local
   const toggle = async () => {
     setError(false);
     if (visible) { clear(); return; }
+    if (document.hidden) return;
+    const id = ++requestId.current;
     setBusy(true);
     try {
       const result = await reveal(path);
+      if (id !== requestId.current || document.hidden) return;
       const secret = String(result[field] || '');
       if (!secret) throw new Error('EMPTY_SECRET');
       setValue(secret); setVisible(true);
       timer.current = window.setTimeout(clear, 30_000);
-    } catch { setError(true); }
-    finally { setBusy(false); }
+    } catch { if (id === requestId.current) setError(true); }
+    finally { if (id === requestId.current) setBusy(false); }
   };
   const copy = async () => {
     if (!value) return;
+    const id = requestId.current;
     try {
       await navigator.clipboard.writeText(value);
+      if (id !== requestId.current) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch { setError(true); }
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
+    } catch { if (id === requestId.current) setError(true); }
   };
   return <div className="secret-cell"><code>{visible ? value : mask}</code><div className="secret-actions"><button type="button" className="compact-action" disabled={busy} onClick={() => void toggle()}>{busy ? '…' : visible ? t.hideSecret : t.showSecret}</button>{visible && <button type="button" className="compact-action" onClick={() => void copy()}>{copied ? t.copied : t.copySecret}</button>}</div>{error && <small className="field-error">{t.revealFailed}</small>}</div>;
 }
@@ -1267,16 +1603,23 @@ const CredentialRowCompact = ({ item, locale, reveal, actions, secrets, revealPa
   item: Credential; locale: AdminLocale; reveal: Reveal; actions: (value: Credential) => ReactNode; secrets?: CredentialSecretField[]; revealPath?: string;
 }) => {
   const t = adminText[locale];
+  const openAI = item.openAICompatible ? openAIText(locale) : undefined;
   const secretFields = secrets || [{ label: t.key, mask: item.mask, field: 'secret' }];
   const windows = item.quotaWindows?.length ? item.quotaWindows : [{
     service: item.quotaService, period: item.quotaPeriod, used: item.quotaUsed, limit: item.quotaLimit,
     remaining: item.quotaRemaining, resetAt: item.quotaResetAt, usageSource: item.quotaUsageSource, exhausted: item.quotaUsed >= item.quotaLimit
   }];
   return <article className="provider-key-row">
-    <div className="provider-key-name"><span>{t.name}</span><strong>{credentialDisplayLabel(locale, item.label)}</strong></div>
+    <div className="provider-key-name"><span>{t.name}</span><strong>{credentialDisplayLabel(locale, item.label)}</strong>{item.translationPriority !== undefined && <small>{openAIText(locale).routePriority}: {item.translationPriority}</small>}{item.openAICompatible && openAI && <small className="provider-key-config"><span>{openAI.endpoint}: {item.openAICompatible.baseUrl}</span><span>{openAI.model}: {item.openAICompatible.model}</span></small>}</div>
     <div className={`provider-key-secrets${secretFields.length > 1 ? ' is-paired' : ''}`}>{secretFields.map((secret) => <div className="provider-key-secret" key={secret.field}><span>{secret.label}</span><SecretCell mask={secret.mask} locale={locale} reveal={reveal} path={revealPath || `/providers/${item.id}/reveal`} field={secret.field} /></div>)}</div>
     <div className="provider-key-status"><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small>{dateTime(item.expiresAt, locale)}</small>}<small>{t.lastSuccess}: {dateTime(item.lastSuccessAt, locale)}</small></div>
-    <div className="quota-cell">{windows.map((window) => <div className="quota-window" key={`${window.service}-${window.period}`}>
+    <div className="quota-cell">{item.characterQuota ? <div className="quota-window">
+      <b>{item.characterQuota.used.toLocaleString(locale)} / {item.characterQuota.limit.toLocaleString(locale)} {deeplText(locale).characters}</b>
+      <small>{deeplText(locale).budget}: {item.quotaLimit.toLocaleString(locale)}</small>
+      <small>{deeplText(locale).provider}: {item.characterQuota.providerUsed.toLocaleString(locale)} / {item.characterQuota.providerLimit.toLocaleString(locale)}</small>
+      <small>{item.characterQuota.observedAt ? `${deeplText(locale).observed}: ${dateTime(item.characterQuota.observedAt, locale)}` : deeplText(locale).unknown}</small>
+      <small>{item.characterQuota.resetAt ? dateTime(item.characterQuota.resetAt, locale) : deeplText(locale).reset}</small>
+    </div> : windows.map((window) => <div className="quota-window" key={`${window.service}-${window.period}`}>
       <b>{window.used.toLocaleString(locale)}/{window.limit.toLocaleString(locale)} {window.period === 'month' ? t.quotaMonth : t.quotaDay}</b>
       <span className={`quota-bar${usagePercent(window.used, window.limit) >= 100 ? ' full' : usagePercent(window.used, window.limit) >= 80 ? ' high' : ''}`}><i style={{ width: `${usagePercent(window.used, window.limit)}%` }} /></span>
       <small>{window.remaining.toLocaleString(locale)} {t.quotaRemaining}</small>
@@ -1688,24 +2031,39 @@ function ShortcutPicker({ countryCode, field, items, locale, request, add }: {
 }) {
   const text = shortcutText(locale);
   const root = useRef<HTMLDivElement>(null);
+  const id = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [options, setOptions] = useState<LocationOption[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [cursor, setCursor] = useState('');
+  const [previous, setPrevious] = useState<string[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>();
+  const [retry, setRetry] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(-1);
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
+    setLoading(true); setError(''); setOptions([]); setActiveIndex(-1);
     const timer = window.setTimeout(() => {
-      setLoading(true);
-      const params = new URLSearchParams({ field, q: query });
+      const params = new URLSearchParams({ field, q: query, cursor });
       void request<ShortcutOptionPage>(`/settings/country-shortcuts/${countryCode}/options?${params}`, { signal: controller.signal })
-        .then((value) => { setOptions(value.options || []); setTotal(value.total || 0); })
-        .catch((error) => { if (!(error instanceof DOMException && error.name === 'AbortError')) setOptions([]); })
+        .then((value) => {
+          if (controller.signal.aborted) return;
+          setOptions((value.options || []).filter((option) => option.availableCount !== 0));
+          setTotal(value.total || 0); setNextCursor(value.nextCursor);
+        })
+        .catch((error) => { if (!controller.signal.aborted) setError(errorMessage(error, locale)); })
         .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     }, 200);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [countryCode, field, open, query, request]);
+  }, [countryCode, field, open, query, cursor, retry, request, locale]);
+  useEffect(() => { setCursor(''); setPrevious([]); setNextCursor(undefined); }, [countryCode, field]);
+  useEffect(() => {
+    if (open && activeIndex >= 0) document.getElementById(`${id}-option-${activeIndex}`)?.scrollIntoView({ block: 'nearest' });
+  }, [id, open, activeIndex]);
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -1713,6 +2071,7 @@ function ShortcutPicker({ countryCode, field, items, locale, request, add }: {
     return () => document.removeEventListener('pointerdown', close);
   }, [open]);
   const selected = new Set(items.map((item) => `${item.type}:${item.value.toLocaleLowerCase()}`));
+  const unavailable = (option: LocationOption) => Boolean(option.disabled || selected.has(`${field}:${(field === 'region' && option.regionCode ? option.regionCode : option.value).toLocaleLowerCase()}`));
   const choose = (option: LocationOption) => {
     const type: LocationShortcut['type'] = field;
     const value = field === 'region' && option.regionCode ? option.regionCode : option.value;
@@ -1723,24 +2082,48 @@ function ShortcutPicker({ countryCode, field, items, locale, request, add }: {
       type
     });
     setQuery('');
+    setCursor(''); setPrevious([]);
     setOpen(false);
   };
-  return <div className="shortcut-picker" ref={root}>
+  const keyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') { event.preventDefault(); setOpen(false); return; }
+    if (event.key === 'Enter' && open) { event.preventDefault(); if (options[activeIndex] && !unavailable(options[activeIndex])) choose(options[activeIndex]); return; }
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault(); setOpen(true);
+    for (let index = activeIndex + (event.key === 'ArrowDown' ? 1 : -1); index >= 0 && index < options.length; index += event.key === 'ArrowDown' ? 1 : -1) {
+      if (!unavailable(options[index])) { setActiveIndex(index); break; }
+    }
+  };
+  return <div className="shortcut-picker" ref={root} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
     <div className={`shortcut-picker-control ${open ? 'open' : ''}`}>
       <Search size={15} aria-hidden="true" />
-      <input aria-label={text.choose} placeholder={text.choose} value={query} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} />
-      <button type="button" aria-label={text.choose} onClick={() => setOpen((value) => !value)}><ChevronDown size={15} /></button>
+      <input role="combobox" aria-label={text.choose} aria-expanded={open} aria-controls={`${id}-list`} aria-autocomplete="list"
+        aria-activedescendant={open && activeIndex >= 0 ? `${id}-option-${activeIndex}` : undefined}
+        placeholder={text.choose} value={query} onFocus={() => setOpen(true)} onKeyDown={keyDown}
+        onChange={(event) => { setQuery(event.target.value); setCursor(''); setPrevious([]); setOpen(true); }} />
+      <button type="button" aria-label={text.choose} aria-expanded={open} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}><ChevronDown size={15} /></button>
     </div>
-    {open && <div className="shortcut-picker-popup" role="listbox">
-      {loading ? <p>{text.loading}</p> : options.length ? options.map((option, index) => {
-        const value = field === 'region' && option.regionCode ? option.regionCode : option.value;
-        const disabled = option.disabled || selected.has(`${field}:${value.toLocaleLowerCase()}`);
-        return <button type="button" role="option" aria-selected={disabled} disabled={disabled} key={`${option.id || option.value}-${index}`} onClick={() => choose(option)}>
+    {open && <div className="shortcut-picker-popup">
+      <div className="shortcut-picker-options" id={`${id}-list`} role="listbox" aria-label={text.choose} aria-busy={loading}>
+      {options.map((option, index) => {
+        const disabled = unavailable(option);
+        return <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={disabled} disabled={disabled}
+          className={activeIndex === index ? 'active' : ''} key={option.id || option.value} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(option)}>
           <span>{shortcutOptionLabel(option, locale)}</span>
           {option.availableCount !== undefined && <small>{interpolate(text.available, { count: option.availableCount.toLocaleString(locale) })}</small>}
         </button>;
-      }) : <p>{text.noOptions}</p>}
-      {!loading && <div className="shortcut-picker-status">{options.length.toLocaleString(locale)} / {total.toLocaleString(locale)}</div>}
+      })}</div>
+      {loading ? <p role="status">{text.loading}</p> : error ? <div className="shortcut-picker-error" role="alert"><span>{error}</span>
+        <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setRetry((value) => value + 1)}>{adminText[locale].retry}</button>
+      </div> : !options.length && <p>{text.noOptions}</p>}
+      <div className="shortcut-picker-status"><span>{options.length ? `${Number(cursor) + 1}–${Number(cursor) + options.length}` : 0} / {total.toLocaleString(locale)}</span>
+        {previous.length > 0 && <button type="button" disabled={loading} onMouseDown={(event) => event.preventDefault()} onClick={() => {
+          setCursor(previous[previous.length - 1]); setPrevious((values) => values.slice(0, -1));
+        }}>{syncHistoryText[locale].previous}</button>}
+        {nextCursor && !error && <button type="button" disabled={loading} onMouseDown={(event) => event.preventDefault()} onClick={() => {
+          setPrevious((values) => [...values, cursor]); setCursor(nextCursor);
+        }}>{syncHistoryText[locale].next}</button>}
+      </div>
     </div>}
   </div>;
 }
@@ -1757,11 +2140,16 @@ function CountryShortcutEditor({ value, locale, busy, mutate, request }: {
     specialAreas: structuredClone(source.specialAreas)
   });
   const [draft, setDraft] = useState<CountryShortcutConfig>(() => editable(value));
+  const serverDraft = useRef(JSON.stringify(editable(value)));
   const [specialType, setSpecialType] = useState<ShortcutCatalogField>(() => {
     const type = value.specialAreas[0]?.type;
     return type === 'city' || type === 'postcode' ? type : 'region';
   });
-  useEffect(() => setDraft(editable(value)), [value]);
+  useEffect(() => {
+    const previous = serverDraft.current;
+    serverDraft.current = JSON.stringify(editable(value));
+    setDraft((current) => current.countryCode !== value.countryCode || JSON.stringify(current) === previous ? editable(value) : current);
+  }, [value]);
   const addItem = (section: ShortcutListKey, item: LocationShortcut) => setDraft((current) => ({ ...current, [section]: [...current[section], item] }));
   const removeItem = (section: ShortcutListKey, index: number) => {
     setDraft((current) => ({ ...current, [section]: current[section].filter((_, itemIndex) => itemIndex !== index) }));
@@ -1789,11 +2177,14 @@ function CountryShortcutEditor({ value, locale, busy, mutate, request }: {
   </section>;
   const save = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await mutate(`/settings/country-shortcuts/${value.countryCode}`, 'PUT', draft, text.saved);
+    const submitted = JSON.stringify(draft);
+    const result = await mutate<AdminCountryShortcutConfig>(`/settings/country-shortcuts/${value.countryCode}`, 'PUT', draft, text.saved);
+    if (result) setDraft((current) => JSON.stringify(current) === submitted ? editable(result) : current);
   };
   const reset = async () => {
     if (!window.confirm(text.confirmReset)) return;
-    await mutate(`/settings/country-shortcuts/${value.countryCode}`, 'DELETE', undefined, text.resetDone);
+    const result = await mutate<AdminCountryShortcutConfig>(`/settings/country-shortcuts/${value.countryCode}`, 'DELETE', undefined, text.resetDone);
+    if (result) setDraft(editable(result));
   };
   return <form className="shortcut-editor" onSubmit={save}>
     <div className="shortcut-editor-toolbar">

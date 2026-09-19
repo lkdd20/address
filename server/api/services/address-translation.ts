@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { pinyin } from 'pinyin-pro';
@@ -12,15 +13,22 @@ import type { AddressComponents, Locale, VerifiedAddress } from '../../../src/do
 import { translateGoogleBatch } from './google-translator.ts';
 import { translateYoudaoBatch, type YoudaoCredentials } from './youdao-translator.ts';
 import { parseYoudaoSecret } from '../../control/store';
+import { preservesAddressIdentifiers, preservesAddressNumbers as preservesDigits } from '../../../src/domain/address-localization.mjs';
 
 export interface AddressTranslationBindings {
   LOCATION_DB?: Database;
   GOOGLE_TRANSLATION_ENABLED?: boolean | string;
+  DEEPL_TRANSLATE?: (values: string[], target: string) => Promise<string[] | undefined>;
+  OPENAI_COMPATIBLE_TRANSLATE?: (values: string[], target: string) => Promise<string[] | undefined>;
   YOUDAO_APP_KEY?: string;
   YOUDAO_APP_SECRET?: string;
   // Optional control-store seam: returns the stored secret for a service
   // provider; the environment bindings above remain the fallback.
-  SERVICE_CREDENTIALS?: (provider: 'youdao') => Promise<string | undefined>;
+  SERVICE_CREDENTIALS?: (provider: 'youdao' | 'openai-compatible') => Promise<string | undefined>;
+  TRANSLATION_ROUTES?: ReadonlyArray<{
+    id: string; provider: string; enabled?: boolean;
+    translate: (values: string[], target: string) => Promise<string[] | undefined>;
+  }>;
 }
 
 export type TranslatableLocale = Locale;
@@ -44,16 +52,6 @@ const toTraditional = createTraditionalizer({ from: 'cn', to: 'tw' });
 // a zero-network first step for zh-CN targets whose components are Han-only.
 const toSimplified = createSimplifier({ from: 'jp', to: 'cn' });
 
-const digitSequences = (value: string): string => (value.match(/\p{Decimal_Number}+/gu) || []).join(',');
-const CJK_NUMERAL_PATTERN = /[〇一二三四五六七八九十百千]/u;
-// Translating CJK numerals legitimately introduces Arabic digits (二丁目 → 2-chome),
-// so a digit-free source with CJK numerals may gain digits; otherwise sequences must match.
-const preservesDigits = (source: string, translated: string): boolean => {
-  const sourceDigits = digitSequences(source);
-  if (sourceDigits === digitSequences(translated)) return true;
-  return !sourceDigits && CJK_NUMERAL_PATTERN.test(source);
-};
-
 // Digit identifiers are copied verbatim from the source variant and never sent
 // to the translation provider.
 const preserveIdentifiers = (source: AddressComponents, translated: AddressComponents): AddressComponents => ({
@@ -65,15 +63,17 @@ const preserveIdentifiers = (source: AddressComponents, translated: AddressCompo
 });
 
 const identifiersPreserved = (source: AddressComponents, translated: AddressComponents): boolean =>
-  (['houseNumber', 'unit', 'postcode'] as const).every((field) =>
+  (['houseNumber', 'unit', 'postcode', 'admin1Code'] as const).every((field) =>
     (source[field] || '') === (translated[field] || ''));
 
 // Revision bump invalidates entries cached before localization validation
 // existed, so previously stored incomplete translations never stick.
-const CACHE_REVISION = 'xlate-v2';
+const CACHE_REVISION = 'xlate-v3';
 
-const cacheKey = (address: VerifiedAddress): string =>
-  [CACHE_REVISION, address.id, address.sourceVersion, address.sourceUpdatedAt].join(':');
+const cacheKey = (address: VerifiedAddress, source: AddressComponents): string =>
+  [CACHE_REVISION, address.id, address.sourceVersion, address.sourceUpdatedAt,
+    createHash('sha256').update(JSON.stringify([address.countryCode, address.nativeLanguage,
+      Object.entries(source).sort(([left], [right]) => left.localeCompare(right))])).digest('hex')].join(':');
 
 interface CachedTranslation { provider: string; components: AddressComponents }
 
@@ -86,12 +86,15 @@ const readCached = async (
   if (!db) return undefined;
   try {
     const row = await db.prepare('SELECT value FROM translation_cache WHERE cache_key = ? AND target_language = ?')
-      .bind(cacheKey(address), locale).first<{ value: string }>();
+      .bind(cacheKey(address, source), locale).first<{ value: string }>();
     if (!row?.value) return undefined;
     const parsed = JSON.parse(row.value) as Partial<CachedTranslation> | undefined;
     const components = parsed?.components;
     if (!components || typeof components !== 'object' || typeof components.street !== 'string') return undefined;
     return identifiersPreserved(source, components) && storedVariantLooksLocalized(components, locale)
+      && semanticFields.every((field) => !source[field]
+        || Boolean(components[field]) && preservesDigits(source[field]!, components[field]!)
+          && preservesAddressIdentifiers(source[field]!, components[field]!))
       ? components
       : undefined;
   } catch {
@@ -104,13 +107,14 @@ const writeCached = async (
   address: VerifiedAddress,
   locale: TranslatableLocale,
   provider: string,
-  components: AddressComponents
+  components: AddressComponents,
+  source: AddressComponents
 ): Promise<void> => {
   if (!db) return;
   try {
     await db.prepare(`INSERT INTO translation_cache(cache_key, target_language, value, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(cache_key, target_language) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
-      .bind(cacheKey(address), locale, JSON.stringify({ provider, components } satisfies CachedTranslation), new Date().toISOString()).run();
+      .bind(cacheKey(address, source), locale, JSON.stringify({ provider, components } satisfies CachedTranslation), new Date().toISOString()).run();
   } catch {}
 };
 
@@ -164,13 +168,21 @@ const providerChain = async (
   bindings: AddressTranslationBindings,
   fetcher: typeof fetch
 ): Promise<TranslationProvider[]> => {
+  if (bindings.TRANSLATION_ROUTES) {
+    return bindings.TRANSLATION_ROUTES.filter((route) => route.enabled !== false)
+      .map((route) => ({ name: route.id, translate: (values) => route.translate(values, locale) }));
+  }
   const chain: TranslationProvider[] = [];
-  if (bindings.GOOGLE_TRANSLATION_ENABLED !== false && bindings.GOOGLE_TRANSLATION_ENABLED !== 'false') {
-    chain.push({ name: 'google', translate: (values) => translateGoogleBatch(values, 'auto', locale, fetcher) });
+  if (bindings.DEEPL_TRANSLATE) chain.push({ name: 'deepl', translate: (values) => bindings.DEEPL_TRANSLATE!(values, locale) });
+  if (bindings.OPENAI_COMPATIBLE_TRANSLATE) {
+    chain.push({ name: 'openai-compatible', translate: (values) => bindings.OPENAI_COMPATIBLE_TRANSLATE!(values, locale) });
   }
   const credentials = await youdaoCredentials(bindings);
   if (credentials) {
     chain.push({ name: 'youdao', translate: (values) => translateYoudaoBatch(values, 'auto', youdaoLanguage(locale), credentials, fetcher) });
+  }
+  if (bindings.GOOGLE_TRANSLATION_ENABLED !== false && bindings.GOOGLE_TRANSLATION_ENABLED !== 'false') {
+    chain.push({ name: 'google', translate: (values) => translateGoogleBatch(values, 'auto', locale, fetcher) });
   }
   return chain;
 };
@@ -185,12 +197,13 @@ const translatedCandidate = (
   translations: string[] | undefined,
   locale: TranslatableLocale
 ): AddressComponents | undefined => {
-  if (!translations) return undefined;
+  if (!translations || translations.length !== values.length) return undefined;
   const translated = new Map(values.map((value, index) => [value, translations[index]]));
   const result = { ...source };
   for (const { field, value } of selected) {
     const candidate = translated.get(value)?.trim();
-    if (!candidate || !preservesDigits(value, candidate) || !componentLooksLocalized(candidate, locale)) return undefined;
+    if (!candidate || !preservesDigits(value, candidate) || !preservesAddressIdentifiers(value, candidate)
+      || !componentLooksLocalized(candidate, locale)) return undefined;
     (result as Record<string, unknown>)[field] = candidate;
   }
   return preserveIdentifiers(source, result);
@@ -234,14 +247,14 @@ const resolveLocalizedComponents = async (
     }
     const candidate = translatedCandidate(source, selected, values, translations, locale);
     if (candidate) {
-      await writeCached(bindings.LOCATION_DB, address, locale, provider.name, candidate);
+      await writeCached(bindings.LOCATION_DB, address, locale, provider.name, candidate, source);
       return { status: 'ok', components: candidate };
     }
   }
   if (locale === 'en' && address.countryCode === 'CN') {
     const romanized = romanizedComponents(source);
     if (romanized) {
-      await writeCached(bindings.LOCATION_DB, address, locale, 'pinyin', romanized);
+      await writeCached(bindings.LOCATION_DB, address, locale, 'pinyin', romanized, source);
       return { status: 'ok', components: romanized };
     }
   }

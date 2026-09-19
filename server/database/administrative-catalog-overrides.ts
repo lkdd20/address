@@ -1,4 +1,5 @@
 import { hongKongDistricts, hongKongRegions } from '../../src/domain/hk-administrative-divisions.mjs';
+import { catalogHierarchyPaths, correctSpanishProvinceParents } from './catalog-hierarchy.mjs';
 import type { PostgresDatabase } from './postgres.mjs';
 
 const canonicalHongKongCatalog = async (database: PostgresDatabase): Promise<boolean> => {
@@ -28,6 +29,19 @@ export const applyAdministrativeCatalogOverrides = async (database: PostgresData
   const regionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
   let changed = false;
   await database.transaction(async (transaction) => {
+    const spanishRegions = (await transaction.prepare(`SELECT id,country_code,code,type,parent_id,path
+      FROM catalog_regions WHERE country_code='ES'`).all<{
+        id: number; country_code: string; code: string; type: string; parent_id: number | null; path: string;
+      }>()).results;
+    const corrected = correctSpanishProvinceParents(spanishRegions);
+    const paths = catalogHierarchyPaths(corrected);
+    const repairs = corrected.filter((region, index) => region.parent_id !== spanishRegions[index].parent_id
+      || paths.get(region.id) !== spanishRegions[index].path);
+    if (repairs.length) {
+      await transaction.batch(repairs.map((region) => transaction.prepare(`UPDATE catalog_regions
+        SET parent_id=?,path=? WHERE country_code='ES' AND id=?`).bind(region.parent_id, paths.get(region.id), region.id)));
+      changed = true;
+    }
     const cleanup = await transaction.prepare(`UPDATE address_pool SET
         locality=REPLACE(locality,' &',''), postal_locality=REPLACE(postal_locality,' &',''),
         component_variants_json=REPLACE(component_variants_json,'中西區 &','中西區'),

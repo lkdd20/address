@@ -77,7 +77,11 @@ a { color: var(--blue); }
 .combobox-control input { padding-right: 38px; }
 .combobox-control button { position: absolute; top: 1px; right: 1px; width: 36px; height: 40px; border: 0; border-left: 1px solid #d6dce6; border-radius: 0 6px 6px 0; color: #344054; background: #f8fafc; cursor: pointer; }
 .combobox-control.open input { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(21, 94, 239, .12); }
-.combobox-popup { position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; width: 100%; max-height: 280px; padding: 5px; overflow-y: auto; border: 1px solid #b9c3d2; border-radius: 8px; background: #fff; box-shadow: 0 12px 28px rgba(16, 24, 40, .16); }
+.combobox-popup { position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; width: 100%; padding: 5px; border: 1px solid #b9c3d2; border-radius: 8px; background: #fff; box-shadow: 0 12px 28px rgba(16, 24, 40, .16); }
+.combobox-options { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.translation-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-block: 8px; color: var(--muted); font-size: 13px; }
+.combobox-pagination { display: inline-flex; gap: 4px; }
+.combobox-control > button { display: grid; place-items: center; }
 .combobox-popup button { width: 100%; min-height: 38px; padding: 8px 10px; border: 0; border-radius: 5px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #26334a; background: #fff; text-align: left; font-size: 12px; cursor: pointer; }
 .combobox-popup button small { flex: 0 0 auto; color: #667085; font-size: 9px; font-variant-numeric: tabular-nums; }
 .combobox-popup button:hover, .combobox-popup button.active { color: #fff; background: var(--blue); }
@@ -90,7 +94,7 @@ a { color: var(--blue); }
 .compact-error { margin-top: 12px; padding: 10px 12px; color: var(--danger); border: 1px solid #f0b4ae; border-radius: 7px; background: #fff2f1; font-size: 11px; }
 
 .section-heading { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.combobox-status { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border-top: 1px solid #d6dce6; color: #344054; background: #f8fafc; font-size: 11px; font-weight: 700; }
+.combobox-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border-top: 1px solid #d6dce6; color: #344054; background: #f8fafc; font-size: 11px; font-weight: 700; }
 .combobox-status button { width: auto; min-height: 30px; padding: 4px 12px; border: 1px solid #155eef; color: #155eef; background: #fff; text-align: center; font-weight: 800; }
 .section-heading h2 { margin: 0; font-size: 16px; }
 .text-button, .section-heading button { border: 0; color: var(--blue); background: transparent; font-size: 11px; font-weight: 750; cursor: pointer; }
@@ -262,9 +266,11 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
   .favorite-row { transition: none !important; }
 }
 @media (max-width: 680px) {
-  .topbar { padding-inline: 12px; }
+  .topbar { height: auto; min-height: 66px; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
   .logo { font-size: 15px; }
-  .top-links { gap: 2px; }
+  .top-links { min-width: 0; max-width: 100%; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .top-links .language-select { flex: 0 1 140px; min-width: 0; }
+  .filter input, .language-select { font-size: 16px; }
   .top-links a { padding-inline: 7px; font-size: 11px; }
   .top-links .github-link { width: 30px; padding: 0; }
   .top-links .monitor-link { padding-inline: 7px; }

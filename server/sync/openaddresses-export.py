@@ -61,7 +61,7 @@ with zipfile.ZipFile(args.input) as archive:
                     latitude = float(clean(row.get(mapping["latitude"])))
                 except ValueError:
                     continue
-                if not all((number, street, district, locality, admin1, postcode)):
+                if not all((street, locality, admin1)) or (args.country.upper() == "CN" and not all((number, postcode))):
                     continue
                 if not (-180 <= longitude <= 180 and -90 <= latitude <= 90):
                     continue
@@ -79,9 +79,10 @@ with zipfile.ZipFile(args.input) as archive:
                     "postal_city": locality,
                     "district": district,
                     "address_levels": [admin1, locality, district],
-                    "postcode": postcode,
+                    "postcode": postcode if number else "",
                     "street": street,
                     "number": number,
+                    "match_level": "premise" if number else "street",
                     "unit": "",
                     "longitude": longitude,
                     "latitude": latitude,
@@ -117,6 +118,8 @@ while len(selected) < candidate_limit:
                 record["district"].casefold(), record["postcode"].casefold(), record["street"].casefold(),
                 record["number"].casefold(), record["longitude"], record["latitude"]
             )
+            if record["match_level"] == "street":
+                address_key = address_key[:-2]
             if address_key not in selected_addresses:
                 selected_addresses.add(address_key)
                 selected.append(record)

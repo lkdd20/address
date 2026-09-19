@@ -14,7 +14,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-const hex = (value) => Buffer.from(value, 'utf8').toString('hex').toUpperCase();
+const hex = (value) => Buffer.from(value, 'utf8').toString('hex');
 const a1Key = (name) => `US:a1:${hex(name)}`;
 const record = (hash, admin1, locality, district = '') => ({
   canonicalHash: hash, countryCode: 'US', qualityScore: 0.9,
@@ -144,16 +144,16 @@ describe('floor-aware hierarchical allocation', () => {
     expect(unknown.nodeFloors.size).toBe(0);
 
     await database.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,total_count,updated_at)
-      VALUES ('US:loc:AA:BB','US:a1:AA','US',2,'City B',3,'2026-08-01T00:00:00Z')`).run();
-    await upsertNodeTarget(database, 'US:loc:AA:BB', 44);
-    await upsertNodePolicy(database, 'US:loc:AA:BB', 9);
+      VALUES ('US:loc:aa:bb','US:a1:aa','US',2,'City B',3,'2026-08-01T00:00:00Z')`).run();
+    await upsertNodeTarget(database, 'US:loc:aa:bb', 44);
+    await upsertNodePolicy(database, 'US:loc:aa:bb', 9);
     let policy = await loadImportPolicy(database, 'US', 50_000, 64);
-    expect(policy.nodeFloors.get('US:loc:AA:BB')).toBe(44);
-    expect(policy.overrides.get('US:loc:AA:BB')).toBe(9);
-    await deleteNodeTarget(database, 'US:loc:AA:BB');
+    expect(policy.nodeFloors.get('US:loc:aa:bb')).toBe(44);
+    expect(policy.overrides.get('US:loc:aa:bb')).toBe(9);
+    await deleteNodeTarget(database, 'US:loc:aa:bb');
     policy = await loadImportPolicy(database, 'US', 50_000, 64);
-    expect(policy.nodeFloors.has('US:loc:AA:BB')).toBe(false);
-    expect(policy.overrides.get('US:loc:AA:BB')).toBe(9);
+    expect(policy.nodeFloors.has('US:loc:aa:bb')).toBe(false);
+    expect(policy.overrides.get('US:loc:aa:bb')).toBe(9);
     database.close();
   }, 10_000);
 

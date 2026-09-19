@@ -1,8 +1,9 @@
 import { applyHierarchicalQuota } from './address-policy.mjs';
-import { validateAddressQuality } from '../../src/domain/address-quality.mjs';
+import { addressCanonicalKey, validateAddressQuality, streetAddressKey } from '../../src/domain/address-quality.mjs';
 import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
+import { semanticAddressFields, usableAddressTranslation } from '../../src/domain/address-localization.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
@@ -77,6 +78,7 @@ const softLocalityFixes = {
 // country's minimum administrative completeness. Returns false to drop the record.
 const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddress) => {
   const components = record.components;
+  const streetLevel = record.matchLevel === 'street';
   if (geoAnchorCountries.has(countryCode) && geocoder?.hierarchyReady) {
     // Cross-border source label guard: china.pbf carries Taiwan/HK/Macau points.
     const sourceRegion = `${components.admin1 || ''} ${record.admin1 || ''}`;
@@ -142,6 +144,7 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   if (softFix) {
     const locality = String(components.locality || '').trim();
     if (locality && softFix.demote.test(locality)) {
+      if (streetLevel) return false;
       // Preserve the fine-grained name for sampling-bucket diversity before replacing.
       record.samplingLocality = locality;
       let replacement = '';
@@ -167,6 +170,7 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   if (catalogAnchoredAdmin1Countries.has(countryCode) && geocoder?.regions?.length) {
     const sourceAdmin1 = String(components.admin1 || '').trim();
     if (sourceAdmin1 && !matchesCatalogRegion(geocoder, sourceAdmin1)) {
+      if (streetLevel) return false;
       const region = geocoder.nearestRegion(Number(record.latitude), Number(record.longitude), 10);
       if (!region) return false;
       components.admin1 = region.native_name || region.name || '';
@@ -180,7 +184,7 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
       if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(components, countryCode);
     }
   }
-  if (geocoder?.available) {
+  if (geocoder?.available && !streetLevel) {
     const filled = geocoder.lookup(record);
     let enriched = false;
     if (filled.admin1 && (!components.admin1 || filled.replaceRegion)) {
@@ -208,7 +212,14 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   }
   if (requiresAdminCode(countryCode) && !String(components.admin1Code || '').trim()) {
     if (countryCode === 'US') components.admin1Code = canonicalUsSubdivisionCode(components.admin1 || '');
-    if (!components.admin1Code && geocoder?.nearestRegion) {
+    if (!components.admin1Code && streetLevel && geocoder?.regionsById) {
+      const names = admin1Variants(components.admin1);
+      const regions = [...geocoder.regionsById.values()].filter((region) =>
+        [region.code, region.name, region.native_name].some((value) =>
+          admin1Variants(value).some((key) => names.includes(key))));
+      if (regions.length === 1) components.admin1Code = regions[0].code || '';
+    }
+    if (!components.admin1Code && !streetLevel && geocoder?.nearestRegion) {
       const region = geocoder.nearestRegion(Number(record.latitude), Number(record.longitude), 10);
       if (region?.code) components.admin1Code = region.code;
     }
@@ -232,10 +243,11 @@ const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
   });
   if (!hierarchy.valid) return { valid: false, reasons: [hierarchy.reason], components: record.components };
   const quality = validateAddressQuality({
-    countryCode, components: record.components, latitude: record.latitude, longitude: record.longitude
+    countryCode, components: record.components, latitude: record.latitude, longitude: record.longitude,
+    matchLevel: record.matchLevel
   });
   if (!quality.valid) return quality;
-  const contract = validateAddressContract(countryCode, record.components, { strict: true });
+  const contract = validateAddressContract(countryCode, record.components, { strict: true, matchLevel: record.matchLevel });
   if (!contract.valid) return { valid: false, reasons: contract.reasons, components: record.components };
   record.components = quality.components;
   for (const field of ['admin1', 'admin1Code', 'locality', 'postalLocality', 'district', 'postcode', 'street', 'houseNumber', 'buildingName', 'unit']) {
@@ -278,6 +290,28 @@ const variants = (record) => ({
   addresses: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, record.localizations[language].formattedAddress]))
 });
 
+const preserveLocalizations = async (database, records) => {
+  const rows = (await database.prepare(`SELECT id,native_language,component_variants_json,address_variants_json
+    FROM address_pool WHERE id IN (${records.map(() => '?').join(',')}) FOR UPDATE`)
+    .bind(...records.map((record) => record.id)).all()).results;
+  const previous = new Map(rows.map((row) => [row.id, row]));
+  for (const record of records) {
+    const row = previous.get(record.id);
+    if (!row || row.native_language !== record.nativeLanguage) continue;
+    const stored = JSON.parse(row.component_variants_json);
+    const native = record.localizations.native.components;
+    if (!stored.native || [...new Set([...Object.keys(native), ...Object.keys(stored.native)])]
+      .some((field) => String(native[field] ?? '') !== String(stored.native[field] ?? ''))) continue;
+    const addresses = JSON.parse(row.address_variants_json);
+    for (const language of ['en', 'zh-CN']) {
+      const components = stored[language];
+      if (!components || !addresses[language] || !semanticAddressFields.every((field) => !native[field]
+        || usableAddressTranslation(components[field], language, native[field]))) continue;
+      record.localizations[language] = { components, formattedAddress: addresses[language], source: 'validated-previous-source' };
+    }
+  }
+};
+
 const sourceStatement = (database, shard, observedAt) => database.prepare(`
   INSERT INTO address_sources(
     id,name,homepage_url,data_url,license_code,license_name,license_url,attribution_text,
@@ -295,7 +329,9 @@ const sourceStatement = (database, shard, observedAt) => database.prepare(`
   shard.source.licenseCode, shard.source.licenseName, shard.source.licenseUrl,
   shard.source.attributionText, shard.source.attributionUrl, shard.source.termsUrl,
   Number(Boolean(shard.source.shareAlike)), Number(Boolean(shard.source.noticeRequired)),
-  Number(shard.source.redistributionAllowed !== false), JSON.stringify({ adapter: shard.source.adapter }),
+  Number(shard.source.redistributionAllowed !== false), JSON.stringify({
+    adapter: shard.source.adapter, recordSources: shard.source.recordSources || {}
+  }),
   observedAt, observedAt
 );
 
@@ -324,24 +360,25 @@ const addressStatements = (database, records, context) => {
     const localized = variants(record);
     const coverage = coverageKey(record);
     addressBindings.push(
-      record.id, record.countryCode, record.admin1, record.admin1Code, record.locality, record.postalLocality,
+      record.id, record.canonicalKey, record.countryCode, record.admin1, record.admin1Code, record.locality, record.postalLocality,
       record.district, record.postcode, record.street, record.houseNumber, record.buildingName,
       record.latitude, record.longitude, record.nativeLanguage, JSON.stringify(localized.components),
       JSON.stringify(localized.addresses), cleanKey(record.admin1), cleanKey(record.admin1Code),
       cleanKey(record.locality), cleanKey(record.postalLocality), cleanKey(record.district), postcodeKey(record.postcode),
       record.propertyType, record.qualityScore, context.datasetId, coverage, randomKey(record.canonicalHash),
-      context.observedAt, context.observedAt, context.expiresAt
+      context.observedAt, context.observedAt, context.expiresAt, record.matchLevel || (record.unit ? 'subpremise' : 'premise')
     );
-    return '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL)';
+    return '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL,?)';
   });
   const address = database.prepare(`
     INSERT INTO address_pool(
-      id,country_code,admin1,admin1_code,locality,postal_locality,district,postcode,street,house_number,
+      id,canonical_key,country_code,admin1,admin1_code,locality,postal_locality,district,postcode,street,house_number,
       building_name,latitude,longitude,native_language,component_variants_json,address_variants_json,
       admin1_key,admin1_code_key,locality_key,postal_locality_key,district_key,postcode_key,property_type,
-      quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,expires_at,retired_at
+      quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,expires_at,retired_at,match_level
     ) VALUES ${addressRows.join(',')}
     ON CONFLICT(id) DO UPDATE SET
+      canonical_key=excluded.canonical_key,
       admin1=excluded.admin1,admin1_code=excluded.admin1_code,locality=excluded.locality,
       postal_locality=excluded.postal_locality,district=excluded.district,postcode=excluded.postcode,
       street=excluded.street,house_number=excluded.house_number,building_name=excluded.building_name,
@@ -352,18 +389,19 @@ const addressStatements = (database, records, context) => {
       district_key=excluded.district_key,postcode_key=excluded.postcode_key,
       property_type=excluded.property_type,quality_score=GREATEST(address_pool.quality_score,excluded.quality_score),
       generation=excluded.generation,coverage=excluded.coverage,active=1,last_seen_at=excluded.last_seen_at,
-      expires_at=excluded.expires_at,retired_at=NULL
+      expires_at=excluded.expires_at,retired_at=NULL,match_level=excluded.match_level
   `).bind(...addressBindings);
   const evidenceBindings = [];
   const evidenceRows = records.flatMap((record) => {
-    const evidence = [{ type: 'address_existence', sourceRecordId: record.sourceRecordId }];
+    const evidence = [{ type: 'address_existence', sourceRecordId: record.sourceRecordId, recordUrl: record.sourceRecordUrl }];
     if ((record.propertyType === 'residential' || record.propertyType === 'apartment') && record.residentialSourceRecordId) {
-      evidence.push({ type: 'residential_use', sourceRecordId: record.residentialSourceRecordId || record.sourceRecordId });
+      evidence.push({ type: 'residential_use', sourceRecordId: record.residentialSourceRecordId,
+        recordUrl: record.residentialSourceRecordUrl || record.sourceRecordUrl });
     }
-    return evidence.map(({ type, sourceRecordId }) => {
+    return evidence.map(({ type, sourceRecordId, recordUrl }) => {
         evidenceBindings.push(
           context.hash(`${context.datasetId}\u001f${record.id}\u001f${sourceRecordId}\u001f${type}`),
-          record.id, context.datasetId, sourceRecordId, context.discovery.dataUrl || '', context.observedAt,
+          record.id, context.datasetId, sourceRecordId, recordUrl || context.discovery.dataUrl || '', context.observedAt,
           type, context.observedAt
         );
         return '(?,?,?,?,?,?,?,0,1,?)';
@@ -408,6 +446,8 @@ export class PostgresAddressImporter {
       }
     })).slice(0, 8);
     const sourceComplete = materialized.sourceComplete !== false;
+    const snapshotMode = materialized.snapshotMode
+      || (materialized.authoritativeSnapshot === true ? 'authoritative' : 'merge');
     const generatedDatasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${ADDRESS_IMPORT_REVISION}-${policyHash}`;
     const datasetVersion = `${String(discovery.version)}-${ADDRESS_IMPORT_REVISION}-${policyHash}`;
     const existingIdentity = await this.database.prepare(`SELECT id,status,active_count,rejected_count,source_complete
@@ -443,8 +483,8 @@ export class PostgresAddressImporter {
     for await (const value of readJsonLines(materialized.file, signal)) {
       checkpoint();
       const record = this.normalizeRecord(value, shard, materialized.format);
-      if (!record || seen.has(record.canonicalHash)) {
-        reject([record ? 'duplicate' : 'invalid_source_record']);
+      if (!record) {
+        reject(['invalid_source_record']);
         continue;
       }
       if (!enrichAndValidate(record, geocoder, shard.countryCode, this.rebuildFormattedAddress)) {
@@ -456,11 +496,21 @@ export class PostgresAddressImporter {
         reject(quality.reasons);
         continue;
       }
-      if (!['residential', 'apartment'].includes(record.propertyType) || !record.residentialSourceRecordId) {
+      if (shard.countryCode === 'CN'
+        && (!['residential', 'apartment'].includes(record.propertyType) || !record.residentialSourceRecordId)) {
         reject(['missing_residential_evidence']);
         continue;
       }
-      seen.add(record.canonicalHash);
+      if (record.matchLevel === 'street') {
+        record.canonicalHash = this.hash(streetAddressKey(shard.countryCode, record.components));
+        record.id = `addr-${record.canonicalHash.slice(0, 40)}`;
+      }
+      record.canonicalKey = addressCanonicalKey(shard.countryCode, record.components, record.matchLevel);
+      if (seen.has(record.canonicalKey)) { reject(['duplicate']); continue; }
+      if (!record.residentialSourceRecordId && ['residential', 'apartment'].includes(record.propertyType)) {
+        record.propertyType = 'unknown';
+      }
+      seen.add(record.canonicalKey);
       candidates.push(record);
     }
     candidates.sort((left, right) =>
@@ -472,6 +522,24 @@ export class PostgresAddressImporter {
       targetCount: sourceMaxRecords,
       maxRecords: sourceMaxRecords
     });
+    const canonicalKeys = [...new Set(records.map((record) => record.canonicalKey).filter(Boolean))];
+    const existingByKey = new Map();
+    const ambiguousKeys = new Set();
+    for (let offset = 0; offset < canonicalKeys.length; offset += 500) {
+      const keys = canonicalKeys.slice(offset, offset + 500);
+      const rows = (await this.database.prepare(`SELECT id,canonical_key FROM address_pool
+        WHERE country_code=? AND canonical_key IN (${keys.map(() => '?').join(',')})`)
+        .bind(shard.countryCode, ...keys).all()).results;
+      for (const row of rows) {
+        if (existingByKey.has(row.canonical_key)) ambiguousKeys.add(row.canonical_key);
+        else existingByKey.set(row.canonical_key, row.id);
+      }
+    }
+    for (const record of records) {
+      if (!ambiguousKeys.has(record.canonicalKey) && existingByKey.has(record.canonicalKey)) {
+        record.id = existingByKey.get(record.canonicalKey);
+      }
+    }
     if (!records.length) {
       throw new SourceQualityError(
         shard.id,
@@ -494,6 +562,9 @@ export class PostgresAddressImporter {
       localized.push(...await this.localizeRecords(records.slice(offset, offset + batchSize), { signal }));
       checkpoint();
     }
+    const authoritativeReplacement = sourceComplete && snapshotMode === 'authoritative'
+      && materialized.capped !== true && materialized.sampled !== true && materialized.truncated !== true
+      && !rejectedCount && records.length === candidates.length && localized.length === records.length;
     const candidateAdmin1Count = new Set(localized
       .map((record) => cleanKey(record.admin1Code || record.admin1 || record.district))
       .filter(Boolean)).size;
@@ -533,6 +604,7 @@ export class PostgresAddressImporter {
       minimumAdmin1Ratio,
       importRevision: ADDRESS_IMPORT_REVISION,
       policyHash,
+      replacementMode: authoritativeReplacement ? 'authoritative' : snapshotMode,
       rejectionReasons: Object.fromEntries([...rejectionReasons].sort(([left], [right]) => left.localeCompare(right)))
     };
     const failures = [];
@@ -563,8 +635,7 @@ export class PostgresAddressImporter {
     checkpoint();
     const observedAt = new Date().toISOString();
     const context = { datasetId, discovery, observedAt, expiresAt: null, hash: this.hash };
-    await this.database.exec('BEGIN');
-    try {
+    await this.database.transaction(async () => {
       checkpoint();
       await this.database.batch([
         sourceStatement(this.database, shard, observedAt),
@@ -573,7 +644,9 @@ export class PostgresAddressImporter {
       checkpoint();
       for (let offset = 0; offset < localized.length; offset += batchSize) {
         checkpoint();
-        await this.database.batch(addressStatements(this.database, localized.slice(offset, offset + batchSize), context));
+        const batch = localized.slice(offset, offset + batchSize);
+        await preserveLocalizations(this.database, batch);
+        await this.database.batch(addressStatements(this.database, batch, context));
         checkpoint();
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -587,12 +660,13 @@ export class PostgresAddressImporter {
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0,is_current=0
           WHERE dataset_id IN (
             SELECT id FROM address_datasets WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')
-              AND (?=1 OR (source_complete=0 AND version=?))
-          )`).bind(shard.source.id, shard.countryCode, datasetId, Number(sourceComplete), datasetVersion),
+          ) AND (?=1 OR address_id IN (
+            SELECT refreshed.address_id FROM address_pool_evidence refreshed WHERE refreshed.dataset_id=?
+          ))`).bind(shard.source.id, shard.countryCode, datasetId, Number(authoritativeReplacement), datasetId),
         this.database.prepare(`UPDATE address_datasets SET status='retired',active_count=0
           WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')
-            AND (?=1 OR (source_complete=0 AND version=?))`)
-          .bind(shard.source.id, shard.countryCode, datasetId, Number(sourceComplete), datasetVersion),
+            AND id NOT IN (SELECT DISTINCT dataset_id FROM address_pool_evidence WHERE is_current=1)`)
+          .bind(shard.source.id, shard.countryCode, datasetId),
         this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=?,source_complete=? WHERE id=?")
           .bind(localized.length, rejectedCount, Number(sourceComplete), datasetId),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id IN (
@@ -600,7 +674,9 @@ export class PostgresAddressImporter {
           LEFT JOIN (
             SELECT DISTINCT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
+            JOIN address_sources source ON source.id=dataset.source_id
             WHERE evidence.is_current=1 AND dataset.status IN ('pending','active')
+              AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
           ) retained ON retained.address_id=target.id
           WHERE target.country_code=? AND target.active=1 AND retained.address_id IS NULL
         )`).bind(observedAt, shard.countryCode),
@@ -614,7 +690,9 @@ export class PostgresAddressImporter {
             AND id IN (
             SELECT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
+            JOIN address_sources source ON source.id=dataset.source_id
             WHERE evidence.is_current=1 AND dataset.status='active'
+              AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
           )`).bind(observedAt, shard.countryCode)
       ]);
       checkpoint();
@@ -622,8 +700,10 @@ export class PostgresAddressImporter {
         FROM address_pool_evidence candidate
         JOIN address_datasets dataset ON dataset.id=candidate.dataset_id
         JOIN address_pool address ON address.id=candidate.address_id
+        JOIN address_sources source ON source.id=dataset.source_id
         WHERE address.country_code=? AND candidate.is_current=1
           AND candidate.evidence_type='address_existence' AND dataset.status='active'
+          AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
         ORDER BY candidate.address_id,dataset.imported_at DESC,candidate.id`).bind(shard.countryCode).all()).results;
       checkpoint();
       const primaryEvidenceIds = [];
@@ -645,7 +725,9 @@ export class PostgresAddressImporter {
         WHERE country_code=? AND id IN (
           SELECT evidence.address_id FROM address_pool_evidence evidence
           JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
+          JOIN address_sources source ON source.id=dataset.source_id
           WHERE evidence.is_current=1 AND dataset.status='active'
+            AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
         ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode).all()).results;
       checkpoint();
       for (let offset = 0; offset < countryCandidates.length; offset += batchSize) {
@@ -661,10 +743,14 @@ export class PostgresAddressImporter {
         checkpoint();
         const activeCount = await this.database.prepare(`SELECT COUNT(DISTINCT evidence.address_id) AS total
           FROM address_pool_evidence evidence JOIN address_pool address ON address.id=evidence.address_id
-          WHERE evidence.dataset_id=? AND evidence.is_current=1 AND address.active=1`).bind(dataset.id).first('total');
+          JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
+          JOIN address_sources source ON source.id=dataset.source_id
+          WHERE evidence.dataset_id=? AND evidence.is_current=1 AND address.active=1
+            AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1`).bind(dataset.id).first('total');
         await this.database.prepare('UPDATE address_datasets SET active_count=? WHERE id=?')
           .bind(Number(activeCount || 0), dataset.id).run();
       }
+      await refreshAddressGenerationIndex(this.database, shard.countryCode);
       const coverageTarget = activePolicy.levelLimits[1] || perLocality;
       checkpoint();
       await this.database.prepare('DELETE FROM pool_coverage WHERE country_code=?').bind(shard.countryCode).run();
@@ -672,14 +758,16 @@ export class PostgresAddressImporter {
       await this.database.prepare(`INSERT INTO pool_coverage(
           coverage_key,country_code,admin1_key,locality_key,postcode_key,property_type,target_count,
           active_count,shadow_count,residential_count,refresh_status,generation,last_refreshed_at,expires_at
-        ) SELECT coverage,country_code,
-          coalesce(nullif(admin1_code_key,''),admin1_key),
-          coalesce(nullif(postal_locality_key,''),locality_key),min(postcode_key),property_type,CAST(? AS INTEGER),
-          count(*),0,sum(CASE WHEN property_type IN ('residential','apartment') THEN 1 ELSE 0 END),
+        ) SELECT address.coverage,address.country_code,
+          coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
+          coalesce(nullif(address.postal_locality_key,''),address.locality_key),min(address.postcode_key),address.property_type,CAST(? AS INTEGER),
+          count(*),0,sum(indexed.residential_ready),
           CASE WHEN count(*)>=CAST(? AS INTEGER) THEN 'ready' ELSE 'low' END,?,?,?
-        FROM address_pool WHERE country_code=? AND active=1
-        GROUP BY coverage,country_code,coalesce(nullif(admin1_code_key,''),admin1_key),
-          coalesce(nullif(postal_locality_key,''),locality_key),property_type`
+        FROM address_pool_runtime address JOIN address_generation_index indexed
+          ON indexed.address_id=address.id AND indexed.country_code=address.country_code AND indexed.active=1
+        WHERE address.country_code=? AND address.active=1
+        GROUP BY address.coverage,address.country_code,coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
+          coalesce(nullif(address.postal_locality_key,''),address.locality_key),address.property_type`
       ).bind(coverageTarget, coverageTarget, datasetId, observedAt, context.expiresAt, shard.countryCode).run();
       checkpoint();
       await this.database.batch([
@@ -695,18 +783,7 @@ export class PostgresAddressImporter {
         )`).bind(shard.countryCode)
       ]);
       checkpoint();
-      await this.database.exec('COMMIT');
-    } catch (error) {
-      await this.database.exec('ROLLBACK').catch(() => {});
-      throw error;
-    }
-    try {
-      await refreshAddressGenerationIndex(this.database, shard.countryCode);
-    } catch (error) {
-      // The indexed path is an optimization; publication remains available
-      // through the bounded address_pool query when maintenance is delayed.
-      console.error('[address-generation-index] refresh failed', error instanceof Error ? error.message : String(error));
-    }
+    });
     const residentialCount = localized.filter((record) => record.propertyType === 'residential' || record.propertyType === 'apartment').length;
     return {
       datasetId, acceptedCount: localized.length, rejectedCount, localityCount: localityCounts.size,

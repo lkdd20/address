@@ -1,7 +1,11 @@
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isValidPostcode } from '../../src/domain/postcode-patterns.mjs';
+import { validateAddressContract } from '../../src/domain/address-contracts.mjs';
 
 const allowedTypes = new Set(['street_address', 'premise', 'subpremise']);
+const residentialBuildings = new Set(['apartments', 'bungalow', 'cabin', 'detached', 'dormitory', 'ger',
+  'house', 'residential', 'semidetached_house', 'terrace']);
+export const isResidentialSeed = (seed) => Boolean(seed.building_id && residentialBuildings.has(seed.building_class));
 const requiredComponents = {
   IN: ['admin1', 'locality', 'district', 'postcode'],
   NG: ['admin1', 'locality', 'district', 'postcode'],
@@ -30,9 +34,14 @@ const normalizeDecimalDigits = (value) => String(value || '').replace(/[\u0660-\
   return String(code - zero);
 });
 
-const country = (result) => String(result.postalAddress?.regionCode || result.addressComponents
-  ?.find((entry) => entry.types?.includes('country'))?.shortText
-  || result.addressComponents?.find((entry) => entry.types?.includes('country'))?.short_name || '').toUpperCase();
+const country = (result) => {
+  const codes = [...new Set([result.postalAddress?.regionCode, ...(result.addressComponents || [])
+    .filter((entry) => entry.types?.includes('country')).map((entry) => entry.shortText || entry.short_name)]
+    .filter(Boolean).map((value) => String(value).toUpperCase()))];
+  return codes.length === 1 ? codes[0] : '';
+};
+const normalizedPart = (value) => String(value || '').normalize('NFKC').toLocaleLowerCase('en')
+  .replace(/[^\p{L}\p{N}]/gu, '');
 
 const pointInRing = (longitude, latitude, ring) => {
   if (!Array.isArray(ring) || ring.length < 4) return false;
@@ -77,6 +86,8 @@ const addressParts = (result, countryCode) => {
       .filter((entry) => entry.types?.includes('postal_code'))
       .map((entry) => entry.longText || entry.long_name)
   ].map((value) => normalizeDecimalDigits(value).trim()).filter(Boolean);
+  const validPostcodes = [...new Set(postcodeCandidates.filter((value) => isValidPostcode(countryCode, value))
+    .map((value) => value.replace(/\s/gu, '')))];
   return {
     number: normalizeDecimalDigits(component(result, 'street_number')),
     street: component(result, 'route'),
@@ -84,7 +95,8 @@ const addressParts = (result, countryCode) => {
     locality: component(result, 'locality', 'postal_town', 'administrative_area_level_2'),
     district: component(result, 'sublocality_level_1', 'administrative_area_level_3',
       ...(countryCode === 'TR' ? ['administrative_area_level_4'] : []), 'neighborhood'),
-    postcode: postcodeCandidates.find((value) => isValidPostcode(countryCode, value)) || postcodeCandidates[0] || ''
+    postcode: validPostcodes.length === 1 ? validPostcodes[0] : '',
+    ambiguousPostcode: validPostcodes.length > 1
   };
 };
 
@@ -108,17 +120,30 @@ const normalizeResult = (raw) => raw.placeId ? raw : {
 
 const supplementAdministrativeParts = (base, results, countryCode) => {
   const complete = { ...base };
-  for (const result of results) {
-    if (country(result) !== countryCode) continue;
+  const candidates = results.flatMap((result) => {
+    if (country(result) !== countryCode || result.partialMatch) return [];
     const candidate = addressParts(result, countryCode);
-    for (const name of ['admin1', 'locality', 'district', 'postcode']) {
-      if (!complete[name] && candidate[name]) complete[name] = candidate[name];
-    }
+    if (candidate.ambiguousPostcode) return [];
+    const fields = ['admin1', 'locality', 'district', 'postcode'];
+    if (fields.some((name) => base[name] && candidate[name]
+      && normalizedPart(base[name]) !== normalizedPart(candidate[name]))) return [];
+    // Political results need matching parents, not merely the same country.
+    if (!['admin1', 'locality'].every((name) => base[name] && candidate[name]
+      && normalizedPart(base[name]) === normalizedPart(candidate[name]))) return [];
+    return [candidate];
+  });
+  for (const name of ['admin1', 'locality', 'district', 'postcode']) {
+    if (complete[name]) continue;
+    const values = new Map(candidates.filter((candidate) => candidate[name])
+      .map((candidate) => [normalizedPart(candidate[name]), candidate[name]]));
+    if (values.size === 1) complete[name] = values.values().next().value;
   }
   return complete;
 };
 
 export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
+  if (!isResidentialSeed(seed)) return { record: null, reason: 'missing_residential_seed' };
+  if (!Object.hasOwn(requiredComponents, countryCode)) return { record: null, reason: 'unsupported_country' };
   if (!Array.isArray(payload?.results) || (payload.status && payload.status !== 'OK')) {
     return { record: null, reason: 'invalid_response' };
   }
@@ -145,7 +170,12 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
       reason = 'geometry_mismatch';
       continue;
     }
-    const parts = supplementAdministrativeParts(addressParts(result, countryCode), results, countryCode);
+    const baseParts = addressParts(result, countryCode);
+    if (baseParts.ambiguousPostcode) {
+      reason = 'ambiguous_postcode';
+      continue;
+    }
+    const parts = supplementAdministrativeParts(baseParts, results, countryCode);
     const missing = ['number', 'street', ...(requiredComponents[countryCode] || [])]
       .find((name) => !parts[name]);
     if (missing) {
@@ -154,6 +184,11 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
     }
     if (!isValidPostcode(countryCode, parts.postcode)) {
       reason = 'invalid_postcode';
+      continue;
+    }
+    const contract = validateAddressContract(countryCode, { ...parts, houseNumber: parts.number }, { strict: true });
+    if (!contract.valid) {
+      reason = contract.reasons[0];
       continue;
     }
     return { reason: null, record: {
@@ -180,6 +215,54 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
 export const selectGoogleResidentialResult = (payload, seed, countryCode) =>
   evaluateGoogleResidentialResult(payload, seed, countryCode).record;
 
+export const evaluateGoogleAddressResults = (payload, seed, countryCode) => {
+  if (!Object.hasOwn(requiredComponents, countryCode)) return { records: [], reason: 'unsupported_country' };
+  if (!Array.isArray(payload?.results) || (payload.status && payload.status !== 'OK')) {
+    return { records: [], reason: 'invalid_response' };
+  }
+  const results = payload.results.map(normalizeResult);
+  const records = new Map();
+  let reason = 'no_qualified_address';
+  for (const result of results) {
+    if (!result.placeId || result.partialMatch || country(result) !== countryCode) continue;
+    const streetLevel = result.types?.includes('route') && !result.types.some((type) => allowedTypes.has(type));
+    if (!streetLevel && (!result.types?.some((type) => allowedTypes.has(type))
+      || (result.granularity !== 'ROOFTOP' && !(result.granularity === 'GEOMETRIC_CENTER'
+        && result.types.some((type) => ['premise', 'subpremise'].includes(type)))))) continue;
+    const parts = addressParts(result, countryCode);
+    const longitude = Number(result.location?.longitude);
+    const latitude = Number(result.location?.latitude);
+    if (![longitude, latitude].every(Number.isFinite) || Math.abs(longitude) > 180 || Math.abs(latitude) > 90) continue;
+    if (!pointMatchesSeedGeometry(seed, result)) { reason = 'geometry_mismatch'; continue; }
+    const matchLevel = streetLevel ? 'street' : 'premise';
+    if (!parts.street || (!streetLevel && !parts.number)) continue;
+    const residential = !streetLevel && isResidentialSeed(seed) && seed.match_level !== 'street'
+      ? evaluateGoogleResidentialResult({ results: [result, ...results.filter((entry) =>
+        !entry.types?.some((type) => allowedTypes.has(type)))] }, seed, countryCode).record : null;
+    if (['admin1', 'locality', 'district'].some((field) => seed[field] && (residential || parts)[field]
+      && normalizedPart(seed[field]) !== normalizedPart((residential || parts)[field]))) {
+      reason = 'administrative_mismatch';
+      continue;
+    }
+    if (residential) {
+      records.set(result.placeId, { ...residential, match_level: matchLevel });
+      continue;
+    }
+    const components = { ...parts, houseNumber: streetLevel ? '' : parts.number,
+      postcode: streetLevel || parts.ambiguousPostcode ? '' : parts.postcode };
+    const contract = validateAddressContract(countryCode, components, { strict: true, matchLevel });
+    if (!contract.valid) { reason = contract.reasons[0]; continue; }
+    records.set(result.placeId, {
+      id: `google:${result.placeId}`, source_record_id: `google:${result.placeId}`,
+      source_dataset: 'Google Geocoding', match_level: matchLevel,
+      number: components.houseNumber, street: parts.street, admin1: parts.admin1,
+      locality: parts.locality, district: parts.district, postcode: components.postcode,
+      longitude, latitude, property_type: 'unknown'
+    });
+  }
+  return { records: [...records.values()], reason: records.size ? null : reason };
+};
+
 const retryableCodes = new Set([
   'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED',
   'BROKER_TEST_POLICY_BLOCKED', 'BROKER_UNAVAILABLE'
@@ -205,22 +288,29 @@ const waitFor = (milliseconds, signal) => new Promise((resolve, reject) => {
 
 export const reconcileGoogleProgressOutput = async (output, progress) => {
   const accepted = Number(progress?.accepted);
-  if (!Number.isSafeInteger(accepted) || accepted < 0) return false;
+  const invalidState = (cause) => Object.assign(new Error('Google residential progress output is invalid', { cause }), {
+    code: 'SOURCE_STATE_INVALID'
+  });
+  if (!Number.isSafeInteger(accepted) || accepted < 0) throw invalidState();
   let content;
   try { content = await readFile(output, 'utf8'); }
-  catch (error) { return error?.code === 'ENOENT' && accepted === 0; }
+  catch (error) {
+    if (error?.code === 'ENOENT' && accepted === 0) return true;
+    throw invalidState(error);
+  }
   const lines = content.split(/\r?\n/u).filter((line) => line.trim());
-  if (lines.length < accepted) return false;
+  if (lines.length < accepted) throw invalidState();
   const retained = lines.slice(0, accepted);
   const identifiers = new Set();
   try {
     for (const line of retained) {
       const identifier = String(JSON.parse(line).source_record_id || '');
-      if (!identifier || identifiers.has(identifier)) return false;
+      if (!identifier || identifiers.has(identifier)) throw invalidState();
       identifiers.add(identifier);
     }
-  } catch {
-    return false;
+  } catch (error) {
+    if (error?.code === 'SOURCE_STATE_INVALID') throw error;
+    throw invalidState(error);
   }
   if (lines.length !== accepted) {
     const temporary = `${output}.${process.pid}.reconcile.tmp`;
@@ -235,14 +325,22 @@ export const reconcileGoogleProgressOutput = async (output, progress) => {
 };
 
 export const requestGoogleReverse = async ({
-  latitude, longitude, language, regionCode = '', credentialPool, brokerClient, fetchImpl = fetch, signal
+  latitude, longitude, language, regionCode = '', credentialPool, brokerClient, fetchImpl = fetch, signal,
+  maxRequests = 32, onDispatch
 }) => {
+  let dispatched = 0;
+  const account = (count) => { dispatched += count; onDispatch?.(count); };
   if (brokerClient) {
     for (let attempt = 0; attempt < inlineRateLimitAttempts; attempt += 1) {
+      if (dispatched >= maxRequests) throw Object.assign(new Error('Request budget reached'), { code: 'SOURCE_REQUEST_BUDGET' });
       try {
-        return await brokerClient.request('google-geocoding.reverse', {
+        let accounted = false;
+        const payload = await brokerClient.request('google-geocoding.reverse', {
           latitude, longitude, language, regionCode
-        }, { signal });
+        }, { signal, maxDispatches: Math.min(32, maxRequests - dispatched),
+          onDispatch: (count) => { accounted = true; account(count); } });
+        if (!accounted) account(1);
+        return payload;
       } catch (error) {
         const waitMilliseconds = Date.parse(error?.retryAt || '') - Date.now();
         if (error?.code !== 'SOURCE_RATE_LIMITED' || attempt + 1 >= inlineRateLimitAttempts
@@ -256,7 +354,7 @@ export const requestGoogleReverse = async ({
     code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
   });
   const attempted = new Set();
-  for (let attempt = 0; attempt < 32; attempt += 1) {
+  for (let attempt = 0; attempt < Math.min(32, maxRequests); attempt += 1) {
     const credential = await credentialPool.acquire('google-geocoding', { excludeIds: attempted });
     if (!credential) break;
     attempted.add(credential.id);
@@ -267,6 +365,7 @@ export const requestGoogleReverse = async ({
     if (regionCode) url.searchParams.set('regionCode', regionCode.toUpperCase());
     let response;
     try {
+      account(1);
       response = await fetchImpl(url, {
         headers: {
           Accept: 'application/json', 'User-Agent': 'address-sync/2.0',

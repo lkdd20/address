@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listAddressCoverage, refreshAddressCoverage } from '../server/control/coverage';
 import { evaluateCountryGoals } from '../server/sync/country-goals.mjs';
+import { applyAdministrativeCatalogOverrides } from '../server/database/administrative-catalog-overrides';
 import { openTestDatabase, type PostgresDatabase } from './helpers/postgres-test-database.mjs';
 
 describe('admin address coverage', () => {
@@ -9,12 +10,69 @@ describe('admin address coverage', () => {
   beforeEach(() => { database = openTestDatabase(':memory:'); });
   afterEach(() => database.close());
 
-  it('builds country-first China province, city, and district drill-down statistics', async () => {
+  it('keeps all countries visible after a China-only bootstrap and drill-down', async () => {
+    await refreshAddressCoverage(database, { chinaOnly: true });
+    expect(await listAddressCoverage(database, 'CN')).toEqual([]);
+    const countries = await listAddressCoverage(database);
+    expect(countries).toHaveLength(27);
+    expect(new Set(countries.map((item) => item.countryCode)).size).toBe(27);
+    expect(countries.every((item) => item.level === 0 && item.totalCount === 0)).toBe(true);
+  });
+
+  it('repairs Spanish self-parent provinces so every community reaches its cities without a cycle', async () => {
+    for (const [province, community, provinceCode, communityCode, name] of [
+      [1160, 5701, 'O', 'AS', 'Asturias'], [1170, 5702, 'S', 'CB', 'Cantabria'], [1171, 5703, 'LO', 'RI', 'La Rioja']
+    ] as const) {
+      await database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (?,'ES',?,?,?,?,'autonomous community',NULL,?),
+          (?,'ES',?,?,?,?,'province',NULL,?)`).bind(community, communityCode, name, name, name, `/${community}/`,
+          province, provinceCode, name, name, name, `/${province}/`).run();
+      await database.prepare('UPDATE catalog_regions SET parent_id=id WHERE id=?').bind(province).run();
+      await database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name)
+        VALUES (?,'ES',?,'Synthetic municipality','Synthetic municipality','Synthetic municipality')`).bind(province, province).run();
+    }
+    expect(await applyAdministrativeCatalogOverrides(database)).toBe(true);
+    const communities = await listAddressCoverage(database, 'ES');
+    expect(communities).toHaveLength(3);
+    expect(communities.every((node) => node.childCount === 1)).toBe(true);
+    for (const community of communities) {
+      const provinces = await listAddressCoverage(database, community.key);
+      expect(provinces).toHaveLength(1);
+      expect(provinces[0]).toMatchObject({ level: 2, childCount: 1, totalCount: 0 });
+      expect(provinces[0].key).not.toBe(community.key);
+      const cities = await listAddressCoverage(database, provinces[0].key);
+      expect(cities).toHaveLength(1);
+      expect(cities[0]).toMatchObject({ level: 3, childCount: 0, totalCount: 0 });
+      expect(cities[0].key).not.toBe(provinces[0].key);
+    }
+    expect(await applyAdministrativeCatalogOverrides(database)).toBe(false);
+  });
+
+  it('joins unique residential evidence instead of rescanning it for every address', async () => {
+    const prepare = vi.spyOn(database, 'prepare');
+    await refreshAddressCoverage(database);
+    const [query] = prepare.mock.calls.find(([source]) => source.startsWith('INSERT INTO strict_pool_rows'))!;
+    expect(query).toContain('LEFT JOIN (SELECT DISTINCT evidence.address_id');
+    expect(query).toContain('residential.address_id IS NOT NULL');
+    expect(query.split(' END')[0]).not.toContain('address_pool.id IN');
+  });
+
+  it('supports the migration fast path from the validated generation index', async () => {
+    const prepare = vi.spyOn(database, 'prepare');
+    await refreshAddressCoverage(database, { useGenerationIndex: true });
+    const [query] = prepare.mock.calls.find(([source]) => source.startsWith('INSERT INTO strict_pool_rows'))!;
+    expect(query).toContain('FROM address_generation_index generation');
+    expect(query).not.toContain('component_variants_json');
+  });
+
+  it.each([false, true])('builds country-first China province, city, and district statistics (chinaOnly=%s)', async (chinaOnly) => {
     const now = new Date().toISOString();
     await database.batch([
       database.prepare(`INSERT INTO sync_country_policies(
         country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,updated_at
       ) VALUES ('CN',1,10,20,10,5,5,?)`).bind(now),
+      database.prepare(`INSERT INTO sync_country_state(country_code,status,address_count,residential_count,updated_at)
+        VALUES ('CN','ready',999,999,?)`).bind(now),
       database.prepare(`INSERT INTO cn_admin_areas(adcode,parent_adcode,level,name,full_path,source_version,updated_at)
         VALUES ('110000',NULL,'province','北京市','北京市','fixture',?)`).bind(now),
       database.prepare(`INSERT INTO cn_admin_areas(adcode,parent_adcode,level,name,full_path,source_version,updated_at)
@@ -56,10 +114,12 @@ describe('admin address coverage', () => {
           is_primary,is_current,created_at) VALUES (?,?,?,?,?,?,?,1,?)`)
         .bind(`${id}-${type}`, id, 'cn-pool-dataset', id, now, type, index === 0 ? 1 : 0, now)));
     }
-    await refreshAddressCoverage(database);
+    await refreshAddressCoverage(database, { chinaOnly });
     const countries = await listAddressCoverage(database);
     const china = countries.find((item) => item.countryCode === 'CN');
     expect(china).toMatchObject({ regionName: '中国', residentialCount: 1, totalCount: 1, childCount: 1 });
+    expect(await database.prepare(`SELECT address_count,residential_count FROM sync_country_state WHERE country_code='CN'`).first())
+      .toEqual({ address_count: 1, residential_count: 1 });
     const goal = (await evaluateCountryGoals(database)).get('CN');
     expect(goal?.current).toBe(1);
     expect(goal?.rules).toMatchObject({
@@ -77,6 +137,52 @@ describe('admin address coverage', () => {
     expect(cities[0]).toMatchObject({ regionName: '北京市', levelLabel: '地级市', residentialCount: 1 });
     const districts = await listAddressCoverage(database, cities[0].key);
     expect(districts[0]).toMatchObject({ regionName: '朝阳区', levelLabel: '区县', residentialCount: 1 });
+  });
+
+  it.each([0, 1])('repairs China-only projections with %i published rows without touching other countries', async (published) => {
+    const now = new Date().toISOString();
+    await database.batch([
+      database.prepare(`INSERT INTO sync_country_state(country_code,status,address_count,residential_count,updated_at)
+        VALUES ('CN','ready',9,9,?),('US','ready',42,32,?)`).bind(now, now),
+      database.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,
+        ordinary_count,residential_count,total_count,child_count,updated_at)
+        VALUES ('CN','','CN',0,'中国',0,9,9,1,?),('CN:obsolete','CN','CN',1,'旧节点',0,9,9,0,?),
+          ('US','','US',0,'美国',10,32,42,1,?),('US:fixture','US','US',1,'Fixture',10,32,42,0,?)`)
+        .bind(now, now, now, now),
+      ...[
+        ['110000', null, 'province', '北京市'], ['110100', '110000', 'city', '北京市'],
+        ['110105', '110100', 'district', '朝阳区'], ['110108', '110100', 'district', '海淀区']
+      ].map(([code, parent, level, name]) => database.prepare(`INSERT INTO cn_admin_areas(
+        adcode,parent_adcode,level,name,full_path,source_version,updated_at) VALUES (?,?,?,?,?,'fixture',?)`)
+        .bind(code, parent, level, name, name, now)),
+      database.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,
+        postcode,provider_address,longitude,latitude,active,first_seen_at,last_seen_at,updated_at)
+        VALUES ('cn-fixture','望京花园','望京','北京市','北京市','朝阳区','100102','阜通东大街6号',116.46,39.98,?,?,?,?)`)
+        .bind(published, now, now, now),
+      database.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,
+        raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at)
+        VALUES ('amap','cn-fixture','cn-fixture','望京花园',116.46,39.98,'GCJ-02',?,?,?)`)
+        .bind('a'.repeat(64), now, now)
+    ]);
+    const otherCoverage = await database.prepare("SELECT * FROM admin_coverage_stats WHERE country_code='US' ORDER BY node_key").all();
+    const otherState = await database.prepare("SELECT * FROM sync_country_state WHERE country_code='US'").first();
+    const prepare = vi.spyOn(database, 'prepare');
+    await refreshAddressCoverage(database, { chinaOnly: true });
+    expect(await database.prepare("SELECT * FROM admin_coverage_stats WHERE country_code='US' ORDER BY node_key").all())
+      .toMatchObject({ results: otherCoverage.results });
+    expect(await database.prepare("SELECT * FROM sync_country_state WHERE country_code='US'").first()).toEqual(otherState);
+    expect(prepare.mock.calls.some(([query]) => /\baddress_pool\b|\baddress_generation_index\b/u.test(query))).toBe(false);
+    expect(prepare.mock.calls.filter(([query]) => query.includes('FROM cn_communities_v2'))).toHaveLength(1);
+    expect(await database.prepare("SELECT address_count,residential_count FROM sync_country_state WHERE country_code='CN'").first())
+      .toEqual({ address_count: published, residential_count: published });
+    expect(await database.prepare("SELECT total_count,residential_count,child_count FROM admin_coverage_stats WHERE node_key='CN'").first())
+      .toEqual({ total_count: published, residential_count: published, child_count: 1 });
+    expect(await database.prepare("SELECT region_code,total_count FROM admin_coverage_stats WHERE country_code='CN' AND level=3 ORDER BY region_code").all())
+      .toMatchObject({ results: [{ region_code: '110105', total_count: published }, { region_code: '110108', total_count: 0 }] });
+    expect(await database.prepare("SELECT node_key FROM admin_coverage_stats WHERE node_key='CN:obsolete'").first()).toBeNull();
+    const first = (await database.prepare("SELECT node_key,total_count,residential_count,child_count FROM admin_coverage_stats WHERE country_code='CN' ORDER BY node_key").all()).results;
+    await refreshAddressCoverage(database, { chinaOnly: true });
+    expect((await database.prepare("SELECT node_key,total_count,residential_count,child_count FROM admin_coverage_stats WHERE country_code='CN' ORDER BY node_key").all()).results).toEqual(first);
   });
 
   it('reports official per-level ratios and drills through covered catalog nodes', async () => {
@@ -133,6 +239,13 @@ describe('admin address coverage', () => {
     expect(goal?.rules.regionalMinimums.lowest).toMatchObject({ total: 2, qualified: 1 });
     expect(goal?.unmetRules).toEqual(['total', 'administrative_coverage', 'regional_minimums']);
     expect(goal?.complete).toBe(false);
+    const regions = await listAddressCoverage(database, 'NL');
+    const emptyRegion = regions.find((region) => region.regionCode === 'ZH');
+    expect(emptyRegion).toMatchObject({ childCount: 1, totalCount: 0 });
+    expect(await listAddressCoverage(database, emptyRegion!.key)).toEqual([
+      expect.objectContaining({ key: 'catalog-city:221', regionNameEn: 'Rotterdam', level: 2,
+        totalCount: 0, residentialCount: 0, childCount: 0 })
+    ]);
   });
 
   it('counts catalog cities from mixed-depth branches in one lowest-level denominator', async () => {

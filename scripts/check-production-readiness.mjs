@@ -1,5 +1,6 @@
 import { openPostgresDatabase } from '../server/database/postgres.mjs';
 import { parseArgs } from './lib/address-pool.mjs';
+import { chinaCommunityPublicationClause } from '../server/api/repositories/china-community.ts';
 
 const supportedCountries = [
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU',
@@ -8,7 +9,7 @@ const supportedCountries = [
 ];
 const requiredTables = [
   'schema_migrations', 'address_sources', 'address_datasets', 'address_pool',
-  'address_pool_evidence', 'pool_coverage', 'catalog_regions', 'catalog_cities',
+  'address_pool_evidence', 'address_generation_index', 'pool_coverage', 'catalog_regions', 'catalog_cities',
   'catalog_postcodes', 'sync_country_state', 'sync_jobs'
 ];
 const hardLimitBytes = 45 * 1024 ** 3;
@@ -49,17 +50,20 @@ try {
     'SELECT pg_database_size(current_database()) AS size'
   ).first('size') || 0);
   const perCountry = [];
-  if (!missingTables.includes('address_pool') && !missingTables.includes('sync_country_state')) {
+  if (!missingTables.includes('address_generation_index') && !missingTables.includes('sync_country_state')) {
     for (const country of countries) {
-      const counts = await database.prepare(`SELECT COUNT(*) AS total,
-        COUNT(*) FILTER (WHERE property_type IN ('residential','apartment') AND residential_evidence=1) AS residential
-        FROM address_pool_runtime WHERE country_code=?`).bind(country).first();
+      const counts = country === 'CN'
+        ? { total: Number(await database.prepare(`SELECT COUNT(*) AS total FROM cn_communities_v2 community
+          WHERE ${chinaCommunityPublicationClause('community')}`).first('total') || 0) }
+        : await database.prepare(`SELECT COUNT(DISTINCT address_id) AS total,
+          COUNT(DISTINCT address_id) FILTER (WHERE residential_ready=1) AS residential
+          FROM address_generation_index WHERE country_code=? AND active=1`).bind(country).first();
       const sync = await database.prepare(`SELECT status,last_success_at,next_sync_at,failure_count,last_error
         FROM sync_country_state WHERE country_code=?`).bind(country).first();
       perCountry.push({
         country,
         total: Number(counts?.total || 0),
-        residential: Number(counts?.residential || 0),
+        residential: country === 'CN' ? Number(counts?.total || 0) : Number(counts?.residential || 0),
         syncStatus: sync?.status || 'pending',
         lastSuccessAt: sync?.last_success_at || null,
         nextSyncAt: sync?.next_sync_at || null,
@@ -73,7 +77,8 @@ try {
     ...(schemaVersion >= 1 ? [] : ['schema version is missing']),
     ...(storageBytes < hardLimitBytes ? [] : ['database reached the 45GB hard limit']),
     ...perCountry.filter(({ total }) => total === 0).map(({ country }) => `${country} has no active addresses`),
-    ...perCountry.filter(({ residential }) => residential === 0).map(({ country }) => `${country} has no active residential addresses`),
+    ...perCountry.filter(({ country, residential }) => country === 'CN' && residential === 0)
+      .map(({ country }) => `${country} has no active residential addresses`),
     ...perCountry.filter(({ syncStatus }) => syncStatus !== 'ready').map(({ country, syncStatus }) => `${country} sync status is ${syncStatus}`),
     ...perCountry.filter(({ failureCount }) => failureCount > 0).map(({ country, failureCount }) => `${country} has ${failureCount} synchronization failures`),
     ...perCountry.filter(({ lastSuccessAt }) => !lastSuccessAt).map(({ country }) => `${country} has no successful synchronization timestamp`),

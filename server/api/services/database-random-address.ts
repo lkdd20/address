@@ -5,8 +5,10 @@ import {
   chinaCommunityPublicationClause, loadChinaCommunityAddressById
 } from '../repositories/china-community';
 import {
-  chineseVariantHasHanClause, completenessClause, loadAddressPoolV2AddressById
+  completenessClause, loadAddressPoolV2AddressById
 } from '../repositories/address-pool-v2';
+import { addressLocalizationSqlClause } from '../../database/generation-index.mjs';
+import { projectAdministrativeRow } from '../../database/administrative-assignments.mjs';
 import {
   RandomAddressIndex, type RandomAddressIndexRow, type RandomAddressReference
 } from './random-address-index';
@@ -26,6 +28,7 @@ interface PoolMetadataRow {
   street: string;
   house_number: string;
   building_name: string;
+  administrative_patch_json?: string | null;
 }
 
 interface CommunityMetadataRow {
@@ -36,6 +39,7 @@ interface CommunityMetadataRow {
   township: string;
   provider_address: string;
   canonical_name: string;
+  postcode: string;
 }
 
 const mapConcurrent = async <T, R>(values: T[], concurrency: number, worker: (value: T) => Promise<R>): Promise<R[]> => {
@@ -58,19 +62,19 @@ export const loadRandomAddressIndexRows = async (
   const selected = countries.filter((country) => country !== 'CN');
   const poolRows = (await mapConcurrent(selected, Math.max(1, concurrency), async (country) =>
     (await db.prepare(`SELECT id,country_code,admin1,admin1_code,locality,postal_locality,
-      district,postcode,street,house_number,building_name FROM address_pool_runtime
+      district,postcode,street,house_number,building_name,administrative_patch_json FROM address_pool_runtime
     WHERE country_code=? AND quality_score>=0.7
       AND property_type IN ('residential','apartment') AND residential_evidence=1
       AND ${completenessClause()}
-      AND ${chineseVariantHasHanClause()}
+      AND ${addressLocalizationSqlClause()}
     ORDER BY id`).bind(country).all<PoolMetadataRow>()).results
   )).flat();
   const communityRows = countries.includes('CN') ? (await db.prepare(`SELECT community.id,community.province,
-      community.city,community.district,community.township,community.provider_address,community.canonical_name
+      community.city,community.district,community.township,community.provider_address,community.canonical_name,community.postcode
     FROM cn_communities_v2 community WHERE ${chinaCommunityPublicationClause('community')}
     ORDER BY community.id`).all<CommunityMetadataRow>()).results : [];
   return [
-    ...poolRows.map((row) => ({
+    ...poolRows.map(projectAdministrativeRow).map((row) => ({
       addressId: row.id,
       countryCode: row.country_code,
       source: 'address-pool-v2' as const,
@@ -82,7 +86,7 @@ export const loadRandomAddressIndexRows = async (
         row.postal_locality, row.admin1, row.admin1_code, row.postcode].filter(Boolean).join(' ')
     })),
     ...communityRows.filter((row) => !matchesCustomBlacklist([
-      row.canonical_name, row.provider_address, row.province, row.city, row.district, row.township
+      row.canonical_name, row.provider_address, row.province, row.city, row.district, row.township, row.postcode
     ])).map((row) => ({
       addressId: row.id,
       countryCode: 'CN' as const,
@@ -90,9 +94,9 @@ export const loadRandomAddressIndexRows = async (
       regionValues: [row.province],
       cityValues: [row.city],
       districtValues: [row.district],
-      postcodeValues: [],
+      postcodeValues: [row.postcode],
       searchText: [row.province, row.city, row.district, row.township,
-        row.provider_address, row.canonical_name].filter(Boolean).join(' ')
+        row.provider_address, row.canonical_name, row.postcode].filter(Boolean).join(' ')
     }))
   ];
 };
@@ -101,9 +105,10 @@ export const loadRandomAddressVersionToken = async (db: Database): Promise<strin
   const row = await db.prepare(`SELECT
     COALESCE((SELECT MAX(last_seen_at) FROM address_pool),'') AS address_version,
     COALESCE((SELECT MAX(updated_at) FROM cn_communities_v2),'') AS china_version,
-    COALESCE((SELECT version FROM address_pool_revisions WHERE kind='translation'),'') AS translation_version`)
-    .first<{ address_version: string; china_version: string; translation_version: string }>();
-  return `${row?.address_version || ''}:${row?.china_version || ''}:${row?.translation_version || ''}`;
+    COALESCE((SELECT version FROM address_pool_revisions WHERE kind='translation'),'') AS translation_version,
+    COALESCE((SELECT version FROM address_pool_revisions WHERE kind='administrative'),'') AS administrative_version`)
+    .first<{ address_version: string; china_version: string; translation_version: string; administrative_version: string }>();
+  return `${row?.address_version || ''}:${row?.china_version || ''}:${row?.translation_version || ''}${row?.administrative_version ? `:${row.administrative_version}` : ''}`;
 };
 
 const loadAddress = async (

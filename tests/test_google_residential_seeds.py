@@ -31,6 +31,32 @@ def way(identifier, longitude, latitude, address=False):
 
 
 class GoogleResidentialSeedTest(unittest.TestCase):
+    def test_street_mode_uses_a_real_road_point_without_residential_claims(self):
+        sampler = MODULE.SeedSampler(5, None, None, include_streets=True)
+        road = way(5, 77.2, 28.6)
+        road.tags = [SimpleNamespace(k=key, v=value) for key, value in {
+            "highway": "residential", "name": "MG Road"
+        }.items()]
+        road.nodes = road.nodes[:3]
+        sampler.way(road)
+        selected = sampler.selected()
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["match_level"], "street")
+        self.assertEqual(selected[0]["street"], "MG Road")
+        self.assertNotIn("building_class", selected[0])
+        line = MODULE.LineString([(node.location.lon, node.location.lat) for node in road.nodes])
+        self.assertLess(line.distance(MODULE.Point(selected[0]["longitude"], selected[0]["latitude"])), 1e-10)
+
+    def test_mappls_street_mode_keeps_named_roads_and_rejects_unnamed_ways(self):
+        sampler = MODULE.SeedSampler(5, None, None, require_source_address=True, include_streets=True)
+        for identifier, name in [(1, "MG Road"), (2, "MG Road"), (3, "")]:
+            road = way(identifier, 77.2, 28.6)
+            road.tags = [SimpleNamespace(k=key, v=value) for key, value in {
+                "highway": "residential", "name": name
+            }.items()]
+            sampler.way(road)
+        self.assertEqual(len(sampler.selected()), 1)
+
     def test_prioritizes_and_round_robins_administrative_gap_targets(self):
         sampler = MODULE.SeedSampler(3, None, None, [
             {"id": "city:1", "kind": "city", "priority": 0, "deficit": 5,

@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
-import { ControlStore } from '../server/control/store.ts';
 import {
-  createCredentialBroker, loadCredentialBrokerConfiguration
+  ControlStore, GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT
+} from '../server/control/store.ts';
+import {
+  createCredentialBroker, loadCredentialBrokerConfiguration, ProviderPriorityGate
 } from '../server/credential-broker/index.mjs';
+import { executeOperation, operationDefinitions } from '../server/credential-broker/operations.mjs';
 import { CredentialBrokerClient } from '../server/credential-broker/client.mjs';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 
@@ -54,10 +57,107 @@ describe('credential broker', () => {
     provider: 'geoapify', label, secret, qpsLimit: 10_000, quotaLimit: 100, ...options
   });
 
+  it('bounds provider queues and removes cancelled pending work', async () => {
+    const gate = new ProviderPriorityGate({ maxPending: 1 });
+    let release;
+    const first = gate.run('geoapify', 'production', () => new Promise((resolve) => { release = resolve; }));
+    const controller = new AbortController();
+    const second = gate.run('geoapify', 'production', async () => 'second', { signal: controller.signal });
+    await expect(gate.run('geoapify', 'production', async () => 'third')).rejects.toMatchObject({ code: 'BROKER_QUEUE_FULL' });
+    controller.abort();
+    await expect(second).rejects.toMatchObject({ code: 'BROKER_REQUEST_CANCELLED' });
+    release();
+    await first;
+  });
+
+  it('does not cool a credential when an active request is cancelled', async () => {
+    const id = await addGeoapify('Cancelled', 'cancelled-secret');
+    let startedResolve;
+    const started = new Promise((resolve) => { startedResolve = resolve; });
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async (_request, { signal }) => {
+        startedResolve();
+        await new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+    });
+    const controller = new AbortController();
+    const pending = broker.api(new Request('http://broker.internal/v1/requests', {
+      method: 'POST', signal: controller.signal,
+      headers: { Authorization: `Bearer ${tokens.production}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: 'cancelled-active-01', operation: 'geoapify.reverse',
+        parameters: { latitude: 37.5, longitude: 127, language: 'ko' } })
+    }));
+    await started;
+    controller.abort(Object.assign(new Error('fixture cancellation'), { code: 'BROKER_REQUEST_CANCELLED', status: 499 }));
+    expect((await pending).status).toBe(499);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await database.prepare('SELECT status,failure_count FROM provider_credentials WHERE id=?').bind(id).first())
+      .toMatchObject({ status: 'healthy', failure_count: 0 });
+    expect(await database.prepare('SELECT status,outcome FROM credential_broker_dispatches').first())
+      .toEqual({ status: 'unknown', outcome: 'cancelled' });
+  });
+
+  it('signs Youdao batches, redacts both credential parts and counts real requests against the existing quota', async () => {
+    await control.addCredential({ provider: 'youdao', label: 'Youdao',
+      secret: JSON.stringify({ appKey: 'fixture-key', appSecret: 'fixture-secret' }), qpsLimit: 10000, quotaLimit: 1 });
+    let calls = 0;
+    const broker = await createCredentialBroker({ database, masterKey, tokens, fetchImpl: async (request) => {
+      calls += 1;
+      expect(request.url).toBe('https://openapi.youdao.com/v2/api');
+      const body = new URLSearchParams(await request.text());
+      expect(body.getAll('q')).toEqual(['Main Street', 'Road 21']);
+      expect(body.get('signType')).toBe('v3');
+      expect(body.get('sign')).toMatch(/^[a-f0-9]{64}$/u);
+      expect(body.get('to')).toBe('zh-CHS');
+      return Response.json({ errorCode: '0', translateResults: [{ translation: 'fixture-key fixture-secret' }] });
+    } });
+    const input = (requestId) => ({ requestId, operation: 'youdao.translate',
+      parameters: { values: ['Main Street', 'Road 21'], target: 'zh-CN' }, maxDispatches: 1 });
+    const response = await call(broker, 'production', input('youdao-first'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Address-Upstream-Requests')).toBe('1');
+    expect(await response.text()).not.toMatch(/fixture-key|fixture-secret/u);
+    expect((await call(broker, 'production', input('youdao-second'))).status).toBe(429);
+    expect(calls).toBe(1);
+    expect((await (await availability(broker, 'production', ['youdao'])).json()).providers.youdao.available).toBe(false);
+  });
+
+  it('classifies Youdao billing and QPS errors without inventing a daily billing reset', () => {
+    const definition = operationDefinitions['youdao.translate'];
+    expect(definition.classify({ errorCode: '401' })).toMatchObject({ outcome: 'auth', retryAt: null });
+    expect(definition.classify({ errorCode: '202' })).toMatchObject({ outcome: 'auth' });
+    expect(definition.classify({ errorCode: '411' })).toMatchObject({ outcome: 'qps' });
+    expect(definition.validate({ values: ['x'.repeat(5001)], target: 'en' })).toBeNull();
+    expect(definition.validate({ values: ['Road'], target: 'fr' })).toBeNull();
+  });
+
+  it('counts every HTTP dispatch and respects a caller budget across credential rotation', async () => {
+    await addGeoapify('First', 'first-secret');
+    await addGeoapify('Second', 'second-secret');
+    let dispatched = 0;
+    const broker = await createCredentialBroker({ database, masterKey, tokens,
+      fetchImpl: async () => { dispatched += 1; return new Response('{}', { status: 503 }); }
+    });
+    const client = new CredentialBrokerClient({ url: 'http://broker.internal', token: tokens.production,
+      fetchImpl: (url, init) => broker.api(new Request(url, init))
+    });
+    let accounted = 0;
+    await expect(client.request('geoapify.reverse', reverse('fixture-budget').parameters, {
+      maxDispatches: 1, onDispatch: (count) => { accounted += count; }
+    })).rejects.toMatchObject({ code: 'SOURCE_NETWORK_UNAVAILABLE' });
+    expect(dispatched).toBe(1);
+    expect(accounted).toBe(1);
+    expect(await database.prepare('SELECT COUNT(*) AS total FROM credential_broker_dispatches').first('total')).toBe(1);
+  });
+
   it('dispatches Google v4 through the broker and enforces the pre-existing monthly usage baseline', async () => {
     await control.addCredential({
       provider: 'google-geocoding', label: 'Google', secret: 'google-secret', qpsLimit: 10_000,
-      quotaLimit: 3, quotaUsedBaseline: 2
+      quotaLimit: GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT,
+      quotaUsedBaseline: GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT - 1
     });
     let calls = 0;
     const broker = await createCredentialBroker({
@@ -76,6 +176,22 @@ describe('credential broker', () => {
     expect((await call(broker, 'production', input('request-google-01'))).status).toBe(200);
     expect((await call(broker, 'production', input('request-google-02'))).status).toBe(429);
     expect(calls).toBe(1);
+  });
+
+  it('preserves actual request accounting when dispatch-result persistence fails', async () => {
+    await addGeoapify('Primary', 'geoapify-secret');
+    const broker = await createCredentialBroker({ database, masterKey, tokens,
+      fetchImpl: async () => Response.json({ results: [] })
+    });
+    broker.store.report = async () => { throw new Error('Fixture dispatch persistence failure'); };
+    const client = new CredentialBrokerClient({ url: 'http://broker.internal', token: tokens.production,
+      fetchImpl: (url, init) => broker.api(new Request(url, init))
+    });
+    let accounted = 0;
+    await expect(client.request('geoapify.reverse', reverse('fixture-budget-persistence').parameters, {
+      maxDispatches: 1, onDispatch: (count) => { accounted += count; }
+    })).rejects.toMatchObject({ code: 'BROKER_INTERNAL_ERROR' });
+    expect(accounted).toBe(1);
   });
 
   it('requires authentication and rejects arbitrary proxy input before dispatch', async () => {
@@ -175,7 +291,13 @@ describe('credential broker', () => {
     const broker = await createCredentialBroker({
       database, masterKey, tokens,
       fetchImpl: async (request) => {
-        const key = new URL(request.url).searchParams.get('key');
+        const url = new URL(request.url);
+        const key = url.searchParams.get('key');
+        expect(url.pathname).toBe('/v5/place/text');
+        expect(Object.fromEntries(url.searchParams)).toEqual({
+          key, region: '110105', types: '120302', city_limit: 'true', page_size: '25',
+          page_num: '1', show_fields: 'business'
+        });
         requestedKeys.push(key);
         return Response.json(key === 'amap-exhausted-secret'
           ? { status: '0', infocode: '10003', info: 'DAILY_QUERY_OVER_LIMIT' }
@@ -194,6 +316,132 @@ describe('credential broker', () => {
       expect.objectContaining({ label: 'Exhausted', status: 'quota_exhausted' }),
       expect.objectContaining({ label: 'Available', status: 'healthy' })
     ]));
+  });
+
+  it('falls back from non-JSON AMap v5 once and reserves quota for every upstream request', async () => {
+    await control.addCredential({
+      provider: 'amap', label: 'AMap', secret: 'amap-fallback-secret', qpsLimit: 10_000, quotaLimit: 3
+    });
+    const paths = [];
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async (request) => {
+        const url = new URL(request.url);
+        paths.push(url.pathname);
+        if (url.pathname === '/v5/place/text') return new Response('<html>Unavailable</html>');
+        expect(Object.fromEntries(url.searchParams)).toEqual({
+          key: 'amap-fallback-secret', city: '110105', types: '120302', citylimit: 'true',
+          offset: '25', page: '1', extensions: 'all', keywords: 'fixture'
+        });
+        return Response.json({ status: '1', pois: [] });
+      }
+    });
+    const input = (requestId) => ({ requestId, operation: 'amap.place-search',
+      parameters: { region: '110105', page: 1, subdivision: 'fixture' } });
+    expect((await call(broker, 'production', input('amap-fallback-01'))).status).toBe(200);
+    expect((await call(broker, 'production', input('amap-fallback-02'))).status).toBe(200);
+    expect((await call(broker, 'production', input('amap-fallback-03'))).status).toBe(429);
+    expect(paths).toEqual(['/v5/place/text', '/v3/place/text', '/v3/place/text']);
+    expect(await database.prepare('SELECT COUNT(*) AS total FROM credential_broker_dispatches').first('total')).toBe(3);
+    expect(await database.prepare("SELECT COUNT(*) AS total FROM credential_broker_dispatches WHERE status='dispatched'")
+      .first('total')).toBe(0);
+  });
+
+  it('stops an AMap compatibility failure after v3 also returns non-JSON', async () => {
+    await control.addCredential({
+      provider: 'amap', label: 'AMap', secret: 'amap-fallback-secret', qpsLimit: 10_000, quotaLimit: 10
+    });
+    let calls = 0;
+    const broker = await createCredentialBroker({ database, masterKey, tokens, fetchImpl: async () => {
+      calls += 1;
+      return new Response('<html>Unavailable</html>');
+    } });
+    const response = await call(broker, 'production', {
+      requestId: 'amap-invalid-both-01', operation: 'amap.place-search', parameters: { region: '110105', page: 1 }
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ code: 'UPSTREAM_INVALID_JSON' });
+    expect(calls).toBe(2);
+    expect((await control.listCredentials())[0].status).toBe('healthy');
+  });
+
+  it('preserves the upstream error code when a request fails before receiving a response', async () => {
+    const result = await executeOperation({
+      definition: operationDefinitions['amap.place-search'],
+      parameters: { region: '110000', page: 1, subdivision: '' },
+      secret: 'network-fixture-key',
+      fetchImpl: async () => { throw Object.assign(new Error('ECONNRESET'), { code: 'ECONNRESET' }); }
+    });
+    expect(result).toMatchObject({ type: 'retry', outcome: 'network', providerCode: 'ECONNRESET' });
+  });
+
+  it('does not relabel an upstream network failure as a rate limit after key rotation', async () => {
+    await addGeoapify('Network failure', 'geoapify-network-secret');
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async () => { throw Object.assign(new Error('ECONNRESET'), { code: 'ECONNRESET' }); }
+    });
+    const result = await call(broker, 'production', reverse('request-network-01'));
+    expect(result.status).toBe(503);
+    expect(await result.json()).toMatchObject({ code: 'SOURCE_NETWORK_UNAVAILABLE' });
+  });
+
+  it('classifies Baidu concurrency and configuration failures explicitly', () => {
+    const classify = operationDefinitions['baidu.place-search'].classify;
+    expect(classify({ status: 401, message: 'concurrency exceeded' })).toMatchObject({
+      type: 'retry', outcome: 'qps', providerCode: '401'
+    });
+    expect(classify({ status: 210, message: 'IP validation failed' })).toMatchObject({
+      type: 'retry', outcome: 'auth', providerCode: '210'
+    });
+    expect(classify({ status: 240, message: 'service disabled' })).toMatchObject({
+      type: 'retry', outcome: 'auth', providerCode: '240'
+    });
+  });
+
+  it('updates only the matching quota period after an upstream daily quota response', async () => {
+    const id = await control.addCredential({
+      provider: 'amap', label: 'AMap dual window', secret: 'amap-dual-window-secret', qpsLimit: 10_000,
+      quotaLimit: 100, quotaPeriod: 'day'
+    });
+    const row = await database.prepare('SELECT quota_scope_id,quota_service,quota_timezone_offset FROM provider_credentials WHERE id=?')
+      .bind(id).first();
+    const now = new Date().toISOString();
+    await database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) VALUES (?,?,?,'month',1000,?,'admin',1,?,?)`).bind(
+      id, row.quota_service, row.quota_scope_id, row.quota_timezone_offset, now, now
+    ).run();
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async () => Response.json({ status: '0', infocode: '10003', info: 'DAILY_QUERY_OVER_LIMIT' })
+    });
+    expect((await call(broker, 'production', {
+      requestId: 'request-amap-daily-window', operation: 'amap.place-search',
+      parameters: { region: '110000', page: 1, subdivision: '' }
+    })).status).toBe(429);
+    const observations = (await database.prepare(`SELECT period,limit_count FROM provider_quota_observations
+      WHERE credential_id=? ORDER BY period`).bind(id).all()).results;
+    expect(observations).toEqual([{ period: 'day', limit_count: 100 }]);
+  });
+
+  it('records Tencent X-LIMIT usage without requiring a quota error', async () => {
+    const id = await control.addCredential({
+      provider: 'tencent', label: 'Tencent headers', secret: 'tencent-headers-secret', qpsLimit: 5, quotaLimit: 10_000
+    });
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async () => new Response(JSON.stringify({ status: 0, data: [] }), {
+        headers: { 'content-type': 'application/json', 'X-Limit': 'current_qps=1;limit_qps=5;current_pv=17;limit_pv=200' }
+      })
+    });
+    expect((await call(broker, 'production', {
+      requestId: 'request-tencent-headers', operation: 'tencent.place-search',
+      parameters: { region: '北京市', page: 1, subdivision: '' }
+    })).status).toBe(200);
+    const observation = await database.prepare(`SELECT used_count,limit_count,period
+      FROM provider_quota_observations WHERE credential_id=? AND service='place-search'`).bind(id).first();
+    expect(observation).toMatchObject({ used_count: 17, limit_count: 200, period: 'day' });
   });
 
   it('deduplicates simultaneous requests with the same identity', async () => {

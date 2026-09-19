@@ -1,20 +1,23 @@
 import { openRuntimeDatabases } from './runtime';
 import { ensureLocationCatalog } from './bootstrap';
 import { applyAdministrativeCatalogOverrides } from './administrative-catalog-overrides';
-import { refreshResidentialCoverage } from './residential-coverage.mjs';
+import { refreshIndexedResidentialCoverage } from './residential-coverage.mjs';
 import { reconcilePublishedPool } from './published-pool.mjs';
-import { refreshStaleAddressGenerationIndexes } from './generation-index.mjs';
+import { refreshAddressGenerationIndex, refreshStaleAddressGenerationIndexes } from './generation-index.mjs';
+import { refreshAddressCoverage } from '../control/coverage';
 
 const databases = await openRuntimeDatabases();
-await refreshStaleAddressGenerationIndexes(databases.address);
-await ensureLocationCatalog(databases.address);
-if (await applyAdministrativeCatalogOverrides(databases.address)) {
-  await refreshResidentialCoverage(databases.address, 'HK');
-}
-const reconciled = await reconcilePublishedPool(databases.address, ['HK']);
-for (const result of reconciled) {
-  if (result.before !== result.after) {
-    await refreshResidentialCoverage(databases.address, result.countryCode);
+try {
+  await refreshStaleAddressGenerationIndexes(databases.address);
+  if (!process.argv.includes('--coverage-only')) {
+    await ensureLocationCatalog(databases.address);
+    await applyAdministrativeCatalogOverrides(databases.address);
+    for (const country of ['HK', 'SG']) await refreshAddressGenerationIndex(databases.address, country);
+    await reconcilePublishedPool(databases.address, ['HK']);
   }
+  const coverageCountries = await refreshIndexedResidentialCoverage(databases.address);
+  await refreshAddressCoverage(databases.address, { useGenerationIndex: true });
+  console.log(JSON.stringify({ event: 'migration_coverage_ready', countries: coverageCountries, at: new Date().toISOString() }));
+} finally {
+  await databases.close();
 }
-await databases.close();

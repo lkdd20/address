@@ -1,6 +1,6 @@
 {
   "name": "address",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -14,8 +14,9 @@
     "start": "tsx --env-file-if-exists=.env server/api/server.ts",
     "build": "astro build",
     "check": "astro check && tsc -p server/api/tsconfig.json --noEmit",
-    "test": "vitest run tests",
+    "test": "vitest run --dir tests --maxWorkers=2 --testTimeout=15000",
     "test:admin-e2e": "npm run build && node tests/admin-console.e2e.mjs",
+    "test:ui-e2e": "npm run build && node --import tsx tests/ui-reliability.e2e.mjs",
     "test:watch": "vitest tests",
     "data:regions": "node scripts/update-regions.mjs",
     "data:catalog": "node scripts/sync-location-catalog.mjs",
@@ -32,7 +33,7 @@
     "db:migrate": "tsx --env-file-if-exists=.env server/database/migrate.ts",
     "test:catalog": "node scripts/validate-location-catalog.mjs",
     "test:address-pool": "vitest run tests/postgres-database.test.mjs tests/address-pool-v2.test.mjs",
-    "check:production": "node scripts/check-production-readiness.mjs",
+    "check:production": "node --import tsx scripts/check-production-readiness.mjs",
     "check:public": "node scripts/check-public-release.mjs",
     "test:api-live": "node scripts/validate-live-api.mjs",
     "test:addresses-live": "node scripts/validate-live-addresses.mjs",
@@ -48,10 +49,11 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@faker-js/faker": "^10.5.0",
     "@hono/node-server": "latest",
-    "astro": "7.2.4",
-    "hono": "4.13.3",
+    "astro": "7.2.8",
+    "hono": "4.13.5",
+    "libphonenumber-js": "^1.13.12",
     "lucide-react": "^1.28.0",
-    "maplibre-gl": "^5.24.0",
+    "maplibre-gl": "6.4.1",
     "opencc-js": "^1.4.1",
     "pg": "^8.22.0",
     "pinyin-pro": "^3.28.1",
@@ -71,6 +73,9 @@
     "playwright": "^1.61.1",
     "tsx": "latest",
     "typescript": "latest",
-    "vitest": "latest"
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "devalue": "5.9.4"
   }
 }

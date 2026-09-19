@@ -257,6 +257,30 @@ describe('address sync coordinator', () => {
     });
   });
 
+  it('cancels an active worker during service shutdown', async () => {
+    const started = deferred();
+    const aborted = deferred();
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(),
+      idFactory: () => 'job-shutdown',
+      runSync: ({ signal }) => new Promise((_resolve, reject) => {
+        started.resolve();
+        signal.addEventListener('abort', () => {
+          aborted.resolve();
+          reject(Object.assign(new Error('child process aborted'), { code: 'SYNC_PROCESS_ABORTED' }));
+        }, { once: true });
+      })
+    });
+    const result = await coordinator.trigger('queue');
+    await started.promise;
+    await expect(coordinator.cancelActive()).resolves.toBe(true);
+    await aborted.promise;
+    await coordinator.waitForIdle();
+    await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'SYNC_JOB_INTERRUPTED'
+    });
+  });
+
   it('keeps the execution lock until an aborted worker has actually stopped', async () => {
     const worker = deferred();
     const aborted = deferred();

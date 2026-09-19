@@ -106,9 +106,10 @@ export const validateRuntimePolicy = (input) => ({
   cpuConcurrency: integer(input.cpuConcurrency ?? DEFAULT_CPU_CONCURRENCY, 1, 4, 'INVALID_CPU_CONCURRENCY')
 });
 
-const migratedDatabases = new WeakSet();
-
-const hexName = (value) => Buffer.from(String(value), 'utf8').toString('hex').toUpperCase();
+const hexName = (value) => Buffer.from(String(value), 'utf8').toString('hex');
+export const canonicalPolicyNodeKey = (value) => String(value || '').replace(
+  /^([A-Z]{2}:(?:a1|loc|dist):)([a-f\d:]+)$/iu, (_match, prefix, hex) => `${prefix.slice(0, 2).toUpperCase()}${prefix.slice(2).toLowerCase()}${hex.toLowerCase()}`
+);
 
 export const CHINA_NODE_TARGET_SEEDS = { 北京市: 2_000, 上海市: 2_000, 重庆市: 2_000, 天津市: 2_000 };
 
@@ -127,13 +128,36 @@ const NODE_OVERRIDES_DDL = `CREATE TABLE sync_node_overrides (
   updated_at TEXT NOT NULL
 )`;
 
-const ensurePolicySchema = async (database, now) => {
-  if (migratedDatabases.has(database)) return;
-  migratedDatabases.add(database);
+const ensurePolicySchema = async (database) => {
+  const rows = (await database.prepare('SELECT node_key FROM sync_node_overrides').all()).results;
+  if (!rows.some((row) => canonicalPolicyNodeKey(row.node_key) !== row.node_key)) return;
+  const migrate = async (transaction) => {
+    await transaction.exec("SET LOCAL lock_timeout TO '2s'");
+    await transaction.exec('LOCK TABLE sync_node_overrides IN SHARE ROW EXCLUSIVE MODE');
+    const current = (await transaction.prepare(`SELECT * FROM sync_node_overrides ORDER BY updated_at DESC,node_key FOR UPDATE`).all()).results;
+    const groups = new Map();
+    for (const row of current) {
+      const key = canonicalPolicyNodeKey(row.node_key);
+      const group = groups.get(key) || [];
+      group.push(row); groups.set(key, group);
+    }
+    for (const [key, group] of groups) {
+      const legacy = group.filter((row) => row.node_key !== key);
+      if (!legacy.length) continue;
+      const chosen = group.find((row) => row.node_key === key) || group[0];
+      await transaction.prepare(`INSERT INTO sync_node_overrides(node_key,country_code,level,target_count,min_count,updated_at)
+        VALUES (?,?,?,?,?,?) ON CONFLICT(node_key) DO NOTHING`).bind(
+        key, chosen.country_code, chosen.level, chosen.target_count, chosen.min_count, chosen.updated_at
+      ).run();
+      for (const row of legacy) await transaction.prepare('DELETE FROM sync_node_overrides WHERE node_key=?').bind(row.node_key).run();
+    }
+  };
+  if (database.transactions?.getStore()?.active) await migrate(database);
+  else await database.transaction(migrate);
 };
 
 export const ensureAddressPolicies = async (database, now = new Date().toISOString()) => {
-  await ensurePolicySchema(database, now);
+  await ensurePolicySchema(database);
   const statements = Object.entries(ADDRESS_POLICY_DEFAULTS).map(([countryCode, value]) => database.prepare(`
     INSERT INTO sync_country_policies(
       country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,
@@ -281,7 +305,8 @@ export const listNodePolicies = async (database, parentKey) => {
 };
 
 export const upsertNodePolicy = async (database, nodeKey, targetCount) => {
-  const key = String(nodeKey || '');
+  await ensureAddressPolicies(database);
+  const key = canonicalPolicyNodeKey(nodeKey);
   const target = integer(targetCount, 0, 1_000_000, 'INVALID_POLICY_TARGET');
   const node = await database.prepare('SELECT country_code,level FROM admin_coverage_stats WHERE node_key=?').bind(key).first();
   if (!node || Number(node.level) < 1) throw new Error('POLICY_NODE_NOT_FOUND');
@@ -293,10 +318,11 @@ export const upsertNodePolicy = async (database, nodeKey, targetCount) => {
 };
 
 export const deleteNodePolicy = async (database, nodeKey) => {
+  await ensureAddressPolicies(database);
   // Keep the row as a tombstone so seeded defaults are not resurrected and any
   // min_count target on the same node survives clearing the level limit.
   await database.prepare('UPDATE sync_node_overrides SET target_count=NULL,updated_at=? WHERE node_key=?')
-    .bind(new Date().toISOString(), String(nodeKey || '')).run();
+    .bind(new Date().toISOString(), canonicalPolicyNodeKey(nodeKey)).run();
 };
 
 export const listCountryNodeTargets = async (database, countryCode) => {
@@ -331,7 +357,7 @@ export const listCountryNodeTargets = async (database, countryCode) => {
 
 export const upsertNodeTarget = async (database, nodeKey, minCount) => {
   await ensureAddressPolicies(database);
-  const key = String(nodeKey || '');
+  const key = canonicalPolicyNodeKey(nodeKey);
   const target = integer(minCount, 0, 50_000, 'INVALID_POLICY_NODE_TARGET');
   const node = await database.prepare('SELECT country_code,level FROM admin_coverage_stats WHERE node_key=?').bind(key).first();
   if (!node || Number(node.level) < 1) throw new Error('POLICY_NODE_NOT_FOUND');
@@ -346,7 +372,7 @@ export const deleteNodeTarget = async (database, nodeKey) => {
   await ensureAddressPolicies(database);
   // Tombstone instead of DELETE so idempotent seeding cannot resurrect the override.
   await database.prepare('UPDATE sync_node_overrides SET min_count=NULL,updated_at=? WHERE node_key=?')
-    .bind(new Date().toISOString(), String(nodeKey || '')).run();
+    .bind(new Date().toISOString(), canonicalPolicyNodeKey(nodeKey)).run();
 };
 
 export const loadImportPolicy = async (database, countryCode, fallbackMaxRecords, fallbackPerLocality) => {
@@ -376,7 +402,7 @@ export const loadImportPolicy = async (database, countryCode, fallbackMaxRecords
     WHERE country_code=? AND (target_count IS NOT NULL OR min_count IS NOT NULL)`)
     .bind(countryCode).all()).results;
   const entries = (field) => overrides.filter((row) => row[field] != null)
-    .map((row) => [String(row.node_key), Number(row[field])]);
+    .map((row) => [canonicalPolicyNodeKey(row.node_key), Number(row[field])]);
   return {
     enabled: true,
     targetCount: country.targetCount,
@@ -390,7 +416,7 @@ export const loadImportPolicy = async (database, countryCode, fallbackMaxRecords
 };
 
 export const policyNodeKeys = (record) => {
-  const hex = (value) => Buffer.from(String(value || ''), 'utf8').toString('hex').toUpperCase();
+  const hex = (value) => hexName(value || '');
   const country = record.countryCode;
   const admin1 = String(record.components?.admin1 || record.admin1 || '').trim();
   const locality = String(record.components?.locality || record.components?.postalLocality || record.locality || '').trim();
@@ -405,7 +431,7 @@ export const applyHierarchicalQuota = (records, policyValue) => {
   const counts = [new Map(), new Map(), new Map(), new Map()];
   const selected = [];
   const selectedIndexes = new Set();
-  const overrides = policyValue.overrides || new Map();
+  const overrides = new Map([...(policyValue.overrides || [])].map(([key, value]) => [canonicalPolicyNodeKey(key), value]));
   const hardLimit = Number.isFinite(policyValue.maxRecords)
     ? Math.max(0, Number(policyValue.maxRecords)) : Number.POSITIVE_INFINITY;
   const keysByIndex = records.map(policyNodeKeys);
@@ -450,7 +476,7 @@ export const applyHierarchicalQuota = (records, policyValue) => {
   // level2_min, else a raised lowest-node minPerNode), largest deficit first.
   // Level caps still bind through canSelect, so a floor never overrides a limit
   // and a node whose source lacks candidates simply stays below its floor.
-  const nodeFloors = policyValue.nodeFloors || new Map();
+  const nodeFloors = new Map([...(policyValue.nodeFloors || [])].map(([key, value]) => [canonicalPolicyNodeKey(key), value]));
   const levelMins = [Number(policyValue.level1Min) || 0, Number(policyValue.level2Min) || 0, 0, 0];
   const minPerNode = Number(policyValue.minPerNode) || 0;
   const floorNodes = new Map();

@@ -74,7 +74,7 @@ describe('China address domain rules', () => {
     })).toBe('河北大街199号');
   });
 
-  it('shows postcode as a standalone field but keeps it out of filters and the complete address', () => {
+  it('shows postcode as a standalone field and includes it in the complete address', () => {
     const schema = countryByCode.get('CN')!.addressSchema;
     expect(schema.filters).toEqual(['region', 'city', 'district']);
     expect(schema.resultFields.map(({ field }) => field)).toContain('postcode');
@@ -94,8 +94,8 @@ describe('China address domain rules', () => {
     expect(presented).toEqual(address.components);
     expect(bundle.address.coordinates).toEqual(address.coordinates);
     expect(bundle.address.unitProvenance).toBe('none');
-    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants.native}`);
-    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants['zh-CN']}`);
+    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants.native} 邮编064000`);
+    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants['zh-CN']} 邮编064000`);
 
     const english = bundle.addressFormats.en.singleLine;
     const englishCommunity = 'Guangming Residential Community';
@@ -108,7 +108,7 @@ describe('China address domain rules', () => {
     }
     expect(english).not.toMatch(/[\u3400-\u9fff]/u);
     for (const language of ['native', 'en', 'zh-CN'] as const) {
-      expect(bundle.addressFormats[language].singleLine).not.toContain(address.components.postcode);
+      expect(bundle.addressFormats[language].singleLine).toContain(address.components.postcode);
     }
     expect(new URL(bundle.googleMaps.openUrl).searchParams.get('query')).toBe('39.832,118.162');
     const searchQuery = new URL(bundle.googleMaps.searchUrl!).searchParams.get('query')!;
@@ -132,12 +132,12 @@ describe('China address domain rules', () => {
     const bundle = generateBundle(chinaAddress(true), true, 'cn-municipality-seed', undefined, now);
     for (const language of ['native', 'zh-CN'] as const) {
       expect(bundle.addressFormats[language].singleLine.match(/北京市/g)).toHaveLength(1);
-      expect(bundle.addressFormats[language].singleLine).not.toContain('100102');
+      expect(bundle.addressFormats[language].singleLine).toContain('100102');
     }
     const english = bundle.addressFormats.en.singleLine;
     expect(english.match(/Beijing/g)).toHaveLength(1);
-    expect(english).toContain('Chaoyang District, Beijing, CHINA');
-    expect(english).not.toContain('100102');
+    expect(english).toContain('Chaoyang District, Beijing, 100102, CHINA');
+    expect(english).toContain('100102');
     expect(english).not.toMatch(/[\u3400-\u9fff]/u);
   });
 

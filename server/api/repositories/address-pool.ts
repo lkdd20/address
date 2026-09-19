@@ -37,13 +37,13 @@ const normalizedAliases = (values: Array<string | undefined>): string[] => [...n
   .map((value) => value?.normalize('NFKC').trim().toLocaleLowerCase())
   .filter((value): value is string => Boolean(value)))];
 
-const aliasClause = (columns: string[], values: string[], bindings: unknown[]): string | undefined => {
+const aliasClause = (columns: string[], values: string[]): { sql: string; values: string[] } | undefined => {
   if (!values.length) return undefined;
   const placeholders = values.map(() => '?').join(',');
-  return `(${columns.map((column) => {
-    bindings.push(...values);
-    return `LOWER(${column}) IN (${placeholders})`;
-  }).join(' OR ')})`;
+  return {
+    sql: `(${columns.map((column) => `LOWER(${column}) IN (${placeholders})`).join(' OR ')})`,
+    values: columns.flatMap(() => values)
+  };
 };
 
 const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefined => {
@@ -142,16 +142,20 @@ export const pickAddressPoolAddress = async (
 
   const regionClause = aliasClause(
     ['admin1', 'admin1_code'],
-    normalizedAliases([filters.region, target?.region, ...target?.regionAliases || []]),
-    bindings
+    normalizedAliases([filters.region, target?.region, ...target?.regionAliases || []])
   );
-  if ((filters.region || target?.region) && regionClause) clauses.push(regionClause);
+  if ((filters.region || target?.region) && regionClause) {
+    clauses.push(regionClause.sql);
+    bindings.push(...regionClause.values);
+  }
   const cityClause = aliasClause(
     ['locality', 'postal_locality', 'district'],
-    normalizedAliases([filters.city, target?.city, ...target?.cityAliases || []]),
-    bindings
+    normalizedAliases([filters.city, target?.city, ...target?.cityAliases || []])
   );
-  if ((filters.city || target?.city) && cityClause) clauses.push(cityClause);
+  if ((filters.city || target?.city) && cityClause) {
+    clauses.push(cityClause.sql);
+    bindings.push(...cityClause.values);
+  }
   const selectedPostcode = filters.postcode || target?.postcode;
   if (selectedPostcode) {
     clauses.push(`LOWER(REPLACE(postcode, ' ', '')) = ?`);

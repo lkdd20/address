@@ -1,10 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { openTestDatabase } from './helpers/postgres-test-database.mjs';
 import {
   enrichPickedAddress,
+  loadAddressPoolV2AddressById,
   pickAddressPoolV2Address,
   pickNearestAddressPoolV2Address,
-  repairHongKongNativeVariants
+  repairHongKongNativeVariants,
+  storedAddressPoolV2RowCanRecoverTranslations,
+  storedAddressPoolV2RowIsPublishable
 } from '../server/api/repositories/address-pool-v2';
 
 describe('unified PostgreSQL address schema', () => {
@@ -24,6 +28,20 @@ describe('unified PostgreSQL address schema', () => {
 });
 
 describe('ADDRESS_DB v2 repository', () => {
+  it('does not erase a source-only Latin street while repairing a Han-script variant', () => {
+    const native = { houseNumber: '12', street: 'Example Road', locality: '東區', admin1: '香港島', buildingName: '示例大廈', postcode: '' };
+    const variants = { native, en: native, 'zh-CN': native };
+    expect(repairHongKongNativeVariants('HK', variants).native.street).toBe('Example Road');
+    expect(variants.native).toBe(native);
+  });
+
+  it.each(['HK', 'TW'])('repairs individual %s native fields from an existing Han counterpart', (country) => {
+    const native = { houseNumber: '12', street: 'Example Road', locality: '東區', admin1: '香港島', postcode: '' };
+    const variants = { native, en: native, 'zh-CN': { ...native, street: '示例路' } };
+    expect(repairHongKongNativeVariants(country, variants).native.street).toBe('示例路');
+    expect(variants.native.street).toBe('Example Road');
+  });
+
   it('repairs legacy Hong Kong native variants from simplified Chinese instead of exposing English', () => {
     const variants = {
       native: { houseNumber: '33', street: 'OI SHUN ROAD', locality: 'EASTERN DISTRICT', postcode: '' },
@@ -93,6 +111,30 @@ describe('ADDRESS_DB v2 repository', () => {
     dataset_id: 'fixture-dataset', dataset_version: '2026-07-15',
     source_updated_at: '2026-07-15T00:00:00Z', imported_at: '2026-07-16T00:00:00Z'
   };
+
+  it('keeps date-only expiry valid through the end of its UTC date', () => {
+    expect(storedAddressPoolV2RowIsPublishable({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-19T23:59:59Z'))).toBe(true);
+    expect(storedAddressPoolV2RowCanRecoverTranslations({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-19T12:00:00Z'))).toBe(true);
+    expect(storedAddressPoolV2RowIsPublishable({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-20T00:00:00Z'))).toBe(false);
+  });
+
+  it.each(['houseNumber', 'postcode', 'admin1Code', 'street'])('rejects a translated %s that changes source identifiers', (field) => {
+    const variants = JSON.parse(row.component_variants_json);
+    variants.en[field] = field === 'street' ? 'Eifuku 999' : '999';
+    const candidate = { ...row, component_variants_json: JSON.stringify(variants) };
+    expect(storedAddressPoolV2RowIsPublishable(candidate)).toBe(false);
+    expect(storedAddressPoolV2RowCanRecoverTranslations(candidate)).toBe(true);
+  });
+
+  it.each(['native', 'en', 'zh-CN'])('separates source eligibility from a non-residential %s translation', (language) => {
+    const components = JSON.parse(row.component_variants_json);
+    const addresses = JSON.parse(row.address_variants_json);
+    components[language].buildingName = 'government office';
+    addresses[language] += ', government office';
+    const candidate = { ...row, component_variants_json: JSON.stringify(components), address_variants_json: JSON.stringify(addresses) };
+    expect(storedAddressPoolV2RowCanRecoverTranslations(candidate)).toBe(language !== 'native');
+    expect(storedAddressPoolV2RowIsPublishable(candidate)).toBe(false);
+  });
 
   it('uses normalized keys and preserves localized variants and provenance', async () => {
     const statements = [];
@@ -168,6 +210,81 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?)');
   });
 
+  it('applies district filters on the database generation path', async () => {
+    const statements = [];
+    const district = '阿佐谷';
+    const native = JSON.parse(row.component_variants_json).native;
+    const english = JSON.parse(row.component_variants_json).en;
+    const chinese = JSON.parse(row.component_variants_json)['zh-CN'];
+    const database = {
+      exec() {},
+      prepare(sql) {
+        statements.push(sql);
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            if (sql.includes('FROM address_generation_index') || sql.startsWith('SELECT id FROM address_pool')) {
+              return { results: sql.includes('district_key') ? [{ id: 'district-match' }] : [] };
+            }
+            return { results: sql.includes('FROM address_pool_runtime')
+              ? [{ ...row, id: 'district-match', district,
+                component_variants_json: JSON.stringify({
+                  native: { ...native, district }, en: { ...english, district: 'Asagaya' },
+                  'zh-CN': { ...chinese, district }
+                }) }]
+              : [] };
+          }
+        };
+        return statement;
+      }
+    };
+
+    await expect(pickAddressPoolV2Address(database, 'JP', false, { district }, undefined, 'district-filter'))
+      .resolves.toMatchObject({ id: 'pool-v2-district-match', components: { district } });
+    expect(statements.some((sql) => sql.includes('district_key'))).toBe(true);
+  });
+
+  it('keeps SQL placeholders aligned with bindings for multi-alias city filters', async () => {
+    const captured = [];
+    const database = {
+      exec() {},
+      prepare(sql) {
+        const statement = {
+          bind(...values) {
+            statement.values = values;
+            captured.push({ sql, bindings: values.length });
+            return statement;
+          },
+          async all() { return { results: [] }; },
+          async first() { return null; }
+        };
+        return statement;
+      }
+    };
+    const target = {
+      region: '安大略省', regionNative: '安大略省', regionCode: 'ON',
+      regionAliases: ['Ontario', '安大略省', 'ON'],
+      city: '多伦多', cityNative: '多伦多', cityAliases: ['Toronto', '多伦多'],
+      bucket: 'city-1'
+    };
+    await pickAddressPoolV2Address(database, 'CA', false, { city: 'Toronto', region: '安大略省' }, target, 'binding-alignment');
+    expect(captured.length).toBeGreaterThan(0);
+    for (const { sql, bindings } of captured) {
+      expect(sql.match(/\?/gu)?.length || 0).toBe(bindings);
+    }
+  });
+
+  it.each([
+    ['google-residential-enrichment-th', 'openstreetmap'], ['mappls-in-residential', 'openstreetmap'],
+    ['singapore-hdb-residential', 'hdb-property'], ['korea-kapt-residential', 'korea-kapt']
+  ])('keeps independent residential evidence separate from API address evidence for %s', async (sourceId, expected) => {
+    const value = { ...row, source_id: sourceId, record_url: 'https://example.test/geocoder' };
+    const db = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: value.id }, value] }) }) }) };
+    const address = await pickAddressPoolV2Address(db, 'JP', false, {}, undefined, 'provenance');
+    expect(address?.evidence.find(({ type }) => type === 'residential_use')?.sourceId).toBe(expected);
+    expect(address?.evidence.find(({ type }) => type === 'address_existence')?.sourceUrl).toBe(value.record_url);
+  });
+
   it('does not publish records whose stored English or Chinese variants still use the native script', async () => {
     const untranslated = {
       ...row,
@@ -188,6 +305,14 @@ describe('ADDRESS_DB v2 repository', () => {
     };
     await expect(pickAddressPoolV2Address(database, 'JP', false, {}, undefined, 'translation-gate'))
       .resolves.toBeUndefined();
+  });
+
+  it('does not publish a Chinese variant with an untranslated required field', () => {
+    const components = JSON.parse(row.component_variants_json);
+    components['zh-CN'].street = 'Eifuku';
+    expect(storedAddressPoolV2RowIsPublishable({
+      ...row, component_variants_json: JSON.stringify(components)
+    })).toBe(false);
   });
 
   it('skips a Singapore row whose stored Chinese semantic fields are entirely Latin', async () => {
@@ -272,6 +397,20 @@ describe('ADDRESS_DB v2 repository', () => {
     await expect(pickAddressPoolV2Address(broken, 'US', false, {}, undefined, 'seed')).rejects.toThrow('connection terminated');
   });
 
+  it('does not load an expired address by ID', async () => {
+    const database = {
+      prepare() {
+        const statement = {
+          bind() { return statement; },
+          async first() { return { ...row, expires_at: '2000-01-01T00:00:00Z' }; }
+        };
+        return statement;
+      }
+    };
+    await expect(loadAddressPoolV2AddressById(database, 'pool-v2-fixture-address', new Date('2026-07-20T00:00:00Z')))
+      .resolves.toBeUndefined();
+  });
+
   it('skips a v2 US row whose state field contains Philadelphia', async () => {
     const components = {
       houseNumber: '10', street: 'Market Street', locality: 'Philadelphia', postalLocality: 'Philadelphia',
@@ -315,7 +454,7 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?,?)');
   });
 
-  it('blocks missing ZIP rows and drops legacy numeric building names', async () => {
+  it('preserves real premises without a ZIP and drops legacy numeric building names', async () => {
     const components = {
       houseNumber: '2704', street: 'College Avenue', locality: 'Berkeley', postalLocality: 'Berkeley',
       admin1: 'California', admin1Code: 'CA', postcode: '94704', buildingName: '3'
@@ -348,7 +487,8 @@ describe('ADDRESS_DB v2 repository', () => {
       }
     };
     const address = await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'unit-seed');
-    expect(address).toMatchObject({ id: 'pool-v2-legacy-unit', unitStatus: 'not_present', unitProvenance: 'none' });
+    expect(address).toMatchObject({ id: 'pool-v2-missing-zip', components: { houseNumber: '2704', postcode: '' },
+      unitStatus: 'not_present', unitProvenance: 'none' });
     expect(address?.components).not.toHaveProperty('unit');
     expect(address?.components).not.toHaveProperty('buildingName');
     expect(address?.nativeAddress).not.toMatch(/^3,/u);
@@ -425,6 +565,21 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(enriched.componentVariants.native.admin1).toBe('กรุงเทพมหานคร');
     expect(enriched.componentVariants.en.admin1).toBe('Bangkok');
     expect(enriched.componentVariants['zh-CN'].admin1).toBe('曼谷');
+  });
+
+  it('does not choose a same-name city translation from another region by population', async () => {
+    const database = openTestDatabase();
+    try {
+      await database.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,path)
+        VALUES (1,'CA','BC','British Columbia','British Columbia','不列颠哥伦比亚省','/1/'),
+          (2,'CA','ON','Ontario','Ontario','安大略省','/2/');
+        INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,population)
+        VALUES (1,'CA',1,'Fixture Town','Fixture Town','甲镇',1),(2,'CA',2,'Fixture Town','Fixture Town','乙镇',1000)`);
+      const components = { houseNumber: '1', street: 'Fixture Road', locality: 'Fixture Town', admin1: 'British Columbia', admin1Code: 'BC', postcode: '' };
+      const result = await enrichPickedAddress(database, { countryCode: 'CA', components,
+        componentVariants: { native: components, en: components, 'zh-CN': { ...components, street: '示例路' } } });
+      expect(result.componentVariants['zh-CN'].locality).toBe('甲镇');
+    } finally { await database.close(); }
   });
 
   it('normalizes a 112xx v2 postal locality to Brooklyn', async () => {

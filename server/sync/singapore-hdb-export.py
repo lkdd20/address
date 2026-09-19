@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from shapely.geometry import shape
 
 
 TOWNS = {
@@ -41,7 +42,7 @@ class TemporaryOnemapFailure(RuntimeError):
 
 class RecordBatch(list):
     def __init__(self, values, source_complete, checkpoint_token, candidate_count, resolved_count,
-                 temporary_failure=None, next_available_at=None, onemap_request_count=0):
+                 temporary_failure=None, next_available_at=None, onemap_query_count=0):
         super().__init__(values)
         self.source_complete = source_complete
         self.checkpoint_token = checkpoint_token
@@ -49,7 +50,7 @@ class RecordBatch(list):
         self.resolved_count = resolved_count
         self.temporary_failure = temporary_failure
         self.next_available_at = next_available_at
-        self.onemap_request_count = onemap_request_count
+        self.onemap_query_count = onemap_query_count
 
 
 def clean(value):
@@ -71,20 +72,13 @@ def road_key(value):
 
 
 def polygon_centroid(geometry):
-    points = []
-
-    def visit(value):
-        if (isinstance(value, list) and len(value) >= 2
-                and isinstance(value[0], (int, float)) and isinstance(value[1], (int, float))):
-            points.append((float(value[0]), float(value[1])))
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-
-    visit((geometry or {}).get("coordinates"))
-    if not points:
+    if not geometry:
         return None
-    return sum(point[0] for point in points) / len(points), sum(point[1] for point in points) / len(points)
+    polygon = shape(geometry)
+    if polygon.is_empty or not polygon.is_valid:
+        return None
+    point = polygon.representative_point()
+    return point.x, point.y
 
 
 def positive_integer(value):
@@ -98,8 +92,6 @@ def load_properties(path):
     grouped = defaultdict(list)
     with open(path, encoding="utf-8-sig", newline="") as source:
         for row in csv.DictReader(source):
-            if clean(row.get("residential")).upper() != "Y" or not positive_integer(row.get("total_dwelling_units")):
-                continue
             key = block_key(row.get("blk_no")), street_code_prefix(row.get("street"))
             if all(key):
                 grouped[key].append(row)
@@ -115,8 +107,10 @@ def load_buildings(path):
         postcode = clean(properties.get("POSTAL_COD"))
         code = clean(properties.get("ST_COD")).upper()
         point = polygon_centroid(feature.get("geometry"))
-        if not re.fullmatch(r"\d{6}", postcode) or len(code) < 3 or not point:
+        if len(code) < 3 or not point:
             continue
+        if not re.fullmatch(r"\d{6}", postcode):
+            properties = {**properties, "POSTAL_COD": ""}
         longitude, latitude = point
         if not (103 <= longitude <= 105 and 1 <= latitude <= 2):
             continue
@@ -136,11 +130,48 @@ def load_onemap_cache(path):
                 value = json.loads(line)
                 result = value.get("result")
                 status = value.get("status") or ("found" if isinstance(result, dict) else None)
-                if status in {"found", "not_found"}:
+                if status in {"found", "not_found"} and value.get("capability") == "onemap-address-v2":
                     cached[value["query"]] = {"status": status, "result": result}
             except (KeyError, TypeError, ValueError):
                 continue
     return cached
+
+
+def onemap_address_results(payload, row):
+    records = {}
+    postcodes = defaultdict(set)
+    for value in payload.get("results", []):
+        street = clean(value.get("ROAD_NAME"))
+        if not street or street.upper() == "NIL" or road_key(street) != road_key(row.get("street")):
+            continue
+        try:
+            longitude, latitude = float(value["LONGITUDE"]), float(value["LATITUDE"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (103 <= longitude <= 105 and 1 <= latitude <= 2):
+            continue
+        number = clean(value.get("BLK_NO"))
+        if number.upper() in {"NIL", "NA", "N/A"}:
+            number = ""
+        if number and not re.fullmatch(r"\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?", number):
+            continue
+        identity = f"{road_key(street)}\x1f{block_key(number)}"
+        postcode = clean(value.get("POSTAL"))
+        if number and re.fullmatch(r"\d{6}", postcode):
+            postcodes[identity].add(postcode)
+        if identity not in records:
+            identifier = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            records[identity] = {
+                "id": f"onemap:{identifier}", "source_record_id": f"onemap:{identifier}",
+                "source_dataset": "OneMap address search", "source_record_provider": "onemap", "country": "SG",
+                "match_level": "premise" if number else "street", "number": number, "street": street,
+                "admin1": "Singapore", "locality": "Singapore", "postal_city": "Singapore", "postcode": "",
+                "longitude": longitude, "latitude": latitude, "property_type": "unknown",
+            }
+    for identity, record in records.items():
+        if len(postcodes[identity]) == 1:
+            record["postcode"] = next(iter(postcodes[identity]))
+    return list(records.values())
 
 
 def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=1.05):
@@ -170,6 +201,8 @@ def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=1.05):
                 details = {}
             code = clean(details.get("code")).upper()
             next_available_at = details.get("nextAvailableAt") or details.get("next_available_at")
+            if code == "SOURCE_REQUEST_BUDGET":
+                raise TemporaryOnemapFailure("request_budget") from None
             if code == "SOURCE_RATE_LIMITED" or (error.code == 429 and "QUOTA" not in code
                                                    and "QUOTA" not in str(details.get("message", "")).upper()):
                 if rate_limit_attempts < 8:
@@ -202,33 +235,17 @@ def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=1.05):
                 network_attempts += 1
                 continue
             raise TemporaryOnemapFailure("network") from None
-    postcodes = defaultdict(list)
-    for value in (payload or {}).get("results", []):
-        postcode = clean(value.get("POSTAL"))
-        try:
-            longitude = float(value.get("LONGITUDE"))
-            latitude = float(value.get("LATITUDE"))
-        except (TypeError, ValueError):
-            continue
-        if (block_key(value.get("BLK_NO")) != block_key(row.get("blk_no"))
-                or road_key(value.get("ROAD_NAME")) != road_key(row.get("street"))
-                or not re.fullmatch(r"\d{6}", postcode)
-                or not 103 <= longitude <= 105 or not 1 <= latitude <= 2):
-            continue
-        postcodes[postcode].append((longitude, latitude))
-    result = None
-    if len(postcodes) == 1:
-        postcode, points = next(iter(postcodes.items()))
-        result = {
-            "POSTAL_COD": postcode,
-            "longitude": sum(point[0] for point in points) / len(points),
-            "latitude": sum(point[1] for point in points) / len(points)
-        }
+    addresses = onemap_address_results(payload, row)
+    primary = next((value for value in addresses if value["number"]
+                    and block_key(value["number"]) == block_key(row.get("blk_no"))), None)
+    result = {"addresses": addresses} if addresses else None
+    if primary:
+        result.update({"POSTAL_COD": primary["postcode"], "longitude": primary["longitude"], "latitude": primary["latitude"]})
     status = "found" if result else "not_found"
     cache[query] = {"status": status, "result": result}
     os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
     with open(cache_file, "a", encoding="utf-8", newline="\n") as output:
-        output.write(json.dumps({"query": query, "status": status, "result": result},
+        output.write(json.dumps({"query": query, "status": status, "result": result, "capability": "onemap-address-v2"},
                                 ensure_ascii=False, separators=(",", ":")) + "\n")
     time.sleep(max(0, minimum_interval))
     return result
@@ -248,7 +265,7 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
     output = []
     candidate_count = 0
     resolved_count = 0
-    onemap_request_count = 0
+    onemap_query_count = 0
     failure = None
     for key in sorted(properties):
         property_rows = properties[key]
@@ -265,10 +282,10 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
             if query not in onemap_cache:
                 if failure is not None:
                     continue
-                if onemap_request_count >= max_onemap_requests:
+                if onemap_query_count >= max_onemap_requests:
                     failure = TemporaryOnemapFailure("request_budget")
                     continue
-                onemap_request_count += 1
+                onemap_query_count += 1
             try:
                 building = onemap_result(row, bridge_url, onemap_cache, onemap_cache_file, minimum_interval)
             except TemporaryOnemapFailure as error:
@@ -277,17 +294,24 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
             resolved_count += 1
             if not building:
                 continue
+            primary_resolved = "longitude" in building and clean(row.get("bldg_contract_town")).upper() in TOWNS
+            output.extend(value for value in building.get("addresses", [])
+                          if not primary_resolved or block_key(value["number"]) != block_key(row.get("blk_no")))
+            if "longitude" not in building:
+                continue
             longitude, latitude = building["longitude"], building["latitude"]
         town_code = clean(row.get("bldg_contract_town")).upper()
         town = TOWNS.get(town_code)
         if not town:
             continue
         entity_id = clean(building.get("ENTITYID")) or "onemap"
-        object_id = clean(building.get("OBJECTID")) or clean(building.get("POSTAL_COD"))
-        output.append({
+        object_id = clean(building.get("OBJECTID")) or clean(building.get("POSTAL_COD")) \
+            or hashlib.sha256(f"{row['blk_no']}:{road_key(row['street'])}".encode("utf-8")).hexdigest()
+        residential = clean(row.get("residential")).upper() == "Y" and positive_integer(row.get("total_dwelling_units"))
+        record = {
             "id": f"hdb-building:{entity_id}:{object_id}",
             "source_record_id": f"hdb-building:{entity_id}:{object_id}",
-            "source_dataset": "HDB Property Information + HDB Existing Building",
+            "source_dataset": "HDB Property Information + " + ("OneMap" if entity_id == "onemap" else "HDB Existing Building"),
             "country": "SG",
             "admin1": "Singapore",
             "locality": town,
@@ -298,10 +322,14 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
             "number": clean(row.get("blk_no")),
             "longitude": longitude,
             "latitude": latitude,
-            "property_type": "apartment",
-            "residential_building_id": f"hdb-property:{key[0]}:{key[1]}",
-            "residential_building_class": "apartments"
-        })
+            "match_level": "premise", "property_type": "apartment" if residential else "unknown"
+        }
+        if residential:
+            record.update({"residential_building_id": f"hdb-property:{key[0]}:{key[1]}",
+                           "residential_building_class": "apartments"})
+        if entity_id == "onemap":
+            record.update({"source_record_provider": "onemap", "residential_source_provider": "hdb"})
+        output.append(record)
     source_complete = failure is None and resolved_count == candidate_count
     return RecordBatch(
         output,
@@ -311,19 +339,20 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
         resolved_count,
         failure.kind if failure else None,
         failure.next_available_at if failure else None,
-        onemap_request_count,
+        onemap_query_count,
     )
 
 
 def select_balanced(values, maximum, per_locality):
-    by_postcode = {}
+    by_address = {}
+    priority = lambda record: (record["id"].startswith("hdb-building:"), ":onemap:" not in record["id"])
     for value in values:
-        postcode = value["postcode"]
-        existing = by_postcode.get(postcode)
-        if existing is None or (":onemap:" in existing["id"] and ":onemap:" not in value["id"]):
-            by_postcode[postcode] = value
+        identity = road_key(value["street"]), block_key(value["number"])
+        existing = by_address.get(identity)
+        if existing is None or priority(value) > priority(existing):
+            by_address[identity] = value
     buckets = defaultdict(list)
-    for value in by_postcode.values():
+    for value in by_address.values():
         buckets[value["locality"]].append(value)
     selected = []
     for locality in sorted(buckets):
@@ -363,7 +392,7 @@ def main():
         "selected_count": len(selected),
         "temporary_failure": batch.temporary_failure,
         "next_available_at": batch.next_available_at,
-        "onemap_request_count": batch.onemap_request_count,
+        "onemap_query_count": batch.onemap_query_count,
     }
     absolute = os.path.abspath(args.state_output)
     os.makedirs(os.path.dirname(absolute), exist_ok=True)

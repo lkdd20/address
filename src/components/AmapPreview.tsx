@@ -20,6 +20,7 @@ declare global {
 }
 
 let loader: { key: string; serviceHost: string; promise: Promise<AMapNamespace> } | undefined;
+let loadAttempt = 0;
 
 export const resolveAmapServiceHost = (serviceHost: string, currentOrigin = window.location.origin): string => {
   const page = new URL(currentOrigin);
@@ -33,19 +34,27 @@ export const resolveAmapServiceHost = (serviceHost: string, currentOrigin = wind
   return `${resolved.origin}/_AMapService`;
 };
 
-const loadAmap = (key: string, serviceHost: string): Promise<AMapNamespace> => {
+const loadAmap = async (key: string, serviceHost: string): Promise<AMapNamespace> => {
   const absoluteServiceHost = resolveAmapServiceHost(serviceHost);
   if (window.AMap) return Promise.resolve(window.AMap);
   if (loader?.key === key && loader.serviceHost === absoluteServiceHost) return loader.promise;
   const promise = new Promise<AMapNamespace>((resolve, reject) => {
     window._AMapSecurityConfig = { serviceHost: absoluteServiceHost };
     const script = document.createElement('script');
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}`;
+    const attempt = loadAttempt++;
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}${attempt ? `&_address_retry=${attempt}` : ''}`;
     script.async = true;
     script.referrerPolicy = 'strict-origin-when-cross-origin';
     script.dataset.addressAmap = 'true';
-    script.onload = () => window.AMap ? resolve(window.AMap) : reject(new Error('AMAP_NOT_READY'));
-    script.onerror = () => reject(new Error('AMAP_LOAD_FAILED'));
+    const finish = (error?: Error) => {
+      window.clearTimeout(timeout);
+      script.onload = null; script.onerror = null;
+      if (error) { script.remove(); reject(error); }
+      else resolve(window.AMap!);
+    };
+    const timeout = window.setTimeout(() => finish(new Error('AMAP_LOAD_TIMEOUT')), 15_000);
+    script.onload = () => finish(window.AMap ? undefined : new Error('AMAP_NOT_READY'));
+    script.onerror = () => finish(new Error('AMAP_LOAD_FAILED'));
     document.head.append(script);
   });
   loader = { key, serviceHost: absoluteServiceHost, promise };
@@ -56,7 +65,7 @@ const loadAmap = (key: string, serviceHost: string): Promise<AMapNamespace> => {
 };
 
 export default function AmapPreview({
-  apiKey, serviceHost, countryCode, latitude, longitude, label, locale, errorText
+  apiKey, serviceHost, countryCode, latitude, longitude, label, locale, errorText, retryText
 }: {
   apiKey: string;
   serviceHost: string;
@@ -66,9 +75,11 @@ export default function AmapPreview({
   label: string;
   locale: Locale;
   errorText: string;
+  retryText: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let disposed = false;
@@ -97,10 +108,10 @@ export default function AmapPreview({
       disposed = true;
       map?.destroy();
     };
-  }, [apiKey, serviceHost, countryCode, latitude, longitude, label, locale]);
+  }, [apiKey, serviceHost, countryCode, latitude, longitude, label, locale, attempt]);
 
   return <div className="map-frame amap-frame" data-map-provider="amap">
     <div ref={container} className="amap-container" />
-    {error && <div className="map-error" role="status">{errorText}</div>}
+    {error && <div className="map-error" role="status"><span>{errorText}</span><button type="button" onClick={() => setAttempt((value) => value + 1)}>{retryText}</button></div>}
   </div>;
 }

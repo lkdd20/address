@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createPostgresPool, initializePostgres, PostgresDatabase } from '../database/postgres.mjs';
 import { CredentialBrokerStore } from './store.mjs';
 import { executeOperation, operationDefinitions } from './operations.mjs';
+import { executeDeepL } from './deepl.mjs';
 
 const REQUEST_LIMIT_BYTES = 16 * 1024;
 const releaseId = process.env.ADDRESS_RELEASE?.trim() || 'development';
@@ -14,7 +15,7 @@ const parametersDigest = (value) => createHash('sha256').update(JSON.stringify(v
 
 const send = (status, body, headers = {}) => Response.json(body, {
   status,
-  headers: { 'Cache-Control': 'no-store', 'X-Address-Release': releaseId, ...headers }
+  headers: { 'Cache-Control': 'no-store', 'X-Address-Release': releaseId, 'X-Address-Upstream-Requests': '0', ...headers }
 });
 
 const readBody = async (request) => {
@@ -34,13 +35,41 @@ const readBody = async (request) => {
 };
 
 class ProviderPriorityGate {
-  constructor() { this.providers = new Map(); }
+  constructor({ maxPending = 64 } = {}) {
+    this.providers = new Map();
+    this.maxPending = Math.max(1, Number(maxPending) || 64);
+  }
 
-  run(provider, clientId, work) {
+  run(provider, clientId, work, { signal } = {}) {
     return new Promise((resolvePromise, rejectPromise) => {
+      if (signal?.aborted) {
+        rejectPromise(Object.assign(new Error('Credential Broker request was cancelled'), {
+          code: 'BROKER_REQUEST_CANCELLED', status: 499
+        }));
+        return;
+      }
       const state = this.providers.get(provider) || { active: false, production: [], test: [] };
       this.providers.set(provider, state);
-      state[clientId].push({ work, resolve: resolvePromise, reject: rejectPromise });
+      const queue = state[clientId];
+      if (queue.length >= this.maxPending) {
+        rejectPromise(Object.assign(new Error('Credential Broker queue is full'), {
+          code: 'BROKER_QUEUE_FULL', status: 429
+        }));
+        return;
+      }
+      const item = { work, resolve: resolvePromise, reject: rejectPromise, cancelled: false };
+      const cancel = () => {
+        if (item.cancelled) return;
+        item.cancelled = true;
+        const index = queue.indexOf(item);
+        if (index >= 0) queue.splice(index, 1);
+        rejectPromise(Object.assign(new Error('Credential Broker request was cancelled'), {
+          code: 'BROKER_REQUEST_CANCELLED', status: 499
+        }));
+      };
+      item.cancel = cancel;
+      signal?.addEventListener('abort', cancel, { once: true });
+      queue.push(item);
       this.#drain(state);
     });
   }
@@ -49,6 +78,7 @@ class ProviderPriorityGate {
     if (state.active) return;
     const item = state.production.shift() || state.test.shift();
     if (!item) return;
+    if (item.cancelled) { this.#drain(state); return; }
     state.active = true;
     Promise.resolve().then(item.work).then(item.resolve, item.reject).finally(() => {
       state.active = false;
@@ -82,7 +112,7 @@ export const createCredentialBroker = async ({
   fetchImpl = fetch,
   now,
   staleMs,
-  gate = new ProviderPriorityGate()
+  gate = new ProviderPriorityGate({ maxPending: Number(process.env.CREDENTIAL_BROKER_MAX_QUEUE) || 64 })
 }) => {
   if (!database) throw new Error('Credential Broker requires a database');
   if (!tokens?.production || !tokens?.test || tokens.production.length < 24 || tokens.test.length < 24
@@ -90,14 +120,44 @@ export const createCredentialBroker = async ({
   const store = new CredentialBrokerStore(database, masterKey, { testPolicies, now, staleMs });
   await store.repairStaleRequests();
   const activeRequests = new Set();
+  const compatibilityFallbacks = new Set();
 
-  const execute = async ({ clientId, requestKey, definition, parameters }) => {
+  const execute = async ({ clientId, requestKey, definition, parameters, maxDispatches, accounting, signal: providedSignal }) => {
     const excluded = [];
-    for (let attempt = 0; attempt < 32; attempt += 1) {
+    let lastRetry = null;
+    const respond = (status, body, headers = {}) => send(status, body, {
+      ...headers, 'X-Address-Upstream-Requests': String(accounting.dispatchCount)
+    });
+    const signal = providedSignal || AbortSignal.timeout(30_000);
+    if (definition.provider === 'deepl') {
+      const result = await executeDeepL({ database, masterKey: store.masterKey, clientId, testPolicies: store.testPolicies,
+        requestKey, parameters, usageOnly: definition.usageOnly, fetchImpl, now, signal, maxDispatches,
+        onDispatch: () => { accounting.dispatchCount += 1; } });
+      await store.finishRequest(requestKey, { status: result.status === 200 ? 'completed' : 'failed',
+        responseStatus: result.status, errorCode: result.body.code || null });
+      return respond(result.status, result.body, retryHeaders(result.body.nextAvailableAt));
+    }
+    for (let attempt = 0; attempt < maxDispatches; attempt += 1) {
+      if (signal.aborted) break;
       const reservation = await store.reserve({
-        requestKey, clientId, provider: definition.provider, excludeIds: excluded
+        requestKey, clientId, provider: definition.provider,
+        credentialId: parameters.credentialId || null, excludeIds: excluded
       });
       if (!reservation.credential) {
+        if (lastRetry && excluded.length) {
+          const retryCode = lastRetry.outcome === 'network' ? 'SOURCE_NETWORK_UNAVAILABLE'
+            : lastRetry.outcome === 'auth' ? 'SOURCE_CREDENTIAL_EXPIRED'
+              : lastRetry.outcome === 'quota' ? 'SOURCE_QUOTA_UNAVAILABLE' : 'SOURCE_RATE_LIMITED';
+          const retryStatus = lastRetry.outcome === 'auth' ? 503
+            : ['qps', 'quota'].includes(lastRetry.outcome) ? 429 : 503;
+          await store.finishRequest(requestKey, {
+            status: 'failed', responseStatus: retryStatus, errorCode: retryCode
+          });
+          return respond(retryStatus, {
+            code: retryCode,
+            nextAvailableAt: reservation.nextAvailableAt || lastRetry.retryAt || null
+          }, retryHeaders(reservation.nextAvailableAt || lastRetry.retryAt));
+        }
         const testPolicy = reservation.reason === 'test_policy';
         const status = testPolicy ? 403 : reservation.reason === 'unavailable' ? 503 : 429;
         const code = testPolicy ? 'BROKER_TEST_POLICY_BLOCKED'
@@ -107,26 +167,58 @@ export const createCredentialBroker = async ({
         const responseStatus = authFailure ? 503 : status;
         const responseCode = authFailure ? 'SOURCE_CREDENTIAL_EXPIRED' : code;
         await store.finishRequest(requestKey, { status: 'failed', responseStatus: responseStatus, errorCode: responseCode });
-        return send(responseStatus, { code: responseCode, nextAvailableAt: reservation.nextAvailableAt }, retryHeaders(reservation.nextAvailableAt));
+        return respond(responseStatus, { code: responseCode, nextAvailableAt: reservation.nextAvailableAt }, retryHeaders(reservation.nextAvailableAt));
       }
+      const usingFallback = compatibilityFallbacks.has(definition);
+      const operationParameters = definition.provider === 'openai-compatible'
+        ? { ...parameters, prompt: await store.translationPrompt(reservation.credential.id) } : parameters;
       const result = await executeOperation({
-        definition, parameters, secret: reservation.credential.secret, fetchImpl
+        definition: usingFallback ? { ...definition, request: definition.fallbackRequest } : definition,
+        parameters: operationParameters, secret: reservation.credential.secret, signal,
+        fetchImpl: (...args) => {
+          accounting.dispatchCount += 1;
+          return fetchImpl(...args);
+        }
       });
-      await store.report({ dispatchId: reservation.dispatchId, outcome: result.outcome || 'success', retryAt: result.retryAt });
+      if (signal.aborted) {
+        await store.cancelDispatch(reservation.dispatchId);
+        throw Object.assign(new Error('Credential Broker request was cancelled'), {
+          code: 'BROKER_REQUEST_CANCELLED', status: 499
+        });
+      }
+      await store.report({
+        dispatchId: reservation.dispatchId,
+        outcome: result.outcome || 'success',
+        retryAt: result.retryAt,
+        providerCode: result.providerCode || null,
+        httpStatus: result.httpStatus || null,
+        observation: result.observation || null,
+        service: result.service || null,
+        period: result.quotaPeriod || null
+      });
+      if (!usingFallback && definition.fallbackRequest && result.code === 'UPSTREAM_INVALID_JSON'
+        && result.outcome === 'request') {
+        compatibilityFallbacks.add(definition);
+        // Reserve the fallback separately so it cannot bypass quota or pacing.
+        continue;
+      }
       if (result.type === 'success') {
         await store.finishRequest(requestKey, { status: 'completed', responseStatus: result.status });
-        return send(result.status, { data: result.data });
+        return respond(result.status, { data: result.data });
       }
       if (result.type === 'error') {
         await store.finishRequest(requestKey, { status: 'failed', responseStatus: result.status, errorCode: result.code });
-        return send(result.status, { code: result.code });
+        return respond(result.status, { code: result.code });
       }
+      lastRetry = result;
       excluded.push(reservation.credential.id);
     }
-    await store.finishRequest(requestKey, {
-      status: 'failed', responseStatus: 503, errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE'
-    });
-    return send(503, { code: 'SOURCE_CREDENTIAL_UNAVAILABLE' });
+    const code = signal.aborted || lastRetry?.outcome === 'network' ? 'SOURCE_NETWORK_UNAVAILABLE'
+      : lastRetry?.outcome === 'auth' ? 'SOURCE_CREDENTIAL_EXPIRED'
+        : lastRetry?.outcome === 'quota' ? 'SOURCE_QUOTA_UNAVAILABLE'
+          : lastRetry?.outcome === 'qps' ? 'SOURCE_RATE_LIMITED' : 'SOURCE_CREDENTIAL_UNAVAILABLE';
+    await store.finishRequest(requestKey, { status: 'failed', responseStatus: 503, errorCode: code });
+    return respond(503, { code, ...(lastRetry?.retryAt ? { nextAvailableAt: lastRetry.retryAt } : {}) });
   };
 
   const api = async (request) => {
@@ -143,18 +235,19 @@ export const createCredentialBroker = async ({
     if (url.pathname === '/v1/availability') {
       if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some((key) => key !== 'providers')
-        || !Array.isArray(input.providers) || input.providers.length < 1 || input.providers.length > 8) {
+        || !Array.isArray(input.providers) || input.providers.length < 1 || input.providers.length > 10) {
         return send(400, { code: 'INVALID_REQUEST' });
       }
       const providers = [...new Set(input.providers.map(String))];
-      if (providers.some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider))) {
+      if (providers.some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls', 'youdao', 'deepl', 'openai-compatible'].includes(provider))) {
         return send(400, { code: 'UNSUPPORTED_PROVIDER' });
       }
       const statuses = await Promise.all(providers.map((provider) => store.availability({ clientId, provider })));
       return send(200, { providers: Object.fromEntries(statuses.map((status) => [status.provider, status])) });
     }
     if (!input || typeof input !== 'object' || Array.isArray(input)
-      || Object.keys(input).some((key) => !['requestId', 'operation', 'parameters'].includes(key))
+      || Object.keys(input).some((key) => !['requestId', 'operation', 'parameters', 'maxDispatches'].includes(key))
+      || (input.maxDispatches !== undefined && (!Number.isInteger(input.maxDispatches) || input.maxDispatches < 1 || input.maxDispatches > 32))
       || !/^[A-Za-z0-9._:-]{8,128}$/u.test(String(input.requestId || ''))) {
       return send(400, { code: 'INVALID_REQUEST' });
     }
@@ -166,13 +259,14 @@ export const createCredentialBroker = async ({
     if (activeRequests.has(activeKey)) return send(409, { code: 'REQUEST_IN_PROGRESS' });
     activeRequests.add(activeKey);
     let started;
+    const accounting = { dispatchCount: 0 };
     try {
       started = await store.beginRequest({
         clientId,
         requestId: input.requestId,
         provider: definition.provider,
         operation: input.operation,
-        parametersHash: parametersDigest(parameters)
+        parametersHash: parametersDigest(input.maxDispatches === undefined ? parameters : { parameters, maxDispatches: input.maxDispatches })
       });
       if (!started.created) {
         const code = started.conflict ? 'REQUEST_ID_CONFLICT'
@@ -180,14 +274,20 @@ export const createCredentialBroker = async ({
             : started.request.status === 'unknown' ? 'BROKER_OUTCOME_UNKNOWN' : 'REQUEST_ALREADY_COMPLETED';
         return send(409, { code });
       }
+      const requestSignal = AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]);
       return await gate.run(definition.provider, clientId, () => execute({
-        clientId, requestKey: started.request.id, definition, parameters
-      }));
-    } catch {
+        clientId, requestKey: started.request.id, definition, parameters,
+        maxDispatches: input.maxDispatches ?? 32, accounting, signal: requestSignal
+      }), { signal: requestSignal });
+    } catch (error) {
       if (started?.created) await store.finishRequest(started.request.id, {
-        status: 'failed', responseStatus: 500, errorCode: 'BROKER_INTERNAL_ERROR'
+        status: 'failed', responseStatus: error?.status || 500, errorCode: error?.code || 'BROKER_INTERNAL_ERROR'
       }).catch(() => {});
-      return send(500, { code: 'BROKER_INTERNAL_ERROR' });
+      const status = Number.isInteger(error?.status) ? error.status : 500;
+      const code = typeof error?.code === 'string' ? error.code : 'BROKER_INTERNAL_ERROR';
+      return send(status, { code }, {
+        'X-Address-Upstream-Requests': String(accounting.dispatchCount)
+      });
     } finally {
       activeRequests.delete(activeKey);
     }
@@ -207,7 +307,7 @@ const testPoliciesFrom = (source) => {
   let parsed;
   try { parsed = JSON.parse(source); } catch { throw new Error('CREDENTIAL_BROKER_TEST_POLICY_JSON is invalid'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-    || Object.keys(parsed).some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider))) {
+    || Object.keys(parsed).some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls', 'youdao', 'deepl', 'openai-compatible'].includes(provider))) {
     throw new Error('CREDENTIAL_BROKER_TEST_POLICY_JSON is invalid');
   }
   return parsed;
@@ -250,11 +350,21 @@ if (invokedDirectly) {
       if (Array.isArray(value)) value.forEach((entry) => headers.append(name, entry));
       else if (value !== undefined) headers.set(name, value);
     }
-    const result = await broker.api(new Request(new URL(request.url || '/', 'http://credential-broker.internal'), {
-      method: request.method, headers, ...(chunks.length ? { body: Buffer.concat(chunks) } : {})
-    }));
-    response.writeHead(result.status, Object.fromEntries(result.headers));
-    response.end(Buffer.from(await result.arrayBuffer()));
+    const controller = new AbortController();
+    const abort = () => controller.abort(new Error('Credential Broker client disconnected'));
+    request.once('aborted', abort);
+    response.once('close', abort);
+    try {
+      const result = await broker.api(new Request(new URL(request.url || '/', 'http://credential-broker.internal'), {
+        method: request.method, headers, signal: controller.signal,
+        ...(chunks.length ? { body: Buffer.concat(chunks) } : {})
+      }));
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(Buffer.from(await result.arrayBuffer()));
+    } finally {
+      request.removeListener('aborted', abort);
+      response.removeListener('close', abort);
+    }
   });
   server.listen(port, host, () => console.log(`Credential Broker listening on ${host}:${port}`));
 }

@@ -209,7 +209,7 @@ describe('strict residential generator page structure', () => {
     expect(adminSource).toContain('/settings/country-shortcuts/${countryCode}/options?${params}');
     expect(adminSource).toContain('option.availableCount.toLocaleString(locale)');
     expect(adminSource).toContain("label: { en: option.en || option.value, 'zh-CN': option.zhCN");
-    expect(adminSource).toContain("await mutate(`/settings/country-shortcuts/${value.countryCode}`, 'PUT', draft");
+    expect(adminSource).toContain("await mutate<AdminCountryShortcutConfig>(`/settings/country-shortcuts/${value.countryCode}`, 'PUT', draft");
     expect(adminSource).toContain('shortcutLabel(item, locale)');
     expect(adminSource).not.toContain('item.label.en}</strong><small>{item.label');
   });

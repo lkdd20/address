@@ -11,9 +11,11 @@ Add credentials in **Admin → Service credentials**. Multiple credentials under
 | Tencent Location Service | China address synchronization | Tencent Maps |
 | Mappls Reverse Geocoding | India address enrichment | Mappls |
 | OneMap | Singapore address synchronization | OneMap |
-| Geoapify Reverse Geocoding | South Korea postcode enrichment | Geoapify |
-| Google Geocoding | Residential enrichment for supported low-volume countries | Google Geocoding |
+| Geoapify Reverse Geocoding | South Korea address and postcode enrichment | Geoapify |
+| Google Geocoding | Real street and premise enrichment for supported low-volume countries | Google Geocoding |
 | Youdao Text Translation | Address translation | Youdao Translate |
+| DeepL API Free | Address translation with configurable route priority | DeepL Free |
+| OpenAI-compatible Chat Completions | Address translation with a configurable model | OpenAI-compatible |
 | AMap JavaScript API | China browser map | AMap browser map |
 
 ## AMap WebService
@@ -64,13 +66,33 @@ See the [Reverse Geocoding API documentation](https://apidocs.geoapify.com/docs/
 
 The project uses Geocoding API v4. Places API is not required.
 
+## DeepL API Free
+
+Add a Free key ending in `:fx` under **Online translation → DeepL Free**, set a project character cap, then use **Test** to retrieve usage without translating. The default cap is 500,000; it is configurable, but the verified account limit always applies. Only `https://api-free.deepl.com` is allowed; Pro keys and paid endpoints are rejected.
+
+All API and synchronization calls share an encrypted credential broker and a persistent Unicode-character ledger. Effective allowance is the lowest account/configured cap across enabled DeepL keys. Characters are reserved before translation; lost responses retain the reservation. Restarts, key replacement and local calendar changes do not reset usage. Usage plus translation count as two upstream requests and both obey QPS limits.
+
+[Provider usage](https://developers.deepl.com/docs/admin/retrieving-usage-data) can lag several minutes; [Free usage responses](https://developers.deepl.com/api-reference/usage-and-quota/check-usage-and-limits) may omit billing-period dates. Without a verified new period, the local ledger is not automatically reset, so fallback may occur early. Other applications using the same account are outside this project's control; the Free endpoint's official limit remains the final safeguard. Never clear the ledger to bypass a wait.
+
 ## Youdao Text Translation
+
+**Paid service:** Youdao bills by usage. Trial credits may be limited; tests and automatic translation can charge your balance after those credits run out. Project quotas and the backfill character budget are internal limits, not a guarantee of free vendor usage. Check [Youdao pricing](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html) and your account before enabling it. Leave credentials unconfigured or disabled if you do not accept charges.
 
 1. Register at [Youdao Zhiyun](https://ai.youdao.com/).
 2. Create an application and enable Text Translation.
 3. Add the application ID and application secret under **Online translation**.
 
 Each entry stores one ID/secret pair; multiple pairs are supported.
+
+Translation checks valid stored variants/cache first, then tries enabled online routes by ascending priority. Equal-priority routes use round-robin; unavailable, cooling-down, quota-exhausted, or failed routes are skipped. New OpenAI-compatible routes default ahead of DeepL, Youdao, and enabled keyless Google web translation, but administrators set priority in each API key’s editor. DeepL and Youdao keys are independent, just like OpenAI-compatible keys; Google web translation has no API key and keeps its priority beside its enable switch. The separate routing panel is removed. Existing provider priorities seed new per-key routes once. Google is not the billed Cloud Translation API and may rate-limit or be unavailable; unlimited or permanent free access is not guaranteed. Leave paid providers unconfigured or disabled if you do not accept their fees.
+
+## OpenAI-compatible Chat Completions
+
+Under **Online translation**, enter the endpoint and API key, fetch the live model list, then select a Chat Completions-compatible model. There is no hardcoded default model. A full `/chat/completions` or `/models` URL is accepted; custom API path prefixes are preserved. Base URLs include the provider API prefix (such as `/v1`); successful model discovery fills in the resolved prefix. Use the fetch button beside the model input to populate suggestions, or type a model ID directly. Advertised endpoint restrictions and reasoning levels are retained; all returned models remain visible in the full dropdown, with incompatible models marked and disabled. Opening the dropdown shows every model regardless of the saved value; typing filters the list. When reasoning metadata is absent, the interface says so and accepts a provider-documented value. The project explicitly sends `low` by default; legacy `default` settings are normalized to `low`. Other explicit values are sent unchanged. On model selection, advertised levels take precedence if they exclude `low`. This does not imply that the provider defaults to `low` when the parameter is omitted. The fixed prompt enforces JSON cardinality and preserves address identifiers; optional prompts add style only. The default project limit is 1,000 requests per day with one request per second; deployment settings can adjust these limits.
+
+The service sends a non-streaming Chat Completions request with a translation-only system prompt and strict JSON cardinality. Values are treated as untrusted address data, not instructions. The returned values must preserve digits and identifiers and pass the existing language and publication gates before caching or publishing. The API key is encrypted in the control database and is never returned by ordinary provider listings. Use **Test** for a small synthetic request; it reports only success and result count.
+
+Only HTTPS endpoints are accepted for remote services; plain HTTP is limited to localhost. Confirm the endpoint provider's terms, data handling, and model billing before enabling it.
 
 ## AMap JavaScript API
 
@@ -79,3 +101,5 @@ Each entry stores one ID/secret pair; multiple pairs are supported.
 3. Add both values under **AMap browser map**.
 
 Do not reuse the AMap WebService key for browser maps.
+
+Initial online imports use the same per-key priority rules and broker accounting as recovery. Cached display translations are invalidated when source components change. Model discovery respects Retry-After in seconds or HTTP-date format. Do not assume trial or new-user credits renew; one-time DeepL rewards are not replenished locally.

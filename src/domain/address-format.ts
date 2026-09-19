@@ -1,4 +1,5 @@
 import { countryByCode } from './countries.ts';
+import { chinaPinyinComponent } from './china-address-language';
 import type {
   AddressComponents,
   AddressLanguage,
@@ -106,6 +107,15 @@ const uniquePlaces = (values: Array<string | undefined>): string[] => {
 const chinaEnglishHouseNumber = (value: string): string =>
   value.replace(/(?:号|號|弄)$/u, '');
 
+export const chinaPinyinComponents = (components: AddressComponents): AddressComponents => Object.fromEntries(
+  Object.entries(components).map(([field, value]) => [
+    field,
+    ['postcode', 'admin1Code'].includes(field) ? value
+      : field === 'houseNumber' && value && !/\p{Script=Han}/u.test(value) ? `${value} Hao`
+      : chinaPinyinComponent(String(value || ''))
+  ])
+) as AddressComponents;
+
 const formatChinaPresentation = (
   components: AddressComponents,
   language: AddressLanguage,
@@ -125,10 +135,10 @@ const formatChinaPresentation = (
       components.buildingName,
       generatedUnit?.variants[language] || components.unit
     ].map((value) => cleanLine(value || '')).filter(Boolean).join('');
-    const singleLine = `${administrative}${delivery}`;
+    const singleLine = `${administrative}${delivery}${components.postcode ? ` 邮编${components.postcode}` : ''}`;
     return {
       language,
-      postalLines: [administrative, delivery, recipient].map(cleanLine).filter(Boolean),
+      postalLines: [administrative, delivery, components.postcode ? `邮编${components.postcode}` : '', recipient].map(cleanLine).filter(Boolean),
       singleLine
     };
   }
@@ -153,11 +163,30 @@ const formatChinaPresentation = (
     ...administrative,
     'CHINA'
   ].filter(Boolean);
+  if (components.postcode) deliveryLines.splice(deliveryLines.length - 1, 0, components.postcode);
   return {
     language,
     postalLines: [withoutHan(recipient), ...deliveryLines].filter(Boolean),
     singleLine: deliveryLines.join(', ')
   };
+};
+
+export const formatChinaPinyinPresentation = (
+  components: AddressComponents,
+  recipient: string,
+  generatedUnit?: GeneratedUnit
+): AddressPresentation => {
+  const pinyinComponents = chinaPinyinComponents(components);
+  const administration = uniquePlaces([pinyinComponents.admin1, pinyinComponents.locality,
+    pinyinComponents.district, pinyinComponents.dependentLocality]);
+  const delivery = [
+    pinyinComponents.street,
+    pinyinComponents.houseNumber,
+    pinyinComponents.buildingName,
+    generatedUnit ? `${generatedUnit.components.building} Dong ${generatedUnit.components.unit} Danyuan ${generatedUnit.components.room} Shi` : pinyinComponents.unit
+  ].filter(Boolean).join(' ');
+  const lines = [delivery, ...administration, pinyinComponents.postcode, 'Zhongguo'].filter(Boolean);
+  return { language: 'native', postalLines: [recipient, ...lines].filter((value): value is string => Boolean(value)), singleLine: lines.join(', ') };
 };
 
 // Countries whose synthetic unit is merged into the street line of the postal

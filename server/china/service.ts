@@ -18,7 +18,7 @@ import {
   type ChinaCredentialBroker, type CommunityCandidate, type ProviderPage
 } from './providers';
 import { isChinaDeliveryAddress, normalizeChinaProviderAddress } from './quality';
-import { getCountryPolicy, type CountryPolicy } from '../sync/address-policy.mjs';
+import { canonicalPolicyNodeKey, getCountryPolicy, type CountryPolicy } from '../sync/address-policy.mjs';
 
 export const initialChinaCities = [
   '北京市', '天津市', '上海市', '重庆市', '石家庄市', '太原市', '呼和浩特市', '沈阳市', '长春市', '哈尔滨市',
@@ -32,6 +32,9 @@ const normalizedName = (value: string): string => value.normalize('NFKC').toLoca
   .replace(/[·•・\s()（）【】\[\]_-]/gu, '').replace(/(?:小区|社区|花园|公寓|家园|住宅区)$/u, '');
 const normalizedAddress = (value: string): string => value.normalize('NFKC').toLocaleLowerCase('zh-CN')
   .replace(/[\s,，。．·•・()（）【】\[\]_-]/gu, '');
+const normalizeChinaPostcodeName = (value: string): string => value.normalize('NFKC')
+  .replace(/(?:特别行政区|壮族自治区|回族自治区|维吾尔自治区|自治区|自治州|地区|省|市|区|县|盟|旗|街道|镇|乡)$/u, '')
+  .replace(/[^\p{L}\p{N}]/gu, '').toLocaleLowerCase('zh-CN');
 const comparableAdmin = (value: string): string => value.normalize('NFKC').replace(/[省市区县]$/u, '');
 const addressRoads = (value: string): string[] => [...value.matchAll(/([\p{L}\p{N}]{2,}?(?:大道|大街|公路|路|街|巷|道|弄))/gu)]
   .map((match) => match[1]);
@@ -69,16 +72,26 @@ export const nextProviderQuotaBoundary = (now = new Date()): Date => {
   return new Date(shifted.getTime() - offsetMs);
 };
 const coverageProviderPriority: ProviderName[] = ['amap', 'tencent', 'baidu'];
-const maxPagesPerTarget = 8;
+// Provider search APIs cap a query window at 200 records. The page counts
+// below use each provider's documented maximum page size without fetching a
+// duplicate tail page.
+export const maxPagesForProvider = (provider: ProviderName): number => provider === 'amap' ? 8 : 10;
 const candidateYieldInterval = 25;
 const targetYieldInterval = 50;
 const maxAreaCityBytes = 128 * 1024 * 1024;
-const checkpointStrategyVersion = 'community-poi-v7';
+const checkpointStrategyVersions: Record<ProviderName, string> = {
+  amap: 'community-poi-v9-amap-compatible',
+  baidu: 'community-poi-v7',
+  tencent: 'community-poi-v7'
+};
+const checkpointStrategyVersion = (provider: string): string =>
+  checkpointStrategyVersions[provider as ProviderName] || 'community-poi-v7';
 const credentialPacingMaxWaitMs = 1_100;
 const chinaWorkerLeaseId = 'china-sync';
 const chinaWorkerLeaseDurationMs = 60_000;
 const chinaWorkerLeaseHeartbeatMs = 20_000;
 const chinaWorkerShutdownGraceMs = 95 * 60_000;
+const chinaExecutionRevision = 'china-runtime-v3-amap-compatibility';
 const mainlandProvincePrefixes = [
   '11', '12', '13', '14', '15', '21', '22', '23', '31', '32', '33', '34', '35', '36', '37',
   '41', '42', '43', '44', '45', '46', '50', '51', '52', '53', '54', '61', '62', '63', '64', '65'
@@ -147,6 +160,16 @@ export interface ChinaWorkerConfig {
   credentialBroker?: { url: string; token: string };
 }
 
+interface ChinaPostcodeRow {
+  code: string;
+  locality_name: string;
+  region_name: string;
+  region_native_name: string;
+  region_zh_name: string;
+  latitude: number | null;
+  longitude: number | null;
+}
+
 export interface ChinaWorkerData {
   postgresUrl: string;
   masterKey: Uint8Array;
@@ -169,7 +192,7 @@ interface ChinaAreaRow {
   count: number;
 }
 
-const utf8Hex = (value: string): string => Buffer.from(value, 'utf8').toString('hex').toUpperCase();
+const utf8Hex = (value: string): string => Buffer.from(value, 'utf8').toString('hex');
 
 const candidateFromIngestRow = (row: Record<string, unknown>): CommunityCandidate => ({
   provider: String(row.provider) as ProviderName,
@@ -222,6 +245,7 @@ export class ChinaCoverageTracker {
     overrides: Map<string, number>
   ) {
     this.coverageRatio = policy.coverageRatio;
+    overrides = new Map([...overrides].map(([key, target]) => [canonicalPolicyNodeKey(key), target]));
     for (const row of rows) {
       const cityKey = `${row.province}|${row.city}`;
       if (!this.provinces.has(row.province)) {
@@ -333,12 +357,15 @@ export class ChinaDataService {
   private activeWorker: Worker | undefined;
   private workerCompletion: Promise<void> | undefined;
   private resolveWorkerCompletion: (() => void) | undefined;
+  private executionPromise: Promise<void> | undefined;
   private lastProgress: Record<string, unknown> | null = null;
   private closed = false;
   private syncState: 'ready' | 'below_target' | 'cooldown_wait' | 'quota_wait' | 'source_limited' | 'blocked' = 'below_target';
   private nextAttemptAt: string | null = null;
   private waitReason = '';
   private statusSnapshot: { expiresAt: number; promise: Promise<Record<string, unknown>> } | undefined;
+  private postcodeCatalogPromise: Promise<ChinaPostcodeRow[]> | undefined;
+  private postcodeIndexPromise: Promise<Map<string, ChinaPostcodeRow[]>> | undefined;
   private readonly credentialBroker: ChinaCredentialBroker | null;
   private readonly leaseOwnerToken = randomUUID();
   private leaseHeld = false;
@@ -354,30 +381,133 @@ export class ChinaDataService {
       : null;
   }
 
-  private async credentialState(): Promise<{
-    configured: boolean; eligible: boolean; reason: string; nextAvailableAt: string | null; providers: ProviderName[];
+  private async chinaPostcodeCatalog(): Promise<ChinaPostcodeRow[]> {
+    if (!this.postcodeCatalogPromise) {
+      this.postcodeCatalogPromise = this.addressDb.prepare(`SELECT p.code,p.locality_name,
+          COALESCE(r.name,'') AS region_name,COALESCE(r.native_name,'') AS region_native_name,
+          COALESCE(r.zh_name,'') AS region_zh_name,p.latitude,p.longitude
+        FROM catalog_postcodes p LEFT JOIN catalog_regions r ON r.id=p.region_id
+        WHERE p.country_code='CN' AND p.code ~ '^[0-9]{6}$'`).all<ChinaPostcodeRow>()
+        .then((result) => result.results || []).catch(() => []);
+    }
+    return this.postcodeCatalogPromise;
+  }
+
+  private async chinaPostcodeIndex(): Promise<Map<string, ChinaPostcodeRow[]>> {
+    if (!this.postcodeIndexPromise) {
+      this.postcodeIndexPromise = this.chinaPostcodeCatalog().then((catalog) => {
+        const index = new Map<string, ChinaPostcodeRow[]>();
+        for (const row of catalog) {
+          const region = normalizeChinaPostcodeName([row.region_zh_name, row.region_native_name, row.region_name].find(Boolean) || '');
+          const locality = normalizeChinaPostcodeName(row.locality_name);
+          if (!region || !locality) continue;
+          const key = `${region}\u0000${locality}`;
+          const values = index.get(key) || [];
+          values.push(row);
+          index.set(key, values);
+        }
+        return index;
+      }).catch(() => new Map<string, ChinaPostcodeRow[]>());
+    }
+    return this.postcodeIndexPromise;
+  }
+
+  private resolveChinaPostcode(candidate: CommunityCandidate, catalog: ChinaPostcodeRow[], index?: Map<string, ChinaPostcodeRow[]>): string {
+    const province = normalizeChinaPostcodeName(candidate.province);
+    if (!province) return '';
+    const localityNames = [candidate.township, candidate.district, candidate.city].map(normalizeChinaPostcodeName).filter(Boolean);
+    const scoped = index ? [] : catalog.filter((row) => {
+      const region = normalizeChinaPostcodeName([row.region_zh_name, row.region_native_name, row.region_name].find(Boolean) || '');
+      return region === province;
+    });
+    const matches = localityNames.map((name) => index
+      ? index.get(`${province}\u0000${name}`) || []
+      : scoped.filter((row) => normalizeChinaPostcodeName(row.locality_name) === name))
+      .find((rows) => rows.length) || [];
+    if (!matches.length) return '';
+    const uniqueCodes = [...new Set(matches.map((row) => row.code))];
+    if (uniqueCodes.length === 1) return uniqueCodes[0];
+    if (!Number.isFinite(candidate.latitude) || !Number.isFinite(candidate.longitude)) return '';
+    if (matches.some((row) => !Number.isFinite(row.latitude) || !Number.isFinite(row.longitude))) return '';
+    const nearbyCodes = [...new Set(matches.filter((row) =>
+      distanceMeters(
+        { latitude: candidate.latitude, longitude: candidate.longitude },
+        { latitude: Number(row.latitude), longitude: Number(row.longitude) }
+      ) <= 8_000)
+      .map((row) => row.code))];
+    return nearbyCodes.length === 1 ? nearbyCodes[0] : '';
+  }
+
+  private async enrichMissingPostcodes(limit = 100_000): Promise<number> {
+    const catalog = await this.chinaPostcodeCatalog();
+    if (!catalog.length) return 0;
+    const index = await this.chinaPostcodeIndex();
+    const rows = (await this.addressDb.prepare(`SELECT id,province,city,district,township,latitude,longitude
+      FROM cn_communities_v2 WHERE postcode='' OR postcode IS NULL ORDER BY updated_at LIMIT ?`).bind(limit).all<Record<string, unknown>>()).results;
+    let updated = 0;
+    const writeBatch = async (batch: Array<[string, string]>): Promise<void> => {
+      if (!batch.length) return;
+      const values = batch.map(() => '(?,?)').join(',');
+      await this.addressDb.prepare(`UPDATE cn_communities_v2 AS community
+        SET postcode=source.postcode,updated_at=?
+        FROM (VALUES ${values}) AS source(id,postcode)
+        WHERE community.id=source.id AND (community.postcode='' OR community.postcode IS NULL)`)
+        .bind(nowIso(), ...batch.flat()).run();
+    };
+    let batch: Array<[string, string]> = [];
+    for (const row of rows) {
+      const postcode = this.resolveChinaPostcode({
+        provider: 'amap', providerPoiId: String(row.id), name: '', address: '', province: String(row.province),
+        city: String(row.city), district: String(row.district), township: String(row.township || ''),
+        latitude: Number(row.latitude), longitude: Number(row.longitude), rawLatitude: Number(row.latitude), rawLongitude: Number(row.longitude),
+        rawCrs: 'GCJ-02', responseHash: '', typecode: '120302', adcode: ''
+      }, catalog, index);
+      if (!postcode) continue;
+      batch.push([String(row.id), postcode]);
+      if (batch.length >= 500) {
+        const size = batch.length;
+        await writeBatch(batch);
+        updated += size;
+        batch = [];
+      }
+    }
+    const size = batch.length;
+    await writeBatch(batch);
+    updated += size;
+    return updated;
+  }
+
+  private async credentialState(names: ProviderName[] = coverageProviderPriority): Promise<{
+    configured: boolean; eligible: boolean; reason: string; nextAvailableAt: string | null;
+    providers: ProviderName[]; configuredProviders: ProviderName[];
   }> {
     if (!this.credentialBroker) {
-      const providers = await this.control.availableProviders();
-      const availability = await this.control.credentialAvailability(['amap', 'baidu', 'tencent']);
-      return { ...availability, providers };
+      const providers = (await this.control.availableProviders()).filter((provider) => names.includes(provider));
+      const [availability, ...providerAvailability] = await Promise.all([
+        this.control.credentialAvailability(names),
+        ...names.map((provider) => this.control.credentialAvailability([provider]))
+      ]);
+      const configuredProviders = names.filter((_, index) => providerAvailability[index].configured);
+      return { ...availability, providers, configuredProviders };
     }
     try {
-      const names: ProviderName[] = ['amap', 'baidu', 'tencent'];
       const statuses = await this.credentialBroker.availability(names);
       const providers = names.filter((provider) => statuses[provider]?.available);
-      const nextAvailableAt = names.map((provider) => statuses[provider]?.nextResetAt)
-        .filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value!)))
-        .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null;
-      const waits = names.map((provider) => statuses[provider]?.waitState).filter(Boolean);
+      const configuredProviders = names.filter((provider) => statuses[provider]?.known
+        && !String(statuses[provider]?.reason || '').startsWith('api_key_disabled:'));
+      const nextWaiting = names.map((provider) => statuses[provider])
+        .filter((status) => status?.nextResetAt && Number.isFinite(Date.parse(status.nextResetAt)))
+        .sort((left, right) => Date.parse(left.nextResetAt!) - Date.parse(right.nextResetAt!))[0];
+      const nextAvailableAt = nextWaiting?.nextResetAt || null;
       const configured = names.some((provider) => statuses[provider]?.known);
-      const reason = providers.length ? 'ready' : waits.includes('quota_wait') ? 'quota'
-        : waits.includes('cooldown_wait') ? 'cooldown'
+      const reason = providers.length ? 'ready' : nextWaiting?.waitState === 'quota_wait' ? 'quota'
+        : nextWaiting?.waitState === 'cooldown_wait' ? 'cooldown'
           : names.map((provider) => statuses[provider]?.reason).find(Boolean) || 'blocked';
-      return { configured, eligible: providers.length > 0, reason, nextAvailableAt, providers };
+      return { configured, eligible: providers.length > 0, reason, nextAvailableAt, providers, configuredProviders };
     } catch {
       return {
-        configured: true, eligible: false, reason: 'credential_broker_unavailable', nextAvailableAt: null, providers: []
+        configured: true, eligible: false, reason: 'credential_broker_unavailable', nextAvailableAt: null,
+        providers: [], configuredProviders: []
       };
     }
   }
@@ -397,6 +527,37 @@ export class ChinaDataService {
     this.nextAttemptAt = null;
     this.waitReason = reason;
     void this.persistRuntimeState('incomplete').catch(() => undefined);
+  }
+
+  private async executionFingerprint(providers: ProviderName[]): Promise<string> {
+    return createHash('sha256').update(JSON.stringify([
+      chinaExecutionRevision, checkpointStrategyVersions,
+      await this.control.credentialConfigurationRevision(providers)
+    ])).digest('hex');
+  }
+
+  private async deferFailedRun(fingerprint: string): Promise<boolean> {
+    const runs = await this.control.runs(3, 'china-communities');
+    const latest = runs[0];
+    if (!latest) return false;
+    let failures = 0;
+    for (const run of runs) {
+      if (run.status !== 'failed' || (run.target as Record<string, unknown>)?.executionFingerprint !== fingerprint
+        || Number((run.progress as Record<string, unknown>)?.accepted || 0) > 0
+        || run.error_code !== latest.error_code || run.error_message !== latest.error_message) break;
+      failures += 1;
+    }
+    if (!failures) return false;
+    const retryAt = Date.parse(String(latest.updated_at)) + 5 * 60_000 * 2 ** (failures - 1);
+    if (failures < 3 && retryAt <= Date.now()) return false;
+    this.syncState = failures >= 3 ? 'blocked' : 'cooldown_wait';
+    this.waitReason = `${failures >= 3 ? 'retry_suspended' : 'retry_backoff'}:${latest.error_code || 'CHINA_SYNC_FAILURE'}`;
+    if (this.continuationTimer) clearTimeout(this.continuationTimer);
+    this.continuationTimer = undefined;
+    this.nextAttemptAt = null;
+    if (failures < 3) this.armContinuation(new Date(retryAt));
+    await this.persistRuntimeState('incomplete');
+    return true;
   }
 
   private async acquireWorkerLease(): Promise<boolean> {
@@ -428,7 +589,7 @@ export class ChinaDataService {
       this.continuationTimer = undefined;
       void this.start().catch((error) => {
         if (error instanceof Error && error.message === 'CHINA_SYNC_STANDBY') return;
-        if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY'].includes(error.message)) {
+        if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'CHINA_SYNC_RETRY_WAIT', 'NO_AVAILABLE_KEY', 'NO_PENDING_SOURCE'].includes(error.message)) {
           this.markSchedulingFailure(error instanceof Error ? error.message : 'SYNC_START_FAILED');
         }
         void this.scheduleContinuation().catch(() => this.markSchedulingFailure());
@@ -474,6 +635,26 @@ export class ChinaDataService {
       .bind(chinaWorkerLeaseId, this.leaseOwnerToken).run();
   }
 
+  private async refreshCoverage(): Promise<void> {
+    for (let attempts = 1; attempts <= 3; attempts += 1) {
+      try {
+        await refreshAddressCoverage(this.addressDb, { chinaOnly: true });
+        await this.addressDb.prepare(`INSERT INTO address_pool_revisions(kind,version) VALUES ('generation:CN',?)
+          ON CONFLICT(kind) DO UPDATE SET version=excluded.version`).bind(randomUUID()).run();
+        return;
+      } catch (error) {
+        const code = String((error as { code?: string })?.code || 'COVERAGE_REFRESH_FAILED');
+        if (attempts < 3 && ['57014', '55P03', '40001', '40P01'].includes(code)) {
+          await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempts - 1)));
+          continue;
+        }
+        console.error('[china-sync] coverage refresh failed', code);
+        await this.control.audit('system', 'china.coverage.refresh_failed', 'CN', { code, attempts }).catch(() => undefined);
+        return;
+      }
+    }
+  }
+
   async initializeTargets(options: { scheduleContinuation?: boolean } = {}): Promise<void> {
     const now = nowIso();
     await this.addressDb.batch(initialChinaCities.map((city, index) => this.addressDb.prepare(`INSERT INTO cn_sync_targets(
@@ -483,6 +664,7 @@ export class ChinaDataService {
     await this.rebuildPublishedCommunitiesFromCandidates();
     if (!this.workerConfig) await this.reprocessRejectedMismatches();
     await this.reconcileCommunityVerification();
+    await this.refreshCoverage();
     if (options.scheduleContinuation !== false) {
       void this.scheduleContinuation(1_000).catch(() => this.markSchedulingFailure());
     }
@@ -594,6 +776,13 @@ export class ChinaDataService {
       COALESCE(SUM(CASE WHEN source_count>=2 THEN 1 ELSE 0 END),0) AS cross_verified,
       COUNT(DISTINCT city) AS cities FROM cn_communities_v2 community
       WHERE ${chinaCommunityPublicationClause('community')}`).first<Record<string, unknown>>();
+    const publishedCount = Number(counts?.total || 0);
+    // Keep the durable country projection aligned with the exact same
+    // publication query used by the API and generator.
+    await this.addressDb.prepare(`UPDATE sync_country_state
+      SET address_count=?,residential_count=?,updated_at=?
+      WHERE country_code='CN' AND (address_count<>? OR residential_count<>?)`)
+      .bind(publishedCount, publishedCount, nowIso(), publishedCount, publishedCount).run();
     let coverage = await this.addressDb.prepare(`SELECT COUNT(*) AS districts_total,
       SUM(CASE WHEN current_count>=target_count THEN 1 ELSE 0 END) AS districts_covered,
       SUM(GREATEST(target_count-current_count,0)) AS communities_needed FROM (
@@ -684,7 +873,11 @@ export class ChinaDataService {
     try {
     if (this.continuationTimer) clearTimeout(this.continuationTimer);
     this.continuationTimer = undefined;
+    const credentialState = await this.credentialState();
+    const executionFingerprint = await this.executionFingerprint(credentialState.configuredProviders);
+    if (await this.deferFailedRun(executionFingerprint)) throw new Error('CHINA_SYNC_RETRY_WAIT');
     await this.refreshAreaTargets();
+    await this.enrichMissingPostcodes();
     const rows = (await this.addressDb.prepare(`SELECT target.adcode AS id,target.province,target.city,target.district,target.query,
       target.target_count FROM cn_sync_area_targets target LEFT JOIN cn_communities_v2 community
       ON ${communityAreaMatch()}
@@ -701,13 +894,26 @@ export class ChinaDataService {
         id: city, province: '', city, district: '', query: city, targetCount: baselineTarget
       })));
     }
-    const providers = (await this.credentialState()).providers;
+    const policy = await getCountryPolicy(this.addressDb, 'CN');
+    const remainingAreas = await this.remainingSyncAreaIds(policy, targets.map((target) => target.id));
+    const pendingProviders = await this.providersWithPendingWindows(remainingAreas, credentialState.configuredProviders);
+    if (credentialState.configuredProviders.length && !pendingProviders.length) {
+      this.syncState = 'source_limited';
+      this.nextAttemptAt = null;
+      this.waitReason = await this.publishedCommunityCount() >= policy.targetCount
+        ? 'coverage_sources_exhausted' : 'validated_sources_exhausted';
+      await this.persistRuntimeState('incomplete');
+      throw new Error('NO_PENDING_SOURCE');
+    }
+    const providers = credentialState.providers.filter((provider) => pendingProviders.includes(provider));
     if (!providers.length) {
       await this.scheduleContinuation();
       throw new Error('NO_AVAILABLE_KEY');
     }
     if (!await this.acquireWorkerLease()) throw new Error('CHINA_SYNC_STANDBY');
-    const runId = await this.control.createRun('china-communities', { mode: 'automatic', targets: targets.length, providers });
+    const runId = await this.control.createRun('china-communities', {
+      mode: 'automatic', targets: targets.length, providers, executionFingerprint
+    });
     this.running = true;
     this.startLeaseHeartbeat();
     this.syncState = 'below_target';
@@ -727,11 +933,13 @@ export class ChinaDataService {
         throw error;
       }
     } else {
-      void this.execute(runId, targets, providers).finally(async () => {
+      const execution = this.execute(runId, targets, providers).finally(async () => {
         this.running = false;
         await this.releaseWorkerLease().catch(() => undefined);
         void this.scheduleContinuation().catch(() => this.markSchedulingFailure());
       });
+      this.executionPromise = execution;
+      void execution.catch((error) => console.error('[china-sync] detached execution failed', error));
     }
     return runId;
     } finally {
@@ -761,6 +969,17 @@ export class ChinaDataService {
     this.workerCompletion = new Promise((resolve) => { this.resolveWorkerCompletion = resolve; });
     let completed = false;
     let settled = false;
+    let timedOut = false;
+    const configuredTimeout = Number.parseInt(process.env.SYNC_JOB_TIMEOUT_MS || '', 10);
+    const workerTimeoutMs = Number.isFinite(configuredTimeout)
+      ? Math.max(60_000, Math.min(configuredTimeout, 24 * 60 * 60_000)) : 90 * 60_000;
+    let hardTimeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      void worker.terminate().catch(() => undefined);
+      settle('CHINA_SYNC_JOB_TIMEOUT');
+    }, workerTimeoutMs);
+    hardTimeout.unref?.();
     worker.on('message', (message: ChinaWorkerMessage) => {
       if (message?.type === 'progress') this.lastProgress = message.progress;
       else if (message?.type === 'done') {
@@ -774,6 +993,8 @@ export class ChinaDataService {
     const settle = (failure?: string): void => {
       if (settled) return;
       settled = true;
+      if (hardTimeout) clearTimeout(hardTimeout);
+      hardTimeout = undefined;
       if (this.activeWorker === worker) this.activeWorker = undefined;
       this.running = false;
       void this.releaseWorkerLease().catch(() => undefined).then(() => {
@@ -790,10 +1011,12 @@ export class ChinaDataService {
       void worker.terminate().catch(() => undefined);
       settle(error instanceof Error ? error.message : String(error));
     });
-    worker.once('exit', (code) => settle(completed || code === 0 ? undefined : `CHINA_SYNC_WORKER_EXIT_${code}`));
+    worker.once('exit', (code) => settle(timedOut ? 'CHINA_SYNC_JOB_TIMEOUT'
+      : completed || code === 0 ? undefined : `CHINA_SYNC_WORKER_EXIT_${code}`));
   }
 
   async wake(delayMs = 0): Promise<void> {
+    await this.refreshCoverage();
     this.syncState = 'below_target';
     this.nextAttemptAt = null;
     this.waitReason = '';
@@ -806,6 +1029,7 @@ export class ChinaDataService {
     this.continuationTimer = undefined;
     const worker = this.activeWorker;
     if (!worker) {
+      await this.executionPromise?.catch(() => undefined);
       await this.releaseWorkerLease().catch(() => undefined);
       return;
     }
@@ -836,7 +1060,18 @@ export class ChinaDataService {
       await this.persistRuntimeState('incomplete');
       return;
     }
-    const availability = await this.credentialState();
+    const fullAvailability = await this.credentialState();
+    const remainingAreas = await this.remainingSyncAreaIds(policy);
+    const pendingProviders = await this.providersWithPendingWindows(remainingAreas, fullAvailability.configuredProviders);
+    if (remainingAreas.length && fullAvailability.configuredProviders.length && !pendingProviders.length) {
+      this.syncState = 'source_limited';
+      this.waitReason = await this.publishedCommunityCount() >= policy.targetCount
+        ? 'coverage_sources_exhausted' : 'validated_sources_exhausted';
+      this.nextAttemptAt = null;
+      await this.persistRuntimeState('incomplete');
+      return;
+    }
+    const availability = pendingProviders.length ? await this.credentialState(pendingProviders) : fullAvailability;
     if (!availability.configured || availability.reason === 'blocked') {
       this.syncState = 'blocked';
       this.waitReason = availability.reason;
@@ -844,6 +1079,7 @@ export class ChinaDataService {
       await this.persistRuntimeState('incomplete');
       return;
     }
+    if (availability.eligible && await this.deferFailedRun(await this.executionFingerprint(fullAvailability.configuredProviders))) return;
     const dueAt = availability.eligible
       ? new Date(Date.now() + Math.max(0, minimumDelayMs))
       : availability.nextAvailableAt ? new Date(availability.nextAvailableAt) : null;
@@ -868,7 +1104,7 @@ export class ChinaDataService {
       this.continuationTimer = undefined;
       void this.start().catch((error) => {
         if (error instanceof Error && error.message === 'CHINA_SYNC_STANDBY') return;
-        if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY'].includes(error.message)) {
+        if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'CHINA_SYNC_RETRY_WAIT', 'NO_AVAILABLE_KEY', 'NO_PENDING_SOURCE'].includes(error.message)) {
           this.markSchedulingFailure(error instanceof Error ? error.message : 'SYNC_START_FAILED');
         }
         void this.scheduleContinuation().catch(() => this.markSchedulingFailure());
@@ -881,15 +1117,44 @@ export class ChinaDataService {
     let accepted = 0;
     let requests = 0;
     let adapterRejectedPages = 0;
+    let rawCount = 0;
+    let acceptedCount = 0;
+    let rejectedCount = 0;
+    let duplicateCount = 0;
+    let beforeCount: number | null = null;
+    const rejectionReasons: Record<string, number> = {};
+    const reject = (reason: string, count = 1): void => {
+      if (count <= 0) return;
+      rejectedCount += count;
+      rejectionReasons[reason] = (rejectionReasons[reason] || 0) + count;
+    };
+    const recordPage = (result: ProviderPage): void => {
+      rawCount += result.rawCount;
+      reject('adapter_rejected', result.rawCount - result.candidates.length);
+    };
+    const updateRun = async (status: string, progress: Record<string, unknown>, error?: { code: string; message: string }): Promise<void> => {
+      const afterCount = status === 'running' ? null : await this.publishedCommunityCount().catch(() => null);
+      await this.control.updateRun(runId, status, { ...progress, beforeCount, afterCount,
+        netGrowth: beforeCount !== null && afterCount !== null ? afterCount - beforeCount : null,
+        candidateCount: rawCount, acceptedCount, rejectedCount, rejectionReasons,
+        metrics: { rawCount, duplicateCount, insertedCount: accepted,
+          unprocessedCount: rawCount - acceptedCount - rejectedCount }
+      }, error);
+    };
     const unavailable = new Set<ProviderName>();
+    const paused = new Set<ProviderName>();
+    const markUnavailable = async (provider: ProviderName, checkpointKey: string): Promise<void> => {
+      unavailable.add(provider);
+      if (await this.checkpointStatus(provider, checkpointKey) === 'paused') paused.add(provider);
+    };
     try {
       const policy = await getCountryPolicy(this.addressDb, 'CN');
+      beforeCount = await this.publishedCommunityCount();
       if (!policy.enabled) {
-        await this.control.updateRun(runId, 'succeeded', { phase: 'disabled', accepted, requests, targets: 0, providers: 0 });
+        await updateRun('succeeded', { phase: 'disabled', accepted, requests, targets: 0, providers: 0 });
         return;
       }
       const countryTarget = policy.targetCount;
-      await this.pruneOverriddenExcess();
       // In-memory counters replace per-page COUNT queries and reduce database round trips.
       // so repeated counting over cn_communities_v2 starves the event loop.
       let publishedCount = await this.publishedCommunityCount();
@@ -916,7 +1181,13 @@ export class ChinaDataService {
         let current = await currentTargetCount(target);
         for (const candidate of candidates) {
           if (quotaReached()) break;
-          const inserted = await this.processCandidate(candidate, target);
+          const inserted = await this.processCandidate(candidate, target, (reason, inserted) => {
+            if (reason) reject(reason);
+            else {
+              acceptedCount += 1;
+              if (!inserted) duplicateCount += 1;
+            }
+          });
           accepted += inserted;
           publishedCount += inserted;
           current += inserted;
@@ -926,16 +1197,19 @@ export class ChinaDataService {
           if (processedCandidates % candidateYieldInterval === 0) await yieldEventLoop();
         }
       };
-      const districtWindowTerminal = async (provider: ProviderName, districtAdcode: string): Promise<boolean> =>
-        await this.resumePage(provider, districtAdcode, maxPagesPerTarget) > maxPagesPerTarget;
+      const districtWindowTerminal = async (provider: ProviderName, districtAdcode: string): Promise<boolean> => {
+        const maxPages = maxPagesForProvider(provider);
+        return await this.resumePage(provider, districtAdcode, maxPages) > maxPages;
+      };
       const townshipQueue = async (provider: ProviderName, districtAdcode: string): Promise<Array<{ adcode: string; name: string; page: number }>> => {
         const townships = (await this.addressDb.prepare(`SELECT adcode,name FROM cn_admin_areas
           WHERE parent_adcode=? AND level='township' ORDER BY adcode`).bind(districtAdcode)
           .all<{ adcode: string; name: string }>()).results;
         const queue: Array<{ adcode: string; name: string; page: number }> = [];
+        const maxPages = maxPagesForProvider(provider);
         for (const township of townships) {
-          const page = await this.resumePage(provider, String(township.adcode), maxPagesPerTarget);
-          if (page <= maxPagesPerTarget) queue.push({ adcode: String(township.adcode), name: String(township.name), page });
+          const page = await this.resumePage(provider, String(township.adcode), maxPages);
+          if (page <= maxPages) queue.push({ adcode: String(township.adcode), name: String(township.name), page });
         }
         return queue;
       };
@@ -943,32 +1217,44 @@ export class ChinaDataService {
       // own resumable checkpoint keyed by the township adcode; townships advance round-robin so
       // the high-yield first pages of every township are fetched before any deep page.
       const processTownshipRounds = async (provider: ProviderName, target: SyncTarget, phase: 'baseline' | 'enrichment'): Promise<void> => {
+        const maxPages = maxPagesForProvider(provider);
         const queue = await townshipQueue(provider, target.id);
         while (queue.length) {
           for (let index = 0; index < queue.length;) {
             if (quotaReached() || (countMet() && !tracker.needsSync(target.id))) return;
             const entry = queue[index];
+            const previousPageSignature = await this.checkpointPageSignature(provider, entry.adcode);
             const result = await this.fetchPage(provider, target, entry.page, accepted, async () => { requests += 1; }, entry.adcode, entry.name);
             if (!result) {
-              unavailable.add(provider);
+              await markUnavailable(provider, entry.adcode);
               return;
             }
+            recordPage(result);
             if (result.rawCount === 0) {
-              await this.writeCheckpoint(provider, entry.adcode, entry.page, 'exhausted', accepted);
+              await this.writeCheckpoint(provider, entry.adcode, entry.page, 'exhausted', accepted, '', result.pageSignature);
+              queue.splice(index, 1);
+              continue;
+            }
+            if (previousPageSignature && previousPageSignature === result.pageSignature) {
+              await this.writeCheckpoint(provider, entry.adcode, entry.page, 'exhausted', accepted,
+                'repeated_page_signature', result.pageSignature);
               queue.splice(index, 1);
               continue;
             }
             if (!result.candidates.length) {
               adapterRejectedPages += 1;
-              await this.writeCheckpoint(provider, entry.adcode, entry.page, 'adapter_rejected_all', accepted, `raw_count=${result.rawCount}`);
-              queue.splice(index, 1);
+              await this.writeCheckpoint(provider, entry.adcode, entry.page + 1, phase, accepted,
+                `adapter_rejected_all:raw_count=${result.rawCount}`, result.pageSignature);
+              entry.page += 1;
+              if (entry.page > maxPages) queue.splice(index, 1);
+              else index += 1;
               continue;
             }
             await processCandidates(result.candidates, target);
-            await this.writeCheckpoint(provider, entry.adcode, entry.page + 1, phase, accepted);
-            await this.control.updateRun(runId, 'running', { phase, accepted, requests, target: `${target.query}${entry.name}`, provider, page: entry.page });
+            await this.writeCheckpoint(provider, entry.adcode, entry.page + 1, phase, accepted, '', result.pageSignature);
+            await updateRun('running', { phase, accepted, requests, target: `${target.query}${entry.name}`, provider, page: entry.page });
             entry.page += 1;
-            if (entry.page > maxPagesPerTarget) {
+            if (entry.page > maxPages) {
               queue.splice(index, 1);
               continue;
             }
@@ -976,34 +1262,43 @@ export class ChinaDataService {
           }
         }
       };
-      await this.control.updateRun(runId, 'running', { phase: 'baseline', accepted, requests, target: '', provider: '', page: 0 });
+      await updateRun('running', { phase: 'baseline', accepted, requests, target: '', provider: '', page: 0 });
       for (const target of targets) {
         targetIterations += 1;
         if (targetIterations % targetYieldInterval === 0) await yieldEventLoop();
         if (quotaReached()) break;
         if (coverageSkipped(target)) continue;
         for (const provider of providers) {
+          const maxPages = maxPagesForProvider(provider);
           if (quotaReached()) break;
           if (unavailable.has(provider)) continue;
-          const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
-          for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
+          const firstPage = await this.resumePage(provider, target.id, maxPages);
+          for (let page = firstPage; page <= maxPages; page += 1) {
+            const previousPageSignature = await this.checkpointPageSignature(provider, target.id);
             const result = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
             if (!result) {
-              unavailable.add(provider);
+              await markUnavailable(provider, target.id);
               break;
             }
+            recordPage(result);
             if (result.rawCount === 0) {
-              await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted);
+              await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted, '', result.pageSignature);
+              break;
+            }
+            if (previousPageSignature && previousPageSignature === result.pageSignature) {
+              await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted,
+                'repeated_page_signature', result.pageSignature);
               break;
             }
             if (!result.candidates.length) {
               adapterRejectedPages += 1;
-              await this.writeCheckpoint(provider, target.id, page, 'adapter_rejected_all', accepted, `raw_count=${result.rawCount}`);
-              break;
+              await this.writeCheckpoint(provider, target.id, page + 1, 'baseline', accepted,
+                `adapter_rejected_all:raw_count=${result.rawCount}`, result.pageSignature);
+              continue;
             }
             await processCandidates(result.candidates, target);
-            await this.writeCheckpoint(provider, target.id, page + 1, 'baseline', accepted);
-            await this.control.updateRun(runId, 'running', { phase: 'baseline', accepted, requests, target: target.query, provider, page });
+            await this.writeCheckpoint(provider, target.id, page + 1, 'baseline', accepted, '', result.pageSignature);
+            await updateRun('running', { phase: 'baseline', accepted, requests, target: target.query, provider, page });
             if (quotaReached()) break;
             if (await currentTargetCount(target) >= target.targetCount) break;
           }
@@ -1014,33 +1309,47 @@ export class ChinaDataService {
           }
         }
         if (unavailable.size === providers.length) {
-          await this.control.updateRun(runId, 'paused_quota', { phase: 'baseline', accepted, requests, target: target.query });
+          const status = paused.size === providers.length ? 'paused_quota' : 'failed';
+          await updateRun(status, { phase: 'baseline', accepted, requests, target: target.query },
+            status === 'failed' ? { code: 'CHINA_SYNC_SOURCE_FAILURE', message: 'All configured China sources failed for this run' } : undefined);
           return;
         }
       }
       if (await this.baselineComplete()) await this.retireLegacyChinaResidential();
-      await this.control.updateRun(runId, 'running', { phase: 'enrichment', accepted, requests, target: '', provider: '', page: 0 });
+      await updateRun('running', { phase: 'enrichment', accepted, requests, target: '', provider: '', page: 0 });
       for (const target of targets) {
         targetIterations += 1;
         if (targetIterations % targetYieldInterval === 0) await yieldEventLoop();
         if (quotaReached()) break;
         if (coverageSkipped(target)) continue;
         for (const provider of providers) {
+          const maxPages = maxPagesForProvider(provider);
           if (quotaReached()) break;
           if (unavailable.has(provider)) continue;
-          const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
-          for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
+          const firstPage = await this.resumePage(provider, target.id, maxPages);
+          for (let page = firstPage; page <= maxPages; page += 1) {
+            const previousPageSignature = await this.checkpointPageSignature(provider, target.id);
             const result = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
-            if (!result) { unavailable.add(provider); break; }
-            if (result.rawCount === 0) { await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted); break; }
-            if (!result.candidates.length) {
-              adapterRejectedPages += 1;
-              await this.writeCheckpoint(provider, target.id, page, 'adapter_rejected_all', accepted, `raw_count=${result.rawCount}`);
+            if (!result) { await markUnavailable(provider, target.id); break; }
+            recordPage(result);
+            if (result.rawCount === 0) {
+              await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted, '', result.pageSignature);
               break;
             }
+            if (previousPageSignature && previousPageSignature === result.pageSignature) {
+              await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted,
+                'repeated_page_signature', result.pageSignature);
+              break;
+            }
+            if (!result.candidates.length) {
+              adapterRejectedPages += 1;
+              await this.writeCheckpoint(provider, target.id, page + 1, 'enrichment', accepted,
+                `adapter_rejected_all:raw_count=${result.rawCount}`, result.pageSignature);
+              continue;
+            }
             await processCandidates(result.candidates, target);
-            await this.writeCheckpoint(provider, target.id, page + 1, 'enrichment', accepted);
-            await this.control.updateRun(runId, 'running', { phase: 'enrichment', accepted, requests, target: target.query, provider, page });
+            await this.writeCheckpoint(provider, target.id, page + 1, 'enrichment', accepted, '', result.pageSignature);
+            await updateRun('running', { phase: 'enrichment', accepted, requests, target: target.query, provider, page });
             if (quotaReached()) break;
           }
           if (!unavailable.has(provider) && !quotaReached()
@@ -1050,31 +1359,29 @@ export class ChinaDataService {
           }
         }
         if (unavailable.size === providers.length) {
-          await this.control.updateRun(runId, 'paused_quota', { phase: 'enrichment', accepted, requests, target: target.query });
+          const status = paused.size === providers.length ? 'paused_quota' : 'failed';
+          await updateRun(status, { phase: 'enrichment', accepted, requests, target: target.query },
+            status === 'failed' ? { code: 'CHINA_SYNC_SOURCE_FAILURE', message: 'All configured China sources failed for this run' } : undefined);
           return;
         }
       }
-      await this.control.updateRun(runId, adapterRejectedPages ? 'needs_review' : 'succeeded', {
+      await updateRun(adapterRejectedPages ? 'needs_review' : 'succeeded', {
         phase: 'complete', accepted, requests, targets: targets.length, providers: providers.length, adapterRejectedPages,
         published: publishedCount
       });
-      if (countMet() && !tracker.met()) {
-        if (!requests || await this.coverageSourcesExhausted(tracker.uncovered(), providers)) {
-          // A completed coverage run without a single request has no page left to fetch
-          // from the active provider set; settle instead of rescheduling in seconds.
-          this.syncState = 'source_limited';
-          this.waitReason = 'coverage_sources_exhausted';
-        }
-      } else if (!requests && await this.publishedCommunityCount() < countryTarget) {
+      const configuredProviders = (await this.credentialState()).configuredProviders;
+      const remainingAreas = countMet() ? tracker.uncovered() : targets.map((target) => target.id);
+      if (!quotaReached() && await this.coverageSourcesExhausted(remainingAreas, configuredProviders)) {
         this.syncState = 'source_limited';
-        this.waitReason = 'validated_sources_exhausted';
+        this.waitReason = countMet() ? 'coverage_sources_exhausted' : 'validated_sources_exhausted';
       }
     } catch (error) {
-      await this.control.updateRun(runId, 'failed', { accepted, requests }, {
-        code: error instanceof Error ? error.name : 'SYNC_ERROR', message: error instanceof Error ? error.message : String(error)
+      await updateRun('failed', { accepted, requests }, {
+        code: String((error as { code?: string })?.code || (error instanceof Error ? error.name : 'SYNC_ERROR')),
+        message: error instanceof Error ? error.message : String(error)
       });
     } finally {
-      await refreshAddressCoverage(this.addressDb).catch(() => undefined);
+      await this.refreshCoverage();
     }
   }
 
@@ -1131,59 +1438,53 @@ export class ChinaDataService {
     return (await this.coverageTracker(policy)).met() ? 'met' : 'incomplete';
   }
 
-  private async pruneOverriddenExcess(): Promise<number> {
-    const overrides = (await this.addressDb.prepare(`SELECT node_key,min_count FROM sync_node_overrides
-      WHERE country_code='CN' AND min_count IS NOT NULL`).all<{ node_key: string; min_count: number }>()).results;
-    let retiredTotal = 0;
-    for (const override of overrides) {
-      const scope = chinaNodeScope(String(override.node_key));
-      if (!scope) continue;
-      const filters = Object.entries(scope);
-      const where = `${filters.map(([column]) => `community.${column}=?`).join(' AND ')}
-        AND ${chinaCommunityPublicationClause('community')}`;
-      const bindings = filters.map(([, value]) => value);
-      const current = Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_communities_v2 community WHERE ${where}`)
-        .bind(...bindings).first('total') || 0);
-      const target = Number(override.min_count);
-      if (current <= target) continue;
-      const excess = current - target;
-      const retiredIds = (await this.addressDb.prepare(`SELECT community.id FROM cn_communities_v2 community
-        WHERE ${where} ORDER BY community.source_count,community.verification_level,community.last_seen_at,community.id LIMIT ?`)
-        .bind(...bindings, excess).all<{ id: string }>()).results.map((row) => row.id);
-      if (retiredIds.length) {
-        await this.addressDb.prepare(`UPDATE cn_communities_v2 SET active=0,updated_at=?
-          WHERE id IN (${retiredIds.map(() => '?').join(',')})`).bind(nowIso(), ...retiredIds).run();
-      }
-      await this.control.audit('system', 'china.communities.prune', String(override.node_key), { retired: excess, target });
-      retiredTotal += excess;
-    }
-    return retiredTotal;
+  private async remainingSyncAreaIds(policy: CountryPolicy, fallback: string[] = []): Promise<string[]> {
+    const targetIds = (await this.addressDb.prepare(`SELECT adcode FROM cn_sync_area_targets
+      WHERE enabled=1 ORDER BY priority,adcode`).all<{ adcode: string }>()).results.map((row) => String(row.adcode));
+    const areas = targetIds.length ? targetIds : fallback;
+    if (await this.publishedCommunityCount() < policy.targetCount) return areas;
+    return (await this.coverageTracker(policy)).uncovered();
   }
 
   private async coverageSourcesExhausted(uncoveredAreas: string[], providers: ProviderName[]): Promise<boolean> {
     if (!uncoveredAreas.length || !providers.length) return false;
-    const placeholders = providers.map(() => '?').join(',');
-    for (const adcode of uncoveredAreas) {
-      // A checkpoint past the page budget is as terminal as an exhausted or rejected one.
-      const exhausted = Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_sync_checkpoints
-        WHERE city=? AND strategy_version=? AND provider IN (${placeholders})
-        AND (status IN ('exhausted','adapter_rejected_all') OR page>?)`)
-        .bind(adcode, checkpointStrategyVersion, ...providers, maxPagesPerTarget).first('total') || 0);
-      if (exhausted < providers.length) return false;
-      // The district only turns terminal once its own window and every township window are
-      // consumed; an unqueried township keeps the area eligible for the next run.
-      const townships = Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_admin_areas
-        WHERE parent_adcode=? AND level='township'`).bind(adcode).first('total') || 0);
-      if (!townships) continue;
-      const terminalTownshipWindows = Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_admin_areas township
-        JOIN cn_sync_checkpoints checkpoint ON checkpoint.city=township.adcode AND checkpoint.strategy_version=?
-          AND checkpoint.provider IN (${placeholders})
-          AND (checkpoint.status IN ('exhausted','adapter_rejected_all') OR checkpoint.page>?)
-        WHERE township.parent_adcode=? AND township.level='township'`)
-        .bind(checkpointStrategyVersion, ...providers, maxPagesPerTarget, adcode).first('total') || 0);
-      if (terminalTownshipWindows < townships * providers.length) return false;
-    }
-    return true;
+    return (await this.providersWithPendingWindows(uncoveredAreas, providers)).length === 0;
+  }
+
+  private async providersWithPendingWindows(areas: string[], providers: ProviderName[]): Promise<ProviderName[]> {
+    const remaining = [...new Set(areas.filter(Boolean))];
+    if (!remaining.length || !providers.length) return [];
+    const placeholders = remaining.map(() => '?').join(',');
+    const knownTargets = Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_sync_area_targets
+      WHERE enabled=1 AND adcode IN (${placeholders})`).bind(...remaining).first('total') || 0);
+    if (!knownTargets) return providers;
+    const pending = await Promise.all(providers.map(async (provider) => {
+      const maxPages = maxPagesForProvider(provider);
+      const value = await this.addressDb.prepare(`SELECT 1 AS pending FROM cn_sync_area_targets target
+          LEFT JOIN cn_sync_checkpoints checkpoint ON checkpoint.city=target.adcode
+            AND checkpoint.provider=? AND checkpoint.strategy_version=?
+          WHERE target.enabled=1 AND target.adcode IN (${placeholders}) AND (checkpoint.city IS NULL OR NOT (
+            checkpoint.status='exhausted' OR checkpoint.page>?
+            OR (checkpoint.status='adapter_rejected_all' AND checkpoint.page>=?)
+          ))
+          UNION ALL
+          SELECT 1 FROM cn_admin_areas township
+          JOIN cn_sync_area_targets target ON target.adcode=township.parent_adcode AND target.enabled=1
+          LEFT JOIN cn_sync_checkpoints checkpoint ON checkpoint.city=township.adcode
+            AND checkpoint.provider=? AND checkpoint.strategy_version=?
+          WHERE target.adcode IN (${placeholders}) AND township.level='township'
+            AND (checkpoint.city IS NULL OR NOT (
+            checkpoint.status='exhausted' OR checkpoint.page>?
+            OR (checkpoint.status='adapter_rejected_all' AND checkpoint.page>=?)
+          ))
+          LIMIT 1
+        `)
+        .bind(provider, checkpointStrategyVersion(provider), ...remaining, maxPages, maxPages,
+          provider, checkpointStrategyVersion(provider), ...remaining, maxPages, maxPages)
+        .first('pending');
+      return value ? provider : null;
+    }));
+    return pending.filter((provider): provider is ProviderName => provider !== null);
   }
 
   private async baselineComplete(): Promise<boolean> {
@@ -1196,12 +1497,28 @@ export class ChinaDataService {
       AND property_type IN ('residential','apartment')`).bind(nowIso()).run();
   }
 
+  private async checkpointPageSignature(provider: ProviderName, city: string): Promise<string> {
+    const checkpoint = await this.addressDb.prepare(`SELECT page_signature FROM cn_sync_checkpoints
+      WHERE provider=? AND city=? AND strategy_version=?`)
+      .bind(provider, city, checkpointStrategyVersion(provider)).first<{ page_signature?: string }>();
+    return String(checkpoint?.page_signature || '');
+  }
+
+  private async checkpointStatus(provider: ProviderName, city: string): Promise<string> {
+    const checkpoint = await this.addressDb.prepare(`SELECT status FROM cn_sync_checkpoints
+      WHERE provider=? AND city=?`).bind(provider, city).first<{ status?: string }>();
+    return String(checkpoint?.status || 'failed');
+  }
+
   private async resumePage(provider: ProviderName, city: string, maxPages: number): Promise<number> {
     const checkpoint = await this.addressDb.prepare(`SELECT page,status,strategy_version FROM cn_sync_checkpoints
       WHERE provider=? AND city=?`).bind(provider, city).first<{ page: number; status: string; strategy_version: string }>();
     if (!checkpoint) return 1;
-    if (checkpoint.strategy_version !== checkpointStrategyVersion) return 1;
-    if (['exhausted', 'adapter_rejected_all'].includes(checkpoint.status)) return maxPages + 1;
+    if (checkpoint.strategy_version !== checkpointStrategyVersion(provider)) return 1;
+    if (checkpoint.status === 'exhausted') return maxPages + 1;
+    if (checkpoint.status === 'adapter_rejected_all') {
+      return Math.max(1, Math.min(maxPages + 1, Math.trunc(checkpoint.page || 1) + 1));
+    }
     return Math.max(1, Math.min(maxPages + 1, Math.trunc(checkpoint.page || 1)));
   }
 
@@ -1218,20 +1535,33 @@ export class ChinaDataService {
     let lastError = '';
     const region = provider === 'amap' && /^\d{6}$/u.test(target.id) ? target.id : target.query;
     if (this.credentialBroker) {
-      try {
-        const result = await fetchBrokerCommunities(provider, region, page, this.credentialBroker, subdivision);
-        await requested();
-        return result;
-      } catch (error) {
-        await requested();
-        lastError = error instanceof Error ? error.message : String(error);
-        await this.writeCheckpoint(provider, key, page,
-          /^SOURCE_(?:CREDENTIAL|QUOTA)|^BROKER_/u.test(String((error as { code?: string })?.code || '')) ? 'paused' : 'failed',
-          accepted, lastError);
-        return null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const result = await fetchBrokerCommunities(provider, region, page, this.credentialBroker, subdivision);
+          await requested();
+          return result;
+        } catch (error) {
+          await requested();
+          lastError = error instanceof Error ? error.message : String(error);
+          const brokerCode = String((error as { code?: string })?.code || '');
+          const retryAt = Date.parse(String((error as { retryAt?: string })?.retryAt || ''));
+          const waitMs = retryAt - Date.now();
+          if (brokerCode === 'SOURCE_RATE_LIMITED' && attempt < 2 && Number.isFinite(waitMs)
+            && waitMs <= credentialPacingMaxWaitMs) {
+            await new Promise((resolveWait) => setTimeout(resolveWait, Math.max(1, waitMs)));
+            continue;
+          }
+          const waitForCredential = ['SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CREDENTIAL_EXPIRED',
+            'SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED'].includes(brokerCode);
+          await this.writeCheckpoint(provider, key, page, waitForCredential ? 'paused' : 'failed',
+            accepted, lastError);
+          return null;
+        }
       }
+      return null;
     }
     const attemptedCredentialIds = new Set<string>();
+    let lastOutcome: ProviderRequestError['outcome'] | null = null;
     while (true) {
       const credential = await this.control.acquireCredential(provider, { excludeIds: attemptedCredentialIds });
       if (!credential) {
@@ -1244,7 +1574,9 @@ export class ChinaDataService {
             continue;
           }
         }
-        await this.writeCheckpoint(provider, key, page, 'paused', accepted, lastError);
+        const terminalStatus = lastOutcome && !['qps', 'quota', 'auth'].includes(lastOutcome)
+          ? 'failed' : 'paused';
+        await this.writeCheckpoint(provider, key, page, terminalStatus, accepted, lastError);
         return null;
       }
       attemptedCredentialIds.add(credential.id);
@@ -1257,6 +1589,7 @@ export class ChinaDataService {
       } catch (error) {
         await requested();
         const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
+        lastOutcome = outcome;
         lastError = error instanceof Error ? error.message : String(error);
         await this.control.reportCredential(credential.id, outcome, error instanceof ProviderRequestError
           ? { retryAt: error.retryAt, period: error.quotaPeriod } : undefined);
@@ -1265,12 +1598,16 @@ export class ChinaDataService {
     }
   }
 
-  private async writeCheckpoint(provider: string, city: string, page: number, status: string, accepted: number, error = ''): Promise<void> {
-    await this.addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,last_error,updated_at,strategy_version)
-      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(provider,city) DO UPDATE SET page=excluded.page,status=excluded.status,
+  private async writeCheckpoint(provider: string, city: string, page: number, status: string, accepted: number, error = '', pageSignature = ''): Promise<void> {
+    await this.addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,last_error,page_signature,updated_at,strategy_version)
+      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,city) DO UPDATE SET page=excluded.page,status=excluded.status,
       accepted_count=excluded.accepted_count,last_error=excluded.last_error,updated_at=excluded.updated_at,
+      page_signature=CASE WHEN excluded.page_signature IS NULL
+        AND cn_sync_checkpoints.strategy_version=excluded.strategy_version
+        THEN cn_sync_checkpoints.page_signature ELSE excluded.page_signature END,
       strategy_version=excluded.strategy_version`)
-      .bind(provider, city, page, status, accepted, error.slice(0, 500) || null, nowIso(), checkpointStrategyVersion).run();
+      .bind(provider, city, page, status, accepted, error.slice(0, 500) || null, pageSignature || null,
+        nowIso(), checkpointStrategyVersion(provider)).run();
   }
 
   private async hierarchyValid(candidate: CommunityCandidate, target?: SyncTarget): Promise<boolean> {
@@ -1311,17 +1648,18 @@ export class ChinaDataService {
     const now = nowIso();
     await this.addressDb.prepare(`INSERT INTO cn_ingest_candidates(provider,provider_poi_id,target_adcode,name,address,province,
       city,district,township,longitude,latitude,raw_longitude,raw_latitude,raw_crs,typecode,adcode,response_hash,decision,
-      rejection_reason,strategy_version,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      rejection_reason,strategy_version,first_seen_at,last_seen_at,postcode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(provider,provider_poi_id) DO UPDATE SET target_adcode=excluded.target_adcode,name=excluded.name,
       address=excluded.address,province=excluded.province,city=excluded.city,district=excluded.district,
       township=excluded.township,longitude=excluded.longitude,latitude=excluded.latitude,
       raw_longitude=excluded.raw_longitude,raw_latitude=excluded.raw_latitude,raw_crs=excluded.raw_crs,
       typecode=excluded.typecode,adcode=excluded.adcode,response_hash=excluded.response_hash,decision=excluded.decision,
-      rejection_reason=excluded.rejection_reason,strategy_version=excluded.strategy_version,last_seen_at=excluded.last_seen_at`).bind(
+      rejection_reason=excluded.rejection_reason,strategy_version=excluded.strategy_version,last_seen_at=excluded.last_seen_at,
+      postcode=excluded.postcode`).bind(
       candidate.provider, candidate.providerPoiId, targetAdcode, candidate.name, candidate.address, candidate.province,
       candidate.city, candidate.district, candidate.township, candidate.longitude, candidate.latitude,
       candidate.rawLongitude, candidate.rawLatitude, candidate.rawCrs, candidate.typecode, candidate.adcode,
-      candidate.responseHash, decision, rejectionReason, checkpointStrategyVersion, now, now
+      candidate.responseHash, decision, rejectionReason, checkpointStrategyVersion(candidate.provider), now, now, candidate.postcode || ''
     ).run();
   }
 
@@ -1329,6 +1667,7 @@ export class ChinaDataService {
     if (!candidate.name) return 'missing_name';
     if (!providerResidentialTypeValid(candidate)) return 'non_residential_provider_type';
     if (!candidate.province || !candidate.city || !candidate.district) return 'missing_administrative_area';
+    if ((await this.chinaPostcodeCatalog()).length && !/^\d{6}$/u.test(candidate.postcode || '')) return 'missing_postcode';
     if (!Number.isFinite(candidate.latitude) || !Number.isFinite(candidate.longitude)) return 'invalid_coordinates';
     if (!isChinaDeliveryAddress(candidate.address)) return 'invalid_delivery_address';
     const nonResidential = findNonResidentialMatch({
@@ -1342,17 +1681,28 @@ export class ChinaDataService {
     return '';
   }
 
-  private async processCandidate(candidate: CommunityCandidate, target?: SyncTarget): Promise<number> {
+  private async processCandidate(candidate: CommunityCandidate, target?: SyncTarget, recordDecision?: (reason: string, inserted: number) => void): Promise<number> {
     candidate = { ...candidate, address: normalizeChinaProviderAddress(candidate.address, candidate) };
+    if (!/^\d{6}$/u.test(candidate.postcode || '')) {
+      candidate = { ...candidate, postcode: this.resolveChinaPostcode(candidate, await this.chinaPostcodeCatalog()) };
+    }
     const targetAdcode = target?.id || candidate.adcode;
     await this.persistCandidate(candidate, targetAdcode, 'pending');
     const rejectionReason = await this.candidateRejectionReason(candidate, target);
     if (rejectionReason) {
       await this.persistCandidate(candidate, targetAdcode, 'rejected', rejectionReason);
+      recordDecision?.(rejectionReason, 0);
       return 0;
     }
-    await this.persistCandidate(candidate, targetAdcode, 'accepted');
-    return this.upsertCandidate(candidate);
+    const inserted = await this.addressDb.transaction(async () => {
+      await this.persistCandidate(candidate, targetAdcode, 'accepted');
+      const inserted = await this.upsertCandidate(candidate);
+      await this.addressDb.prepare(`UPDATE cn_community_sources SET accepted_strategy_version=?
+        WHERE provider=? AND provider_poi_id=?`).bind(checkpointStrategyVersion(candidate.provider), candidate.provider, candidate.providerPoiId).run();
+      return inserted;
+    });
+    recordDecision?.('', inserted);
+    return inserted;
   }
 
   private async refreshCommunityVerification(communityId: string, lastSeenAt: string | null): Promise<void> {
@@ -1369,7 +1719,9 @@ export class ChinaDataService {
 
   private async upsertCandidate(candidate: CommunityCandidate): Promise<number> {
     const address = normalizeChinaProviderAddress(candidate.address, candidate);
+    const postcodeRequired = (await this.chinaPostcodeCatalog()).length > 0;
     if (!candidate.name || !providerResidentialTypeValid(candidate) || !isChinaDeliveryAddress(address) || !candidate.province || !candidate.city || !candidate.district
+      || (postcodeRequired && !/^\d{6}$/u.test(candidate.postcode || ''))
       || !Number.isFinite(candidate.latitude) || !Number.isFinite(candidate.longitude)
       || findNonResidentialMatch({ countryCode: 'CN', buildingName: candidate.name, formattedAddress: address }).excluded
       || matchesCustomBlacklist([candidate.name, address, candidate.province, candidate.city, candidate.district])) return 0;
@@ -1386,6 +1738,8 @@ export class ChinaDataService {
         candidate.name, candidate.address, candidate.rawLongitude, candidate.rawLatitude, candidate.responseHash, now,
         candidate.provider, candidate.providerPoiId
       ).run();
+      await this.addressDb.prepare('UPDATE cn_communities_v2 SET postcode=COALESCE(NULLIF(?,\'\'),postcode),updated_at=? WHERE id=?')
+        .bind(candidate.postcode || '', now, existingSource.community_id).run();
       await this.refreshCommunityVerification(existingSource.community_id, now);
       return 0;
     }
@@ -1404,10 +1758,10 @@ export class ChinaDataService {
     const communityId = matched?.id || randomUUID();
     if (!matched) {
       await this.addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
-        provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'L1',1,?,?,?)`).bind(
+        provider_address,postcode,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'L1',1,?,?,?)`).bind(
         communityId, candidate.name, normalized, candidate.province, candidate.city, candidate.district, candidate.township,
-        candidate.address, candidate.longitude, candidate.latitude, now, now, now
+        candidate.address, candidate.postcode || '', candidate.longitude, candidate.latitude, now, now, now
       ).run();
     }
     if (existingSource) {
@@ -1429,6 +1783,8 @@ export class ChinaDataService {
         candidate.rawLongitude, candidate.rawLatitude, candidate.rawCrs, candidate.responseHash, now, now
       ).run();
     }
+    await this.addressDb.prepare('UPDATE cn_communities_v2 SET postcode=COALESCE(NULLIF(?,\'\'),postcode),updated_at=? WHERE id=?')
+      .bind(candidate.postcode || '', now, communityId).run();
     await this.refreshCommunityVerification(communityId, now);
     return matched ? 0 : 1;
   }
@@ -1451,7 +1807,7 @@ export class ChinaDataService {
       }
     });
     await this.refreshAreaTargets();
-    await refreshAddressCoverage(this.addressDb);
+    await refreshAddressCoverage(this.addressDb, { chinaOnly: true });
     await this.control.audit('admin', 'areacity.import', sourceVersion, { records: rows.length, checksum: createHash('sha256').update(text).digest('hex') });
     return rows.length;
   }

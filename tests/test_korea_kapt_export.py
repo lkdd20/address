@@ -27,6 +27,21 @@ class FixedTransformer:
 
 
 class KoreaKaptExportTest(unittest.TestCase):
+    def test_geoapify_keeps_sourced_roads_but_never_calls_an_administrative_name_a_street(self):
+        value = {"latitude": 37.574, "longitude": 126.977,
+                 "admin1": "서울특별시", "locality": "종로구", "district": "내수동",
+                 "address_levels": ["서울특별시", "종로구", "내수동"]}
+        result = {"country_code": "kr", "state": "서울특별시", "county": "종로구", "suburb": "내수동",
+                  "street": "사직로", "lat": 37.574, "lon": 126.977, "postcode": "03174"}
+        resolved = MODULE.geoapify_address_results({"results": [result,
+            {**result, "street": "내수동"}, {**result, "county": "중구"}, {**result, "country_code": "jp"}
+        ]}, value)
+        self.assertEqual(len(resolved["addresses"]), 1)
+        self.assertEqual(resolved["addresses"][0]["match_level"], "street")
+        self.assertEqual(resolved["addresses"][0]["postcode"], "")
+        self.assertEqual(resolved["addresses"][0]["number"], "")
+        self.assertEqual(resolved["addresses"][0]["property_type"], "unknown")
+
     def test_catalog_cli_writes_a_stable_snapshot_without_geocoding(self):
         rows = [{
             "kaptCode": code,
@@ -86,15 +101,17 @@ class KoreaKaptExportTest(unittest.TestCase):
                     patch.object(MODULE, "KaptClient", side_effect=AssertionError("catalog must be reused")), \
                     patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
                     patch.object(MODULE, "reverse_postcode", side_effect=[
-                        "03174", MODULE.GeocodeUnavailable("quota exhausted")
+                        {"postcode": "03174", "addresses": []}, MODULE.GeocodeUnavailable("quota exhausted")
                     ]):
                 MODULE.main()
             exported = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
             saved_state = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(len(exported), 1)
+            self.assertEqual(len(exported), 2)
+            self.assertEqual([value["postcode"] for value in exported], ["03174", ""])
             self.assertEqual(saved_state["candidate_count"], 2)
             self.assertEqual(saved_state["resolved_count"], 1)
-            self.assertEqual(saved_state["publishable_count"], 1)
+            self.assertEqual(saved_state["publishable_count"], 2)
+            self.assertEqual(saved_state["version"], 2)
             self.assertFalse(saved_state["source_complete"])
             self.assertTrue(saved_state["checkpoint_token"])
             self.assertEqual(saved_state["catalog_fingerprint"],
@@ -120,7 +137,8 @@ class KoreaKaptExportTest(unittest.TestCase):
                     patch.object(MODULE, "reverse_postcode", side_effect=MODULE.GeocodeUnavailable("quota exhausted")):
                 MODULE.main()
             saved_state = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(output.read_text(encoding="utf-8"), "")
+            exported = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([item["postcode"] for item in exported], [""])
             self.assertFalse(saved_state["source_complete"])
             self.assertEqual(saved_state["resolved_count"], 0)
             self.assertTrue(saved_state["checkpoint_token"])
@@ -132,12 +150,14 @@ class KoreaKaptExportTest(unittest.TestCase):
             "address_levels": ["서울특별시", "종로구", "내수동"],
         }
         response = io.BytesIO(json.dumps({"results": [{
-            "country_code": "kr", "state": "서울특별시", "postcode": "03000"
+            "country_code": "kr", "state": "서울특별시", "county": "종로구", "suburb": "내수동",
+            "postcode": "03000", "lat": 37.5, "lon": 127.0
         }]}).encode("utf-8"))
         with patch.object(MODULE.urllib.request, "urlopen",
                           side_effect=[urllib.error.URLError("reset"), response]), \
                 patch.object(MODULE.time, "sleep") as sleep:
-            self.assertEqual(MODULE.reverse_postcode(value, "http://127.0.0.1/bridge"), "03000")
+            self.assertEqual(MODULE.reverse_postcode(value, "http://127.0.0.1/bridge"),
+                             {"postcode": "03000", "addresses": []})
         sleep.assert_called_once_with(0.25)
 
     def test_parses_official_land_lot_address_without_generating_units(self):
@@ -217,7 +237,7 @@ class KoreaKaptExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as reverse:
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as reverse:
                 output = list(MODULE.add_postcodes(values, str(cache), 0, 1))
             self.assertEqual(len(output), 3)
             self.assertEqual(reverse.call_count, 3)
@@ -239,12 +259,14 @@ class KoreaKaptExportTest(unittest.TestCase):
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
                     patch.object(MODULE, "reverse_postcode", side_effect=MODULE.GeocodeUnavailable) as reverse:
-                with self.assertRaises(MODULE.GeocodeUnavailable):
-                    list(MODULE.add_postcodes(values, str(cache), 0, 3))
+                batch = MODULE.add_postcodes(values, str(cache), 0, 3)
+                self.assertFalse(batch.source_complete)
+                self.assertEqual(batch.resolved_count, 0)
+                self.assertEqual([value["postcode"] for value in batch], ["", "", ""])
             self.assertEqual(reverse.call_count, 3)
             self.assertEqual(cache.read_text(encoding="utf-8"), "")
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as retry:
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as retry:
                 self.assertEqual(len(list(MODULE.add_postcodes(values, str(cache), 0, 1))), 3)
             self.assertEqual(retry.call_count, 3)
 
@@ -260,15 +282,16 @@ class KoreaKaptExportTest(unittest.TestCase):
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
                     patch.object(MODULE, "reverse_postcode", side_effect=[
-                        "03174", MODULE.GeocodeUnavailable("quota exhausted")
+                        {"postcode": "03174", "addresses": []}, MODULE.GeocodeUnavailable("quota exhausted")
                     ]):
                 batch = MODULE.add_postcodes(values, str(cache), 0, 1)
             self.assertFalse(batch.source_complete)
             self.assertTrue(batch.checkpoint_token)
-            self.assertEqual([value["source_record_id"] for value in batch], ["kapt:0"])
+            self.assertEqual([value["source_record_id"] for value in batch], ["kapt:0", "kapt:1", "kapt:2"])
+            self.assertEqual([value["postcode"] for value in batch], ["03174", "", ""])
 
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03175") as retry:
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03175", "addresses": []}) as retry:
                 resumed = MODULE.add_postcodes(values, str(cache), 0, 1)
             self.assertTrue(resumed.source_complete)
             self.assertEqual(retry.call_count, 2)
@@ -288,13 +311,13 @@ class KoreaKaptExportTest(unittest.TestCase):
                 "id": "kapt:legacy", "postcode": "00000", "requested_on": "2026-01-01"
             }) + "\n", encoding="utf-8")
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as reverse:
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as reverse:
                 batch = MODULE.add_postcodes([value], str(cache), 0, 1)
             self.assertEqual(reverse.call_count, 1)
             self.assertEqual([entry["postcode"] for entry in batch], ["03174"])
             self.assertTrue(batch.source_complete)
 
-    def test_single_bridge_failure_skips_only_that_record(self):
+    def test_single_bridge_failure_preserves_the_address_without_caching_a_result(self):
         values = [{
             "source_record_id": f"kapt:{index}",
             "latitude": 37.5,
@@ -306,10 +329,11 @@ class KoreaKaptExportTest(unittest.TestCase):
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
                     patch.object(MODULE, "reverse_postcode", side_effect=[
-                        MODULE.BridgeUnavailable("temporary"), "03174", "03174"
+                        MODULE.BridgeUnavailable("temporary"), {"postcode": "03174", "addresses": []}, {"postcode": "03174", "addresses": []}
                     ]):
                 output = list(MODULE.add_postcodes(values, str(cache), 0, 1))
-            self.assertEqual([value["source_record_id"] for value in output], ["kapt:1", "kapt:2"])
+            self.assertEqual([value["source_record_id"] for value in output], ["kapt:0", "kapt:1", "kapt:2"])
+            self.assertEqual([value["postcode"] for value in output], ["", "03174", "03174"])
             self.assertNotIn("kapt:0", cache.read_text(encoding="utf-8"))
 
     def test_repeated_bridge_failures_stop_after_a_bounded_threshold(self):
@@ -342,18 +366,18 @@ class KoreaKaptExportTest(unittest.TestCase):
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
                     patch.object(MODULE, "reverse_postcode", return_value=None) as reverse:
-                self.assertEqual(list(MODULE.add_postcodes(values, str(cache), 0, 3)), [])
+                self.assertEqual([value["postcode"] for value in MODULE.add_postcodes(values, str(cache), 0, 3)], ["", "", ""])
             self.assertEqual(reverse.call_count, 3)
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as retry:
-                self.assertEqual(list(MODULE.add_postcodes(values, str(cache), 0, 3)), [])
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as retry:
+                self.assertEqual([value["postcode"] for value in MODULE.add_postcodes(values, str(cache), 0, 3)], ["", "", ""])
             self.assertEqual(retry.call_count, 0)
 
             changed = [{**value, "longitude": value["longitude"] + 0.01}
                        if value["source_record_id"] == "kapt:0" else value for value in values]
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as changed_retry:
-                self.assertEqual(len(MODULE.add_postcodes(changed, str(cache), 0, 3)), 1)
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as changed_retry:
+                self.assertEqual([value["postcode"] for value in MODULE.add_postcodes(changed, str(cache), 0, 3)], ["03174", "", ""])
             self.assertEqual(changed_retry.call_count, 1)
 
             entries = [json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
@@ -363,8 +387,8 @@ class KoreaKaptExportTest(unittest.TestCase):
                 entry["requested_on"] = "2026-01-01"
             cache.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as later_retry:
-                self.assertEqual(len(MODULE.add_postcodes(values, str(cache), 0, 3)), 1)
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as later_retry:
+                self.assertEqual([value["postcode"] for value in MODULE.add_postcodes(values, str(cache), 0, 3)], ["03174", "", ""])
             self.assertEqual(later_retry.call_count, 1)
 
     def test_deduplicates_pending_record_ids(self):
@@ -378,10 +402,25 @@ class KoreaKaptExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
             cache = pathlib.Path(directory) / "postcodes.jsonl"
             with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
-                    patch.object(MODULE, "reverse_postcode", return_value="03174") as reverse:
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": "03174", "addresses": []}) as reverse:
                 output = list(MODULE.add_postcodes([value, value], str(cache), 0, 2))
             self.assertEqual(reverse.call_count, 1)
-            self.assertEqual(len(output), 2)
+            self.assertEqual(len(output), 1)
+
+    def test_legacy_negative_cache_does_not_hide_new_address_extraction_capability(self):
+        value = {"source_record_id": "kapt:legacy", "latitude": 37.5, "longitude": 127.0,
+                 "address_levels": ["서울특별시", "종로구", "내수동"]}
+        pathlib.Path(".data-cache").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
+            cache = pathlib.Path(directory) / "postcodes.jsonl"
+            cache.write_text(json.dumps({"id": "kapt:legacy", "postcode": None,
+                "requested_on": MODULE.datetime.now(MODULE.timezone.utc).date().isoformat()
+            }) + "\n", encoding="utf-8")
+            with patch.dict(MODULE.os.environ, {"ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL": "http://127.0.0.1/bridge"}), \
+                    patch.object(MODULE, "reverse_postcode", return_value={"postcode": None, "addresses": []}) as reverse:
+                batch = MODULE.add_postcodes([value], str(cache), 0, 1)
+            reverse.assert_called_once()
+            self.assertTrue(batch.source_complete)
 
 
 if __name__ == "__main__":

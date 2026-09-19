@@ -46,6 +46,7 @@ export const createGeoapifyCredentialBridge = ({
   let acquireTail = Promise.resolve();
   let unavailable = false;
   let nextAvailableAt = null;
+  let requestCount = 0;
   const inFlight = new Set();
 
   const acquire = async (options) => {
@@ -69,7 +70,9 @@ export const createGeoapifyCredentialBridge = ({
     if (brokerClient) {
       for (let attempt = 0; attempt < pacingAttempts; attempt += 1) {
         try {
-          const body = await brokerClient.request('geoapify.reverse', { latitude, longitude, language: 'ko' }, { signal });
+          const body = await brokerClient.request('geoapify.reverse', { latitude, longitude, language: 'ko' }, {
+            signal, maxDispatches: 32, onDispatch: (count) => { requestCount += count; }
+          });
           unavailable = false;
           nextAvailableAt = null;
           return body;
@@ -95,6 +98,7 @@ export const createGeoapifyCredentialBridge = ({
     const attempted = new Set();
     let availabilityAttempts = 0;
     while (availabilityAttempts < pacingAttempts) {
+      signal?.throwIfAborted();
       const credential = await acquire({ excludeIds: attempted });
       if (!credential) {
         if (inFlight.size) {
@@ -115,6 +119,7 @@ export const createGeoapifyCredentialBridge = ({
         url.searchParams.set('apiKey', credential.secret);
         let response;
         try {
+          requestCount += 1;
           response = await fetchImpl(url, {
             headers: { Accept: 'application/json', 'User-Agent': 'address-sync/2.0' },
             signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
@@ -188,6 +193,7 @@ export const createGeoapifyCredentialBridge = ({
   });
 
   return {
+    requestCount: () => requestCount,
     async start() {
       await new Promise((resolve, reject) => {
         server.once('error', reject);

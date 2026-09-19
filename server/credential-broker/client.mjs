@@ -22,7 +22,7 @@ export class CredentialBrokerClient {
     }
   }
 
-  async post(path, body, { signal } = {}) {
+  async post(path, body, { signal, onDispatch } = {}) {
     let response;
     try {
       response = await this.fetchImpl(`${this.url}${path}`, {
@@ -34,6 +34,13 @@ export class CredentialBrokerClient {
     } catch (cause) {
       throw Object.assign(new Error('Credential Broker is unavailable', { cause }), { code: 'BROKER_UNAVAILABLE' });
     }
+    if (onDispatch) {
+      const count = response.headers.get('x-address-upstream-requests');
+      if (count === null || !/^\d+$/u.test(count) || Number(count) > 32) {
+        throw Object.assign(new Error('Credential Broker did not return request accounting'), { code: 'BROKER_INVALID_RESPONSE' });
+      }
+      onDispatch(Number(count));
+    }
     const payload = await parseResponse(response);
     if (!response.ok) throw Object.assign(new Error(payload.code || 'Credential Broker request failed'), {
       code: payload.code || 'BROKER_REQUEST_FAILED',
@@ -43,8 +50,10 @@ export class CredentialBrokerClient {
     return payload;
   }
 
-  async request(operation, parameters, { requestId = randomUUID(), signal } = {}) {
-    const payload = await this.post('/v1/requests', { requestId, operation, parameters }, { signal });
+  async request(operation, parameters, { requestId = randomUUID(), signal, maxDispatches, onDispatch } = {}) {
+    const payload = await this.post('/v1/requests', {
+      requestId, operation, parameters, ...(maxDispatches === undefined ? {} : { maxDispatches })
+    }, { signal, onDispatch });
     return payload.data;
   }
 

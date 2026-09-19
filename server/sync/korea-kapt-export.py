@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import http.cookiejar
 import json
+import math
 import os
 import re
 import time
@@ -229,7 +230,8 @@ def balanced(values):
 
 
 def candidate_fingerprint(value):
-    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    payload = json.dumps({"candidate": value, "capability": "geoapify-address-v2"}, ensure_ascii=False,
+                         separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -314,6 +316,7 @@ def load_postcode_cache(path):
                     "requested_on": requested_on,
                     "result": value.get("result"),
                     "candidate_fingerprint": value.get("candidate_fingerprint"),
+                    "addresses": value.get("addresses", []),
                 }
             except (KeyError, TypeError, ValueError):
                 continue
@@ -333,6 +336,51 @@ def geoapify_matches_hierarchy(result, hierarchy):
     return bool(expected) and any(expected == value for value in top_levels if value)
 
 
+def geoapify_address_results(payload, value):
+    addresses = {}
+    postcodes = set()
+    hierarchy = value["address_levels"]
+    for result in payload.get("results", []):
+        if not geoapify_matches_hierarchy(result, hierarchy):
+            continue
+        administrative = {place_key(part) for field in ("state", "city", "county", "district", "suburb", "quarter", "neighbourhood")
+                          for part in clean(result.get(field)).split() if part}
+        if any(place_key(part) not in administrative for level in hierarchy[1:] for part in level.split()):
+            continue
+        try:
+            longitude, latitude = float(result["lon"]), float(result["lat"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        dx = math.radians(longitude - value["longitude"]) * math.cos(math.radians(latitude))
+        dy = math.radians(latitude - value["latitude"])
+        if not (124 <= longitude <= 132 and 33 <= latitude <= 39) or math.hypot(dx, dy) * 6371000 > 15:
+            continue
+        postcode = clean(result.get("postcode"))
+        if POSTCODE_PATTERN.fullmatch(postcode):
+            postcodes.add(postcode)
+        street = clean(result.get("street"))
+        if not re.search(r"[가-힣]", street) or re.search(r"[A-Za-z]", street) or place_key(street) in administrative:
+            continue
+        house_number = clean(result.get("housenumber"))
+        if house_number and not re.fullmatch(r"[0-9]+(?:-[0-9]+)?", house_number):
+            continue
+        identity = "\x1f".join([*hierarchy, street, house_number])
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        record = {
+            "id": f"geoapify:{digest}", "source_record_id": f"geoapify:{digest}",
+            "source_dataset": "Geoapify Reverse Geocoding", "source_record_provider": "geoapify", "country": "KR",
+            "match_level": "premise" if house_number else "street",
+            "admin1": hierarchy[0], "locality": " ".join(hierarchy[1:-1]), "district": hierarchy[-1],
+            "postal_city": " ".join(hierarchy[1:-1]), "street": street, "number": house_number,
+            "postcode": postcode if house_number and POSTCODE_PATTERN.fullmatch(postcode) else "",
+            "longitude": longitude, "latitude": latitude, "property_type": "unknown", "source_rank": digest,
+        }
+        if identity in addresses and addresses[identity]["postcode"] != record["postcode"]:
+            record["postcode"] = ""
+        addresses[identity] = record
+    return {"postcode": next(iter(postcodes)) if len(postcodes) == 1 else None, "addresses": list(addresses.values())}
+
+
 def reverse_postcode(value, bridge_url):
     body = json.dumps({
         "latitude": value["latitude"],
@@ -348,10 +396,7 @@ def reverse_postcode(value, bridge_url):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.load(response)
-            result = (payload.get("results") or [{}])[0]
-            postcode = clean(result.get("postcode"))
-            hierarchy = value["address_levels"]
-            return postcode if POSTCODE_PATTERN.fullmatch(postcode) and geoapify_matches_hierarchy(result, hierarchy) else None
+            return geoapify_address_results(payload, value)
         except urllib.error.HTTPError as error:
             try:
                 payload = json.load(error)
@@ -397,12 +442,9 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                                       and cached_entry.get("candidate_fingerprint") == fingerprint)
                 definitive_negative = (cached_entry.get("result") == "not_found"
                                        and cached_entry.get("candidate_fingerprint") == fingerprint)
-                legacy_daily_negative = (not cached_entry.get("candidate_fingerprint")
-                                         and cached_entry.get("requested_on") == today)
                 should_request = (record_id not in scheduled
                                   and not validated_postcode
-                                  and not definitive_negative
-                                  and not legacy_daily_negative)
+                                  and not definitive_negative)
                 if should_request:
                     pending.append(value)
                     scheduled.add(record_id)
@@ -427,8 +469,10 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                     for future in completed:
                         value = active.pop(future)
                         postcode = None
+                        addresses = []
                         try:
-                            postcode = future.result()
+                            result = future.result() or {}
+                            postcode, addresses = result.get("postcode"), result.get("addresses", [])
                             consecutive_bridge_failures = 0
                         except GeocodeUnavailable as error:
                             unavailable = True
@@ -452,6 +496,7 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                             "requested_on": today,
                             "result": result,
                             "candidate_fingerprint": fingerprint,
+                            "addresses": addresses,
                         }
                         cache_output.write(json.dumps({
                             "id": record_id,
@@ -460,6 +505,7 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                             "event": "result",
                             "result": result,
                             "candidate_fingerprint": fingerprint,
+                            "addresses": addresses,
                         }, ensure_ascii=False, separators=(",", ":")) + "\n")
                         cache_output.flush()
             resolved = 0
@@ -472,18 +518,16 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                     resolved += 1
             if fatal_error and not isinstance(fatal_error, GeocodeUnavailable):
                 raise fatal_error
-            if fatal_error and not resolved:
-                fatal_error.checkpoint_token = postcode_checkpoint_token(values, cached)
-                fatal_error.resolved_count = resolved
-                raise fatal_error
         output = []
-        for value in values:
+        for value in {item["source_record_id"]: item for item in values}.values():
             record_id = value["source_record_id"]
             entry = cached.get(record_id) or {}
             postcode = entry.get("postcode")
-            if (POSTCODE_PATTERN.fullmatch(clean(postcode))
-                    and entry.get("candidate_fingerprint") == candidate_fingerprint(value)):
-                output.append({**value, "postcode": postcode})
+            valid_cache = entry.get("candidate_fingerprint") == candidate_fingerprint(value)
+            output.append({**value, "postcode": postcode if valid_cache and POSTCODE_PATTERN.fullmatch(clean(postcode)) else ""})
+            if valid_cache:
+                output.extend(entry.get("addresses", []))
+        output = list({value["source_record_id"]: value for value in output}.values())
         source_complete = resolved == len({value["source_record_id"] for value in values})
         if transient_failures:
             source_complete = False
@@ -537,10 +581,7 @@ def main():
         write_catalog(args.catalog_output, candidates)
         return
     ordered = balanced(candidates)
-    try:
-        batch = add_postcodes(ordered, args.postcode_cache, args.minimum_interval, args.geocode_concurrency)
-    except GeocodeUnavailable as error:
-        batch = PostcodeBatch([], False, error.checkpoint_token, error.resolved_count)
+    batch = add_postcodes(ordered, args.postcode_cache, args.minimum_interval, args.geocode_concurrency)
     selected = select(batch, args.max_records, args.per_locality)
     with open(args.output, "w", encoding="utf-8", newline="\n") as output:
         for value in selected:
@@ -548,7 +589,7 @@ def main():
             output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
     if args.state_output:
         write_json_atomic(args.state_output, {
-            "version": 1,
+            "version": 2,
             "source_complete": batch.source_complete,
             "checkpoint_token": batch.checkpoint_token,
             "catalog_fingerprint": catalog_fingerprint(candidates),

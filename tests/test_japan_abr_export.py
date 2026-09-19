@@ -156,6 +156,25 @@ class JapanAbrSelectRecordsTest(unittest.TestCase):
             self.assertEqual(MODULE.load_checkpoint(checkpoint_path), expected)
             self.assertFalse(list(checkpoint_path.parent.glob("*.tmp")))
 
+    def test_completed_checkpoint_does_not_reset_a_missing_candidate_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            MODULE.write_checkpoint(checkpoint_path, {
+                "version": 1, "abr_complete": True, "abr_completed_cities": [],
+                "plateau_completed": [], "plateau_building_completed": [],
+                "osm_scanned_ways": 0, "osm_complete": False, "final_complete": False
+            })
+            with patch.object(sys, "argv", [
+                "japan-abr-export.py", "--stage", "final",
+                "--checkpoint-file", str(checkpoint_path),
+                "--store-file", str(root / "missing.duckdb"),
+                "--output", str(root / "output.jsonl"),
+                "--max-records", "1", "--candidate-budget", "1", "--per-locality", "1"
+            ]):
+                with self.assertRaisesRegex(RuntimeError, "candidate store is missing"):
+                    MODULE.main()
+
     def test_legacy_checkpoint_adds_independent_plateau_building_phase(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint_path = pathlib.Path(directory) / "checkpoint.json"

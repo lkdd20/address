@@ -90,7 +90,7 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/countries \
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
-响应格式为 `{ "data": [...] }`。每个国家包含代码、本地化名称、支持的筛选条件、同步总量、真实住宅数量、住宅覆盖状态和 `generationMode`。公开生成只使用真实住宅池；同步总量仅用于迁移和健康报告。未连接数据库时，数量为 `null`。
+响应格式为 `{ "data": [...] }`。`addressCount` 是可生成的合格地址总数；`residentialCount` 是其中有证据的住宅子集。中国使用住宅小区，其他国家也包括真实街道。未连接数据库时，数量为 `null`。
 
 ## 生成可用性
 
@@ -99,7 +99,7 @@ curl -fsS -H "Authorization: Bearer YOUR_API_TOKEN" \
   https://YOUR_DOMAIN.example/api/v1/availability
 ```
 
-响应说明每个已配置国家当前是否存在通过发布门禁、可用于生成的住宅记录。
+`available` 表示有合格地址，`residentialAvailable` 表示有住宅子集；列表只包含当前可生成的国家。
 
 ## 客户端地区
 
@@ -129,7 +129,7 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8" \
 | `region` | 空 | 上级州省文本 |
 | `regionId` | 空 | 稳定州省 ID |
 | `cityId` | 空 | 稳定城市 ID |
-| `residential` | `false`（目录兼容） | 传入 `true` 时只列出具备真实住宅覆盖的选项；`/generate` 始终使用住宅记录 |
+| `residential` | `false` | 传入 `true` 时只统计有住宅证据的覆盖数量 |
 | `cursor` | 空 | 上一页返回的分页游标 |
 | `limit` | `100` | 请求页大小，范围为 `20` 至 `200` |
 
@@ -140,22 +140,26 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=
 
 响应包含 `regions`、`cities`、`postcodes` 和 `matches`。连接地区目录数据库后，还会提供 `total`、`nextCursor` 和 `source`。
 
+邮编选项来自可生成的已发布地址，包含邮政目录缺失的完整码。这类选项没有目录 ID，将 `value` 作为 `postcode` 传入即可；前缀不能代替完整码，明确选择的省市条件不会被丢弃。中国城市和区县 ID 可为社区支持的不透明标识，请按返回值原样传入。
+
 ## 地址与资料生成
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `country` | `US` | 国家代码；IP 模式成功解析国家时忽略 |
-| `mode` | `residential` | 使用 `ip-region` 开启 IP 坐标或城市匹配 |
-| `ip` | 请求 IP | `mode=ip-region` 时使用的指定 IP |
-| `residential` | `true` | 旧客户端兼容参数；`true`、`false` 均可传入，但公开生成始终执行住宅证据门禁 |
-| `region`、`city`、`district`、`postcode` | 空 | 可读地区筛选 |
-| `regionId`、`cityId`、`districtId`、`postcodeId` | 空 | 稳定目录 ID |
-| `q` | 空 | 自由文本地区提示 |
+| `mode` | 按国家默认 | 使用 `ip-region` 开启 IP 坐标或城市匹配 |
+| `ip` | 请求 IP | `mode=ip-region` 时使用的指定 IP，最多 64 个字符 |
+| `residential` | 中国 `true`；其他 `false` | `true` 要求住宅证据；中国始终要求住宅证据 |
+| `region`、`city`、`district`、`postcode` | 空 | 可读地区筛选，每项最多 300 个字符 |
+| `regionId`、`cityId`、`districtId`、`postcodeId` | 空 | 地区接口返回的 ID，每项最多 160 个字符 |
+| `q` | 空 | 自由文本地区提示，最多 300 个字符 |
 | `strategy` | `random` | 用 `random` 或 `instant` 选择合格真实记录，不合成地址字段 |
-| `seed` | 自动 UUID | 确定性生成种子 |
-| `requestId` | 自动 UUID | 调用方关联 ID |
+| `seed` | 自动 UUID | 确定性生成种子，最多 300 个字符 |
+| `requestId` | 自动 UUID | 调用方关联 ID，最多 160 个字符 |
 
-美国真实住宅地址：
+`address.matchLevel` 为 `street`、`premise` 或 `subpremise`。非中国街道记录不含门牌、楼栋或室号，邮编可为空；原文、英文和简体中文保留相同事实。批量接口 `filters.residential` 接受布尔值，默认规则相同。
+
+美国真实地址：
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US" \
@@ -176,9 +180,9 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
-响应外层为 `{ "data": { ... } }`。生成数据包含请求 ID、模式、国家、筛选、精确 `filterMatchLevel` 或 IP `ipMatchLevel`、尝试的数据源和耗时；普通生成还返回 `eligibleCount`，表示当前精确筛选范围内通过发布门禁的数据库记录数。地址三语变体与室内字段均来自来源，缺失值保持为空；人物资料、沙盒银行卡、工作、财务和网络字段仍为合成测试数据。地区筛选严格匹配，IP 模式只接受坐标或城市匹配。
+响应外层为 `{ "data": { ... } }`。生成数据包含请求 ID、模式、国家、筛选、精确 `filterMatchLevel` 或 IP `ipMatchLevel`、尝试的数据源和耗时；普通生成还返回 `eligibleCount`，表示当前精确筛选范围内通过发布门禁的数据库记录数。地址三语变体保留来源事实；除已标记的中国合成室内字段外，不补造缺失字段；人物资料、沙盒银行卡、工作、财务和网络字段仍为合成测试数据。地区筛选严格匹配，IP 模式只接受坐标或城市匹配。
 
-未筛选的国家请求将种子映射到 PostgreSQL 连续生成序号，使每条合格记录具有相同的选择概率；筛选请求使用覆盖完整匹配范围的有界循环索引窗口。两条路径均不使用固定子集或固定顺序。需要稳定复现合格记录选择与测试资料时传入 `seed`；未传入时服务器为每次请求生成新 UUID。该参数不会生成缺失的地址组件，地址源同步后底层住宅池仍可能变化。
+未筛选的国家请求将种子映射到 PostgreSQL 连续生成序号，使每条合格记录具有相同的选择概率；筛选请求使用覆盖完整匹配范围的有界循环索引窗口。两条路径均不使用固定子集或固定顺序。需要稳定复现合格记录选择与测试资料时传入 `seed`；未传入时服务器为每次请求生成新 UUID。该参数不会生成缺失的地址组件，地址源同步后底层地址池仍可能变化。
 
 ## 批量生成与结构化查询
 

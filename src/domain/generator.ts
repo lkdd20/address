@@ -4,6 +4,8 @@ import {
   es_MX, Faker, fr, it, ja, ko, nl, pt_BR, ru, th, tr, vi, zh_CN, zh_TW,
   type LocaleDefinition
 } from '@faker-js/faker';
+import { parsePhoneNumberFromString } from 'libphonenumber-js/core';
+import mobileMetadata from 'libphonenumber-js/mobile/metadata';
 import { countryByCode } from './countries';
 import type { GoogleResolution } from './google-geocoder';
 import { googleMapsLinksFromCoordinates } from './maps';
@@ -52,11 +54,15 @@ const nationalNumberLength: Record<CountryCode, number> = {
   TR: 10, SA: 9, IN: 10, AU: 9, BR: 11, NG: 10, ZA: 9
 };
 
-const phonePrefixes: Partial<Record<CountryCode, string>> = {
-  MX: '55', GB: '7700900', DE: '151', FR: '612', IT: '320', ES: '612', NL: '6', RU: '9',
-  JP: '901', HK: '5', SG: '8', TW: '912', KR: '102', MY: '12', CN: '138',
-  TH: '81', PH: '917', VN: '91', TR: '532', SA: '50', IN: '9876', AU: '412',
-  BR: '119', NG: '803', ZA: '71'
+const phonePrefixes: Partial<Record<CountryCode, readonly string[]>> = {
+  MX: ['33', '55', '56', '81'], GB: ['71', '72', '73', '74', '75', '77', '78', '79'],
+  DE: ['151', '152', '155', '157', '160', '162', '163', '170', '171', '172', '173', '174', '175', '176', '177', '178', '179'],
+  FR: ['6', '7'], IT: ['320', '327', '328', '329', '330', '331', '333', '334', '335', '336', '337', '338', '339', '340', '347', '348', '349', '350', '351', '360', '366', '368', '370', '371', '377', '380', '388', '389'],
+  ES: ['6', '7'], NL: ['6'], RU: ['9'], JP: ['70', '80', '90'], HK: ['5', '6', '9'], SG: ['8', '9'],
+  TW: ['9'], KR: ['10'], MY: ['10', '11', '12', '13', '14', '16', '17', '18', '19'],
+  CN: ['13', '14', '15', '16', '17', '18', '19'], TH: ['6', '8', '9'], PH: ['905', '906', '915', '916', '917', '918', '919', '920', '921', '922', '923', '925', '926', '927', '928', '929', '930', '935', '936', '937', '938', '939', '940', '941', '942', '943', '945', '946', '947', '948', '949', '950', '951', '952', '953', '954', '955', '956', '957', '958', '959', '960', '961', '963', '965', '966', '967', '968', '969', '970', '975', '976', '977', '978', '979', '980', '981', '982', '983', '984', '985', '986', '987', '988', '989', '990', '991', '992', '993', '994', '995', '996', '997', '998', '999'],
+  VN: ['3', '5', '7', '8', '9'], TR: ['50', '51', '53', '54', '55', '56', '57', '58', '59'], SA: ['5'], IN: ['6', '7', '8', '9'], AU: ['4'],
+  BR: ['119', '219', '319', '419', '519', '619', '719', '819', '919'], NG: ['70', '80', '81', '90', '91'], ZA: ['6', '7', '8']
 };
 
 type NanpCountry = 'US' | 'CA';
@@ -140,17 +146,27 @@ const phoneFor = (
   components: AddressComponents,
   random: () => number
 ): string => {
-  const prefix = countryCode === 'US' || countryCode === 'CA'
-    ? nanpPrefix(countryCode, components, random)
-    : phonePrefixes[countryCode] || '7';
-  const national = `${prefix}${digits(random, Math.max(0, nationalNumberLength[countryCode] - prefix.length))}`;
-  let offset = 0;
-  const formatted = phoneGroups[countryCode].map((size) => {
-    const part = national.slice(offset, offset + size);
-    offset += size;
-    return part;
-  }).filter(Boolean).join(' ');
-  return `${callingCode} ${formatted}`;
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const prefixes = phonePrefixes[countryCode] || [];
+    const prefix = countryCode === 'US' || countryCode === 'CA'
+      ? nanpPrefix(countryCode, components, random)
+      : prefixes[Math.floor(random() * prefixes.length)];
+    const length = countryCode === 'DE' && prefix.startsWith('15') ? 11
+      : countryCode === 'MY' && prefix === '11' ? 10 : nationalNumberLength[countryCode];
+    const national = `${prefix}${digits(random, length - prefix.length)}`;
+    const phone = parsePhoneNumberFromString(`${callingCode}${national}`, mobileMetadata);
+    if (!phone?.isValid() || phone.country !== countryCode
+      || (countryCode === 'GB' && /^7700900\d{3}$/u.test(national))) continue;
+    const groups = phoneGroups[countryCode];
+    let offset = 0;
+    const formatted = groups.map((size, index) => {
+      const part = national.slice(offset, index === groups.length - 1 ? undefined : offset + size);
+      offset += size;
+      return part;
+    }).filter(Boolean).join(' ');
+    return `${callingCode} ${formatted}`;
+  }
+  throw new DomainError('PHONE_GENERATION_FAILED', `No valid mobile number generated for ${countryCode}`, 500);
 };
 
 const emailFor = (name: string, countryCode: CountryCode, suffix: string): string => {

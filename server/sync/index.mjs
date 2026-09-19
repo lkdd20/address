@@ -11,7 +11,7 @@ import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync
 import { startDailyScheduler } from './scheduler.mjs';
 import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
 import { ensureAddressPolicies } from './address-policy.mjs';
-import { validatePublishedPoolBatch } from '../database/published-pool.mjs';
+import { reconcilePublishedPoolProjections, validatePublishedPoolBatch } from '../database/published-pool.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
 import { ChinaDataService } from '../china/service';
@@ -110,6 +110,7 @@ export const createSyncRuntime = async ({
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   await ensureAddressPolicies(database);
+  await reconcilePublishedPoolProjections(database);
   await ensureChinaTargets(database, environment, environment.POSTGRES_URL || environment.DATABASE_URL || '');
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;
@@ -221,8 +222,9 @@ export const createSyncRuntime = async ({
       stopScheduler = undefined;
       stopQueue = undefined;
       await artifactCleanup?.stop();
-      await queue.stop();
-      await coordinator.waitForIdle();
+      const queueStop = queue.stop();
+      await coordinator.cancelActive();
+      await queueStop;
       await publicationValidationWorker.stop();
       testDatabase?.close();
       await postgresPool?.end();
@@ -267,8 +269,8 @@ if (invokedDirectly) {
     }
   });
   server.listen(port, host, () => console.log(`Address sync control listening on http://${host}:${port}`));
-  let stopBackfill = () => {};
-  if (/^(1|true|yes)$/iu.test(String(process.env.TRANSLATION_BACKFILL_ENABLED || ''))) {
+  let stopBackfill = async () => {};
+  if (!/^(0|false|no)$/iu.test(String(process.env.TRANSLATION_BACKFILL_ENABLED || ''))) {
     const { startTranslationBackfill } = await import('./translation-backfill.mjs');
     stopBackfill = startTranslationBackfill({
       database: runtime.database,
@@ -277,7 +279,7 @@ if (invokedDirectly) {
     console.log('Translation backfill worker enabled');
   }
   const shutdown = async () => {
-    stopBackfill();
+    await stopBackfill();
     await new Promise((done) => server.close(done));
     await runtime.close();
   };

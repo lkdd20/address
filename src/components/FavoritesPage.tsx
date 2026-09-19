@@ -30,6 +30,9 @@ export default function FavoritesPage({ locale }: Props) {
   const [continent, setContinent] = useState<CountryGroup | ''>('');
   const [country, setCountry] = useState<CountryCode | ''>('');
   const [copied, setCopied] = useState('');
+  const [busy, setBusy] = useState(false);
+  const mutationPending = useRef(false);
+  const refreshId = useRef(0);
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string; removed?: FavoriteAddress } | null>(null);
   const feedbackTimer = useRef<number | undefined>(undefined);
   const sensors = useSensors(
@@ -39,13 +42,14 @@ export default function FavoritesPage({ locale }: Props) {
   );
 
   const refresh = async () => {
+    const id = ++refreshId.current;
     const result = await listFavorites();
-    setFavorites(result.values); setPersistent(result.persistent); setReady(true);
+    if (id === refreshId.current) { setFavorites(result.values); setPersistent(result.persistent); setReady(true); }
   };
   useEffect(() => {
     void refresh();
     const unsubscribe = subscribeToFavorites(() => void refresh());
-    return () => { unsubscribe(); window.clearTimeout(feedbackTimer.current); };
+    return () => { refreshId.current += 1; unsubscribe(); window.clearTimeout(feedbackTimer.current); };
   }, []);
 
   const showFeedback = (value: typeof feedback) => {
@@ -53,6 +57,17 @@ export default function FavoritesPage({ locale }: Props) {
     setFeedback(value);
     feedbackTimer.current = window.setTimeout(() => setFeedback(null), 4000);
   };
+
+  const mutate = async (action: () => Promise<void>): Promise<void> => {
+    if (mutationPending.current) return;
+    mutationPending.current = true; setBusy(true);
+    try { await action(); }
+    catch { showFeedback({ kind: 'error', message: text.updateFailed, removed: feedback?.removed }); }
+    finally { mutationPending.current = false; setBusy(false); }
+  };
+  const moveAddress = (id: string, position: number) => mutate(async () => {
+    await reorderFavorite(id, position); await refresh();
+  });
 
   const availableCountries = useMemo(() => countries.filter((item) => favorites.some((favorite) => favorite.countryCode === item.code)
     && (!continent || item.group === continent)), [favorites, continent]);
@@ -67,7 +82,7 @@ export default function FavoritesPage({ locale }: Props) {
     const target = favorites.find((favorite) => favorite.id === over.id);
     const source = favorites.find((favorite) => favorite.id === active.id);
     if (!source || !target || source.countryCode !== target.countryCode) return;
-    await reorderFavorite(source.id, target.position); await refresh();
+    await moveAddress(source.id, target.position);
   };
   const copyAddress = async (favorite: FavoriteAddress) => {
     const presentation = addressDisplayPresentation(favorite.snapshot, storedAddressLanguage(), locale);
@@ -78,24 +93,23 @@ export default function FavoritesPage({ locale }: Props) {
     } catch { showFeedback({ kind: 'error', message: text.copyFailed }); }
   };
 
-  const removeAddress = async (id: string) => {
+  const removeAddress = (id: string) => mutate(async () => {
     const removed = favorites.find((favorite) => favorite.id === id);
     if (!removed || !await removeFavorite(id)) return;
     await refresh();
     showFeedback({ kind: 'success', message: text.removed, removed });
-  };
+  });
 
-  const undoRemove = async () => {
+  const undoRemove = () => mutate(async () => {
     if (!feedback?.removed) return;
     await restoreFavorite(feedback.removed);
     await refresh();
     showFeedback({ kind: 'success', message: text.saved });
-  };
+  });
 
   const renderCountry = ({ country: configured, values }: typeof countrySections[number]) => <FavoriteCountrySection
     key={configured.code} countryCode={configured.code} values={values} locale={locale} text={text} copied={copied}
-    remove={removeAddress} copy={copyAddress}
-    move={async (id, position) => { await reorderFavorite(id, position); await refresh(); }} />;
+    remove={removeAddress} copy={copyAddress} busy={busy} move={moveAddress} />;
 
   const groupedByContinent = groupOrder.map((group) => ({ group, countries: countrySections.filter(({ country: item }) => item.group === group) }))
     .filter(({ countries: values }) => values.length);
@@ -132,7 +146,7 @@ export default function FavoritesPage({ locale }: Props) {
               : countrySections.map(renderCountry)}</div>
           </DndContext>}
     </main>
-    {feedback && <div className={`copy-toast ${feedback.kind}`} role={feedback.kind === 'error' ? 'alert' : 'status'} aria-live={feedback.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true"><span aria-hidden="true">{feedback.kind === 'success' ? '✓' : '!'}</span>{feedback.message}{feedback.removed && <button type="button" onClick={() => void undoRemove()}>{text.undo}</button>}</div>}
+    {feedback && <div className={`copy-toast ${feedback.kind}`} role={feedback.kind === 'error' ? 'alert' : 'status'} aria-live={feedback.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true"><span aria-hidden="true">{feedback.kind === 'success' ? '✓' : '!'}</span>{feedback.message}{feedback.removed && <button type="button" disabled={busy} onClick={() => void undoRemove()}>{text.undo}</button>}</div>}
   </div>;
 }
 
@@ -158,23 +172,23 @@ const storedAddressLanguage = (): AddressDisplayLanguage => {
   } catch { return 'en'; }
 };
 
-function FavoriteCountrySection({ countryCode, values, locale, text, copied, remove, copy, move }: {
-  countryCode: CountryCode; values: FavoriteAddress[]; locale: Locale; text: FavoritesCopy; copied: string;
+function FavoriteCountrySection({ countryCode, values, locale, text, copied, remove, copy, move, busy }: {
+  countryCode: CountryCode; values: FavoriteAddress[]; locale: Locale; text: FavoritesCopy; copied: string; busy: boolean;
   remove: (id: string) => Promise<void>; copy: (favorite: FavoriteAddress) => Promise<void>; move: (id: string, position: number) => Promise<void>;
 }) {
   const country = countryByCode.get(countryCode)!;
   return <section className="favorites-country"><header><h3><img src={`https://flagcdn.com/24x18/${countryCode.toLowerCase()}.png`} width="24" height="18" alt=""/>{localizedCountryName(countryCode, locale, country.name.en)}</h3><span>{values.length}</span></header>
     <SortableContext items={values.map(({ id }) => id)} strategy={verticalListSortingStrategy}>
-      <div className="favorites-list">{values.map((favorite) => <FavoriteRow key={favorite.id} favorite={favorite} total={values.length} locale={locale} text={text} copied={copied} remove={remove} copy={copy} move={move}/>)}</div>
+      <div className="favorites-list" aria-busy={busy}>{values.map((favorite) => <FavoriteRow key={favorite.id} favorite={favorite} total={values.length} locale={locale} text={text} copied={copied} remove={remove} copy={copy} move={move} busy={busy}/>)}</div>
     </SortableContext>
   </section>;
 }
 
-function FavoriteRow({ favorite, total, locale, text, copied, remove, copy, move }: {
-  favorite: FavoriteAddress; total: number; locale: Locale; text: FavoritesCopy; copied: string;
+function FavoriteRow({ favorite, total, locale, text, copied, remove, copy, move, busy }: {
+  favorite: FavoriteAddress; total: number; locale: Locale; text: FavoritesCopy; copied: string; busy: boolean;
   remove: (id: string) => Promise<void>; copy: (favorite: FavoriteAddress) => Promise<void>; move: (id: string, position: number) => Promise<void>;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: favorite.id });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: favorite.id, disabled: busy });
   const [position, setPosition] = useState(String(favorite.position));
   useEffect(() => setPosition(String(favorite.position)), [favorite.position]);
   const presentation = addressDisplayPresentation(favorite.snapshot, storedAddressLanguage(), locale);
@@ -183,14 +197,14 @@ function FavoriteRow({ favorite, total, locale, text, copied, remove, copy, move
   const commit = () => { const target = Math.max(1, Math.min(total, Number.parseInt(position, 10) || favorite.position)); setPosition(String(target)); void move(favorite.id, target); };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } };
   return <article ref={setNodeRef} className={`favorite-row ${isDragging ? 'dragging' : ''}`} style={{ transform: CSS.Transform.toString(transform), transition }}>
-    <button type="button" className="favorite-drag" title={text.drag} aria-label={text.drag} {...attributes} {...listeners}><GripVertical aria-hidden="true"/></button>
+    <button type="button" className="favorite-drag" disabled={busy} title={text.drag} aria-label={text.drag} {...attributes} {...listeners}><GripVertical aria-hidden="true"/></button>
     <div className="favorite-address"><strong>{presentation.singleLine}</strong><small>{favorite.snapshot.address.components.postcode} · {new Date(favorite.createdAt).toLocaleDateString(locale)}</small></div>
-    <label className="favorite-position"><span>{text.position}</span><input type="number" min="1" max={total} inputMode="numeric" value={position} onChange={(event) => setPosition(event.target.value)} onBlur={commit} onKeyDown={keyDown}/></label>
+    <label className="favorite-position"><span>{text.position}</span><input type="number" disabled={busy} min="1" max={total} inputMode="numeric" value={position} onChange={(event) => setPosition(event.target.value)} onBlur={commit} onKeyDown={keyDown}/></label>
     <div className="favorite-actions">
       <button type="button" title={text.copy} aria-label={text.copy} onClick={() => void copy(favorite)}>{copied === favorite.id ? '✓' : <Copy aria-hidden="true"/>}</button>
       {google && <a href={google} target="_blank" rel="noreferrer" title={text.openGoogle} aria-label={text.openGoogle}><ExternalLink aria-hidden="true"/></a>}
       {amap && <a href={amap} target="_blank" rel="noreferrer" title={text.openAmap} aria-label={text.openAmap}><ExternalLink aria-hidden="true"/></a>}
-      <button type="button" className="favorite-remove" title={text.remove} aria-label={text.remove} onClick={() => void remove(favorite.id)}><Trash2 aria-hidden="true"/></button>
+      <button type="button" className="favorite-remove" disabled={busy} title={text.remove} aria-label={text.remove} onClick={() => void remove(favorite.id)}><Trash2 aria-hidden="true"/></button>
     </div>
   </article>;
 }

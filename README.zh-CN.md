@@ -1,6 +1,6 @@
 <p align="center"><img src="public/favicon.svg" width="88" height="88" alt="Address Logo" /></p>
 <h1 align="center">Address</h1>
-<p align="center"><strong>基于 PostgreSQL 的自托管真实住宅地址生成器</strong></p>
+<p align="center"><strong>基于 PostgreSQL 的自托管真实地址生成器</strong></p>
 
 <p align="center">
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
@@ -13,7 +13,7 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/在线演示-address.333186.xyz-1769e0" alt="在线演示" /></a>
 </p>
 
-**Address 是真实住宅地址生成器。** 发布池中的住宅基础地址来自官方开放数据、国家或地区地址登记、地图登记建筑及具有明确住宅用途证据的开放地图数据，不使用随机街道、门牌或邮编冒充真实地址。每条记录保留来源坐标，可用于 Google Maps、高德地图等覆盖相应地区的地图服务定位；具体平台的文字搜索结果取决于其地区覆盖、索引名称和更新时间。
+**Address 从官方登记和地图数据生成真实地址。** 中国使用住宅小区地址；其他国家也支持真实街道级地址，已有的真实门牌保留，不编造缺失的楼栋或室号。来源坐标可用于 Google Maps 或高德地图定位。
 
 ## 核心功能
 
@@ -42,15 +42,15 @@
 | 南美 | BR |
 | 非洲 | NG、ZA |
 
-## 真实住宅地址来源与字段
+## 真实地址来源与字段
 
-下表对应当前同步实现。除“中国室内字段”一项外，生成器不会随机补造地址组件；官方目录唯一匹配得到的邮编或行政区仍属于来源真实字段。必填字段缺失、行政区冲突、坐标越界或住宅证据不足的记录不会进入发布池。
+下表列出已有来源提供的字段和住宅证据。非中国街道级记录不要求门牌或住宅证据，缺失的楼栋、室号留空；邮编仅在已验证且唯一时保留。所有记录仍须通过来源、行政归属、语言和坐标检查，住宅证据仅用于住宅子集。
 
 | 国家/地区 | 当前地址数据来源 | 地址组成 | 真实/来源字段 | 合成或补全字段 | 住宅真实性依据 |
 |---|---|---|---|---|---|
 | 美国（US） | Overture Maps、Geofabrik OSM 州级分片 | 门牌、道路、城市、州、ZIP、坐标 | 全部地址字段及坐标 | 无；仅规范格式 | OSM/Overture 明确住宅建筑或用途 |
 | 加拿大（CA） | Statistics Canada 全国地址登记、Overture Maps、Geofabrik OSM | 门牌、道路、城市、省、邮编、坐标 | NAR 或地图来源的地址字段及坐标 | 无；仅规范邮编格式 | NAR 住宅建筑用途或地图来源明确住宅用途 |
-| 墨西哥（MX） | INEGI 全国地址框架；同源标准化包仅补名称 | 门牌、道路、住区、市镇、州、邮编、坐标 | INEGI 原始门牌、道路、住区、行政区、邮编及坐标 | 州/城市名称可由同源记录确定性映射；不生成地址 | INEGI `TIPODOM=VIVIENDA` |
+| 墨西哥（MX） | INEGI 全国地址框架；Geofabrik/Overture；同源归档补充名称 | 门牌、道路、住区、市镇、州、邮编、坐标 | INEGI 原始门牌、道路、住区、行政区、邮编及坐标 | 州/城市名称可由同源记录确定性映射；不生成地址 | INEGI `TIPODOM=VIVIENDA` |
 | 英国（GB） | Geofabrik OSM；Postcodes.io/ONS 仅核验 | 单元/楼宇、门牌、道路、城镇、邮编、坐标 | OSM 中存在的全部地址字段及坐标 | 无；仅规范格式 | OSM/建筑数据明确住宅用途 |
 | 德国（DE） | Overture Maps、Geofabrik 16 州分片；OpenPLZ 辅助 | 门牌、道路、城市、邮编、坐标 | 全部地址字段及坐标 | 无；不补 Wohnung/Etage | 明确住宅建筑或用途 |
 | 法国（FR） | CSTB BDNB 与 BAN 关联数据、Overture Maps、Geofabrik 27 区域分片 | 门牌、道路、补充号、市镇、邮编、坐标 | BDNB/BAN 或地图来源的地址字段及坐标 | 无；仅规范格式 | BDNB 住宅用途及可靠 BAN 关联，或地图来源明确住宅用途 |
@@ -59,18 +59,18 @@
 | 荷兰（NL） | Kadaster BAG（PDOK）及 Overture Maps | 门牌/字母/附加号、道路、城市、省、邮编、坐标 | BAG/来源全部地址字段及坐标 | 无；仅可逆组合门牌格式 | BAG 在用 `woonfunctie` 或 Overture 明确住宅用途 |
 | 俄罗斯（RU） | Geofabrik OSM | 门牌、道路、城市、联邦主体、邮编、坐标 | 全部地址字段及坐标 | 无；不补 корпус/квартира | OSM 明确住宅建筑 |
 | 中国（CN） | AreaCity/StatsGov；高德、百度、腾讯住宅小区 POI | 省、市、区县、街道/道路门牌、小区、栋/单元/楼层/室、坐标 | 行政区、小区名、道路门牌和平台坐标 | 仅栋、单元、楼层、室号为合成字段并标记 `synthetic`；不生成邮编 | 严格住宅分类、行政区一致、数字门牌和机构黑名单门禁 |
-| 中国香港（HK） | 房委会公屋单位、屋宇署楼宇资料、ALS | 单位/楼层、楼宇、门牌、街道、地点、18 区、地域、坐标 | 公屋单位字段或私人住宅楼宇字段及坐标；无通用邮编 | 无 | 房委会住宅库存，或屋宇署 `Residential/Composite` Tower |
-| 中国台湾（TW） | 内政部实价登录、中华邮政 3+3、地方政府门牌点 | 门牌、路街段巷弄、区乡镇市、县市、邮编、坐标 | 住宅成交门牌、行政区、唯一精确匹配邮编及坐标 | 无；不以邻近点补全 | 实价登录住宅主要用途及住宅建筑型态 |
+| 中国香港（HK） | 房委会公屋单位、屋宇署楼宇记录、ALS、Geofabrik/Overture | 单位/楼层、楼宇、门牌、街道、地点、18 区、地域、坐标 | 公屋单位字段或私人住宅楼宇字段及坐标；无通用邮编 | 无 | 房委会住宅库存，或屋宇署 `Residential/Composite` Tower |
+| 中国台湾（TW） | 内政部实价登录、中华邮政 3+3、地方政府门牌点、Geofabrik/Overture | 门牌、路街段巷弄、区乡镇市、县市、邮编、坐标 | 住宅成交门牌、行政区、唯一精确匹配邮编及坐标 | 无；不以邻近点补全 | 实价登录住宅主要用途及住宅建筑型态 |
 | 日本（JP） | 数字厅 ABR/Geolonia、日本邮便、PLATEAU/MLIT、Geofabrik OSM | 都道府县、市区町村、町域/丁目、街区与住居号或地番、邮编、坐标 | ABR 地址字段、唯一匹配的日本邮便邮编及来源坐标 | 无；建筑名和室号缺失时留空 | 地址点精确落入 PLATEAU/OSM 住宅建筑面 |
-| 韩国（KR） | K-apt、Juso/OpenAddresses 归档、Geofabrik/Overture | 市/道、市/郡/区、邑面洞、道路、建筑号、邮编、坐标 | K-apt 地番或 Juso 道路名地址字段及坐标 | 无；不生成栋、单元或室号 | K-apt 官方共同住宅，或 Juso 点与住宅建筑相交 |
-| 新加坡（SG） | HDB Property Information、Existing Building、OneMap、Geofabrik OSM | 楼栋号、道路、规划城镇、6 位邮编、坐标 | HDB 楼栋、道路、城镇；OneMap 唯一匹配的邮编和坐标 | 仅按同楼栋和道路唯一匹配补全，不生成门牌 | HDB `residential=Y` 且住宅单元数大于零，或 OSM 住宅建筑 |
+| 韩国（KR） | K-apt、Geoapify、Juso/OpenAddresses 归档、Geofabrik/Overture | 市/道、市/郡/区、邑面洞、道路、建筑号、邮编、坐标 | K-apt 地番、Juso 字段及严格匹配的 Geoapify 道路/门牌 | 无；未知邮编留空，不生成栋、单元或室号 | K-apt 官方共同住宅，或 Juso 点与住宅建筑相交；Geoapify 本身不是住宅证据 |
+| 新加坡（SG） | HDB Property Information、Existing Building、OneMap、Geofabrik OSM | 楼栋号、道路、规划城镇、6 位邮编、坐标 | HDB 楼栋、道路、城镇；OneMap 匹配的真实道路、门牌及坐标 | 只保留来源字段，未知邮编留空，不生成门牌 | HDB `residential=Y` 且住宅单元数大于零，或 OSM 住宅建筑；OneMap 本身不是住宅证据 |
 | 马来西亚（MY） | Geofabrik OSM 马来西亚分片 | 单元/地块、楼宇、道路、县区、城市、州、邮编、坐标 | OSM 中存在的全部地址字段及坐标 | 无；不补单元 | OSM 明确住宅建筑并排除商业 POI |
-| 泰国（TH） | DPT 官方建筑图层、Geofabrik OSM | 门牌、村、道路、分区、县区、府、邮编、坐标 | DPT 或 OSM 的地址、行政区、邮编及几何字段 | 无；仅将建筑面转换为内部点并规范格式 | DPT 住宅建筑分类或 OSM 明确住宅建筑 |
-| 菲律宾（PH） | Geofabrik OSM、PHLPost；PSA PSGC 仅核验行政区 | 门牌、道路、Barangay、城市/市镇、省、邮编、坐标 | OSM 地址字段及坐标 | 缺邮编时仅按 PHLPost 省+城市/市镇唯一匹配补全 | OSM 明确住宅建筑 |
+| 泰国（TH） | DPT 官方建筑图层、Geofabrik OSM、Google Geocoding 补全 | 门牌、村、道路、分区、县区、府、邮编、坐标 | DPT 或 OSM 的地址、行政区、邮编及几何字段 | 无；仅将建筑面转换为内部点并规范格式 | DPT 住宅建筑分类或 OSM 明确住宅建筑 |
+| 菲律宾（PH） | Geofabrik OSM、Google Geocoding、PHLPost；PSA PSGC 用于行政核验 | 门牌、道路、Barangay、城市/市镇、省、邮编、坐标 | OSM 地址字段及坐标 | 缺邮编时仅按 PHLPost 省+城市/市镇唯一匹配补全 | OSM 明确住宅建筑 |
 | 越南（VN） | Geofabrik OSM；Google Geocoding 补全 | 门牌、道路、坊/社、省级城市/省、邮编、坐标 | 来源字段及坐标 | 无；仅接受来源五位邮编 | OSM 明确住宅建筑 |
-| 土耳其（TR） | Geofabrik OSM、伊兹密尔官方 Building Identity | 门牌、道路、区、省、邮编、坐标 | 全部来源地址字段及坐标 | 无；仅规范格式 | OSM 住宅标签或官方 `Konut` 用途 |
-| 沙特阿拉伯（SA） | 全国地址点保全包、Overture、Geofabrik OSM | 楼宇/门牌、道路、区、城市、邮编、坐标 | 全国地址点的地址字段及坐标 | 无；仅规范格式 | 地址点与明确住宅建筑面精确关联 |
-| 印度（IN） | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 补全 | 门牌、道路/地点、县区、城市、邦、PIN、坐标 | OSM 住宅建筑、门牌和道路；地理编码行政字段与 PIN | 无；不补公寓或楼层 | OSM 明确住宅建筑 |
+| 土耳其（TR） | Geofabrik OSM、Google Geocoding、既有伊兹密尔 Building Identity 数据 | 门牌、道路、区、省、邮编、坐标 | 全部来源地址字段及坐标 | 无；仅规范格式 | OSM 住宅标签或官方 `Konut` 用途 |
+| 沙特阿拉伯（SA） | Geofabrik OSM、Google Geocoding；可选 OpenAddresses 全国地址点 | 楼宇/门牌、道路、区、城市、邮编、坐标 | 全国地址点的地址字段及坐标 | 无；仅规范格式 | 地址点与明确住宅建筑面精确关联 |
+| 印度（IN） | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 补全 | 门牌、道路/地点、县区、城市、邦、PIN、坐标 | OSM 道路与来源门牌；严格匹配的地理编码地址、行政字段与已知 PIN | 无；不补公寓或楼层 | OSM 明确住宅建筑 |
 | 澳大利亚（AU） | Overture Maps、Geofabrik OSM | 单元、门牌、道路、郊区、州、邮编、坐标 | 全部来源地址字段及坐标 | 无；不补单元 | 明确住宅建筑或用途；地址存在本身不作为住宅证据 |
 | 巴西（BR） | Geofabrik OSM | 门牌、道路、街区、城市、州、CEP、坐标 | OSM 中存在的全部地址字段及坐标 | 无；不补 complemento | OSM 明确住宅建筑 |
 | 尼日利亚（NG） | Geofabrik OSM；Google Geocoding 补全 | 门牌、道路、地区、城市、州、邮编、坐标 | 来源字段及坐标 | 无；不推算缺失字段 | OSM 明确住宅建筑 |
@@ -122,7 +122,7 @@ Astro 静态页面 + React 界面
 
 同步监督进程
         ├─ 可续跑的批量/API 适配器
-        ├─ 按国家执行验证与住宅证据门禁
+        ├─ 按国家及地址精度验证字段、语言和证据
         ├─ PostgreSQL 事务发布
         └─ 覆盖统计与有界同步队列
 ```

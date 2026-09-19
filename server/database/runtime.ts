@@ -24,7 +24,7 @@ export const openRuntimeDatabases = async (
       address: database,
       control: database,
       postgresUrl: 'postgresql://memory-test/address',
-      close: async () => { database.close(); }
+      close: async () => { await database.close(); }
     };
   }
   const postgresUrl = environment.POSTGRES_URL || environment.DATABASE_URL;

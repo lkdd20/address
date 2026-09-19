@@ -49,6 +49,7 @@ export interface NodeTargetPolicy {
 }
 
 export const CHINA_NODE_TARGET_SEEDS: Record<string, number>;
+export const canonicalPolicyNodeKey: (value: unknown) => string;
 export function ensureAddressPolicies(database: Database, now?: string): Promise<void>;
 export function listCountryNodeTargets(database: Database, countryCode: string): Promise<NodeTargetPolicy[]>;
 export function upsertNodeTarget(database: Database, nodeKey: string, minCount?: number): Promise<{ key: string; minCount: number; updatedAt: string }>;

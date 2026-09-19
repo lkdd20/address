@@ -129,7 +129,7 @@ describe('27-country localization QA matrix', () => {
         expect(normalizedLines.filter((line) => line === normalized(expectedCountry)), `${country.code}:${language}:country`).toHaveLength(countryLineCount);
         expect(new Set(normalizedLines).size, `${country.code}:${language}:duplicate-line`).toBe(normalizedLines.length);
         if (country.code === 'CN') {
-          expect(presentation.singleLine, `${country.code}:${language}:postcode`).not.toContain(postcodes.CN);
+          expect(presentation.singleLine, `${country.code}:${language}:postcode`).toContain(postcodes.CN);
         } else if (postcodes[country.code]) {
           expect(presentation.singleLine, `${country.code}:${language}:postcode`).toContain(postcodes[country.code]);
         }

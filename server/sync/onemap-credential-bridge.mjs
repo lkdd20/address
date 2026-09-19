@@ -25,16 +25,45 @@ const send = (response, status, body) => {
 
 const bridgeFailure = (error) => {
   const code = String(error?.code || 'ONEMAP_BRIDGE_FAILED');
-  const status = code === 'SOURCE_QUOTA_UNAVAILABLE' || code === 'SOURCE_RATE_LIMITED' ? 429
+  const status = ['SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED', 'SOURCE_REQUEST_BUDGET'].includes(code) ? 429
     : code === 'SOURCE_CREDENTIAL_UNAVAILABLE' || code === 'BROKER_TEST_POLICY_BLOCKED' ? 503
       : Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 502;
   return { status, body: { code, nextAvailableAt: error?.retryAt || null } };
 };
 
-export const createOneMapCredentialBridge = ({ brokerClient, signal } = {}) => {
+export const createOneMapCredentialBridge = ({ brokerClient, signal, maxRequests = 500 } = {}) => {
   if (!brokerClient) throw Object.assign(new Error('OneMap requires the credential broker'), {
     code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
   });
+  if (!Number.isSafeInteger(maxRequests) || maxRequests < 1) throw new Error('Invalid OneMap request budget');
+  let requestCount = 0;
+  let accountingFailure = null;
+  let requestTail = Promise.resolve();
+  const search = async (query) => {
+    let release;
+    const previous = requestTail;
+    requestTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      signal?.throwIfAborted();
+      if (accountingFailure) throw accountingFailure;
+      if (requestCount >= maxRequests) throw Object.assign(new Error('OneMap request budget reached'), {
+        code: 'SOURCE_REQUEST_BUDGET'
+      });
+      let accounted = false;
+      try {
+        return await brokerClient.request('onemap.search', { searchVal: query }, {
+          signal, maxDispatches: Math.min(32, maxRequests - requestCount),
+          onDispatch: (count) => { accounted = true; requestCount += count; }
+        });
+      } catch (error) {
+        if (!accounted && ['BROKER_UNAVAILABLE', 'BROKER_INVALID_RESPONSE'].includes(error?.code)) accountingFailure = error;
+        throw error;
+      }
+    } finally {
+      release();
+    }
+  };
   const token = randomUUID();
   const path = `/${token}`;
   const server = createServer(async (request, response) => {
@@ -49,7 +78,7 @@ export const createOneMapCredentialBridge = ({ brokerClient, signal } = {}) => {
         send(response, 400, { code: 'INVALID_QUERY' });
         return;
       }
-      const payload = await brokerClient.request('onemap.search', { searchVal: query }, { signal });
+      const payload = await search(query);
       send(response, 200, payload);
     } catch (error) {
       const failure = bridgeFailure(error);
@@ -58,6 +87,7 @@ export const createOneMapCredentialBridge = ({ brokerClient, signal } = {}) => {
   });
 
   return {
+    requestCount: () => accountingFailure ? null : requestCount,
     async start() {
       await new Promise((resolve, reject) => {
         server.once('error', reject);

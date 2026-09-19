@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
-import { Activity, Bookmark } from 'lucide-react';
+import { Activity, Bookmark, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import AmapPreview from './AmapPreview';
 import {
   addressDisplayComponents,
@@ -28,8 +28,9 @@ const monitorLabels: Record<Locale, string> = {
 };
 interface Locations { regions: LocationOption[]; cities: LocationOption[]; districts: LocationOption[]; postcodes: LocationOption[]; matches: LocationOption[] }
 interface LocationMeta { total: number; availableTotal: number; nextCursor?: string }
+interface LocationOverrides { country?: CountryCode; residential?: boolean; region?: string; regionId?: string; city?: string; cityId?: string; cursor?: string; append?: boolean }
 interface LocationCacheEntry { expiresAt: number; values: LocationOption[]; meta: LocationMeta }
-interface CountryAvailability { code: CountryCode; residentialAvailable: boolean }
+interface CountryAvailability { code: CountryCode; available?: boolean; residentialAvailable: boolean }
 interface GenerationOptions {
   countryCode?: CountryCode;
   region?: string;
@@ -102,7 +103,7 @@ const groupMessage = {
 const countrySessionKey = 'address-generator-country';
 export const addressLanguageStorageKey = 'address-generator-address-language';
 export const profileLanguageStorageKey = 'address-generator-profile-language';
-const displayLanguages = new Set<string>(['native', ...supportedLocales]);
+const displayLanguages = new Set<string>(['native', 'pinyin', ...supportedLocales]);
 type LanguageStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 export const readStoredDisplayLanguage = <T extends AddressDisplayLanguage | ProfileLanguage>(
@@ -285,6 +286,9 @@ export const localizedExtensionValue = (value: string, locale: Locale): string =
 export const generatorTitle = (countryName: string, locale: Locale, residentialLabel: string): string =>
   `${countryName}${locale === 'zh-CN' || locale === 'zh-TW' || locale === 'ja' ? '' : ' '}${residentialLabel}`;
 
+export const generationResponseMode = (countryCode: CountryCode, ipRegion = false): string =>
+  ipRegion ? 'ip-region' : countryCode === 'CN' ? 'residential' : 'address';
+
 // Resolves a profile data value to the chosen display language. "native" prefers the
 // country's own language dictionary, then Chinese for CN-family countries, then English.
 export const profileValue = (value: string, language: ProfileLanguage, countryCode: CountryCode): string => {
@@ -303,8 +307,11 @@ const hasEmploymentDetails = (
 ): employment is Extract<GeneratedBundle['extensions']['employment'], { employmentStatus: 'employed' | 'self-employed' }> =>
   employment.employmentStatus === 'employed' || employment.employmentStatus === 'self-employed';
 
-const streetValue = (countryCode: CountryCode, components: AddressComponents): string => {
+export const streetValue = (countryCode: CountryCode, components: AddressComponents): string => {
   if (countryCode === 'CN') {
+    if (!/\p{Script=Han}/u.test(components.street)) {
+      return [components.houseNumber, components.street, components.unit].filter(Boolean).join(' ');
+    }
     const suffix = /^[0-9][0-9-]*$/.test(components.houseNumber) ? '号' : '';
     return [`${components.street}${components.houseNumber}${suffix}`, components.unit].filter(Boolean).join('');
   }
@@ -334,6 +341,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [result, setResult] = useState<GeneratedBundle | null>(null);
   const [addressLanguage, setAddressLanguage] = useState<AddressDisplayLanguage>(() => readStoredDisplayLanguage<AddressDisplayLanguage>(addressLanguageStorageKey));
   const [addressTranslations, setAddressTranslations] = useState<Record<string, AddressTranslation>>({});
+  const [translationRetry, setTranslationRetry] = useState(0);
   const [profileLanguage, setProfileLanguage] = useState<ProfileLanguage>(() => readStoredDisplayLanguage<ProfileLanguage>(profileLanguageStorageKey));
   const [loading, setLoading] = useState(false);
   const [ipLoading, setIpLoading] = useState(false);
@@ -355,8 +363,10 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const selectionRef = useRef<{ country: CountryCode; mode: Mode }>({ country: 'US', mode: 'residential' });
   const generationController = useRef<AbortController | null>(null);
   const locationControllers = useRef<Partial<Record<LocationField, AbortController>>>({});
+  const locationRetries = useRef<Partial<Record<LocationField, LocationOverrides>>>({});
   const locationRequestKeys = useRef<Partial<Record<LocationField, string>>>({});
   const locationCache = useRef<Map<string, LocationCacheEntry>>(new Map());
+  const locationRevisions = useRef<Map<CountryCode, string>>(new Map());
   const locationQueries = useRef<Record<LocationField, string>>({ region: '', city: '', district: '', postcode: '' });
   const copyToastTimer = useRef<number | undefined>(undefined);
   const prefetchedResults = useRef<Map<string, GeneratedBundle[]>>(new Map());
@@ -373,7 +383,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   };
   useEffect(() => { void refreshFavoriteState(); return subscribeToFavorites(() => void refreshFavoriteState()); }, []);
 
-  const residential = mode === 'residential';
+  const residential = countryCode === 'CN';
   const selectedCountry = countryByCode.get(countryCode) || countries[0];
   const selectedShortcuts = shortcutConfigs[countryCode] || selectedCountry;
   const addressSchema = selectedCountry.addressSchema;
@@ -423,7 +433,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
 
   const paramsFor = (spec: GenerationRequestSpec, requestId: string, strategy: 'instant' | 'random') => {
     const params = new URLSearchParams({
-      requestId, country: spec.country, residential: String(spec.mode === 'residential'),
+      requestId, country: spec.country, residential: String(spec.country === 'CN'),
       seed: randomSeed(), strategy
     });
     if (spec.ipRegion) params.set('mode', 'ip-region');
@@ -496,26 +506,38 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     recentAddressIds.current.set(key, recent.slice(-20));
   };
 
-  const loadOptions = async (
-    field: LocationField,
-    query = '',
-    overrides: { country?: CountryCode; residential?: boolean; region?: string; regionId?: string; cityId?: string; cursor?: string; append?: boolean } = {}
-  ) => {
-    locationControllers.current[field]?.abort();
-    const controller = new AbortController();
-    locationControllers.current[field] = controller;
-    locationQueries.current[field] = query;
+  const cancelGeneration = () => {
+    generationController.current?.abort(); activeRequest.current = null;
+    abortPrefetch(); setLoading(false); setError(''); setFallbackNotice('');
+  };
+  const cancelLocationFields = (fields: LocationField[]) => {
+    for (const field of fields) {
+      locationControllers.current[field]?.abort();
+      delete locationControllers.current[field]; delete locationRequestKeys.current[field];
+      delete locationRetries.current[field]; locationQueries.current[field] = '';
+    }
+  };
+  const loadOptions = async (field: LocationField, query = '', overrides: LocationOverrides = {}) => {
     const requestCountry = overrides.country || countryCode;
-    const requestResidential = overrides.residential ?? residential;
-    const parentRegion = overrides.region ?? region;
-    const parentRegionId = overrides.regionId ?? regionId;
-    const parentCityId = overrides.cityId ?? cityId;
-    const requestKey = [requestCountry, requestResidential, field, query.trim(), parentRegion, parentRegionId, parentCityId, overrides.cursor || ''].join('\u001f');
-    locationRequestKeys.current[field] = requestKey;
+    const requestResidential = overrides.residential ?? (requestCountry === 'CN');
+    const parentRegion = field === 'region' ? '' : overrides.region ?? region;
+    const parentRegionId = field === 'region' ? '' : overrides.regionId ?? regionId;
+    const parentCity = field === 'postcode' || field === 'district' ? overrides.city ?? city : '';
+    const parentCityId = field === 'postcode' || field === 'district' ? overrides.cityId ?? cityId : '';
+    const requestParts = [requestCountry, requestResidential, field, query.trim(), parentRegion, parentRegionId,
+      parentCity, parentCityId, overrides.cursor || '', locale];
+    const knownRevision = locationRevisions.current.get(requestCountry) || '';
+    const requestKey = JSON.stringify([...requestParts, knownRevision]);
+    if (locationRequestKeys.current[field] === requestKey && locationControllers.current[field] && !locationControllers.current[field]?.signal.aborted) return;
     const optionKey = field === 'region' ? 'regions' : field === 'city' ? 'cities' : field === 'district' ? 'districts' : 'postcodes';
     if (!overrides.append) {
       const cached = locationCache.current.get(requestKey);
       if (cached && cached.expiresAt > Date.now()) {
+        locationControllers.current[field]?.abort();
+        delete locationControllers.current[field];
+        locationQueries.current[field] = query;
+        locationRetries.current[field] = overrides;
+        locationRequestKeys.current[field] = requestKey;
         setLocations((current) => ({ ...current, [optionKey]: cached.values }));
         setLocationMeta((current) => ({ ...current, [field]: cached.meta }));
         setLocationErrors((current) => ({ ...current, [field]: '' }));
@@ -524,6 +546,12 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       }
       if (cached) locationCache.current.delete(requestKey);
     }
+    locationControllers.current[field]?.abort();
+    const controller = new AbortController();
+    locationControllers.current[field] = controller;
+    locationQueries.current[field] = query;
+    locationRetries.current[field] = overrides;
+    locationRequestKeys.current[field] = requestKey;
     const params = new URLSearchParams({
       country: requestCountry,
       residential: String(requestResidential),
@@ -535,37 +563,50 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     if (parentRegion) params.set('region', parentRegion);
     if (parentRegionId) params.set('regionId', parentRegionId);
     if (parentCityId) params.set('cityId', parentCityId);
+    if (parentCity) params.set('city', parentCity);
     if (overrides.cursor) params.set('cursor', overrides.cursor);
     setLocationLoadState((current) => ({ ...current, [field]: 'loading' }));
     try {
       const response = await fetchWithTimeout(`${endpoint}/v1/locations/search?${params}`, { signal: controller.signal }, LOCATION_REQUEST_TIMEOUT_MS);
       if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
-      const payload = await response.json() as { data?: Locations & LocationMeta };
+      const payload = await response.json() as { data?: Locations & LocationMeta & { revision?: string } };
       if (locationControllers.current[field] !== controller || locationRequestKeys.current[field] !== requestKey) return;
-      const values = field === 'region' ? payload.data?.regions : field === 'city' ? payload.data?.cities : field === 'district' ? payload.data?.districts : payload.data?.postcodes;
+      const responseRevision = payload.data?.revision || response.headers.get('X-Address-Catalog-Revision') || '';
+      if (responseRevision && responseRevision !== knownRevision) {
+        locationRevisions.current.set(requestCountry, responseRevision);
+        locationCache.current.clear();
+      }
+      const supplied = field === 'region' ? payload.data?.regions : field === 'city' ? payload.data?.cities : field === 'district' ? payload.data?.districts : payload.data?.postcodes;
+      const values = (supplied || []).filter((option) => !option.disabled && option.availableCount !== 0);
       const meta = {
         total: payload.data?.total ?? values?.length ?? 0,
         availableTotal: payload.data?.availableTotal ?? values?.filter((option) => !option.disabled).length ?? 0,
         nextCursor: payload.data?.nextCursor
       };
-      setLocations((current) => ({ ...current, [optionKey]: overrides.append ? [...current[optionKey], ...(values || [])] : values || [] }));
+      setLocations((current) => ({ ...current, [optionKey]: overrides.append ? [...new Map([...current[optionKey], ...values].map((option) => [option.id || option.value, option])).values()] : values }));
       setLocationMeta((current) => ({ ...current, [field]: meta }));
-      if (!overrides.append) locationCache.current.set(requestKey, { expiresAt: Date.now() + LOCATION_CACHE_TTL_MS, values: values || [], meta });
+      if (!overrides.append) {
+        const cacheKey = responseRevision && responseRevision !== knownRevision
+          ? JSON.stringify([...requestParts, responseRevision]) : requestKey;
+        locationCache.current.set(cacheKey, { expiresAt: Date.now() + LOCATION_CACHE_TTL_MS, values, meta });
+        while (locationCache.current.size > 100) locationCache.current.delete(locationCache.current.keys().next().value!);
+      }
       setLocationErrors((current) => ({ ...current, [field]: '' }));
       setLocationLoadState((current) => ({ ...current, [field]: 'ready' }));
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
       if (locationControllers.current[field] !== controller || locationRequestKeys.current[field] !== requestKey) return;
-      setLocations((current) => ({ ...current, [optionKey]: [] }));
+      if (!overrides.append) setLocations((current) => ({ ...current, [optionKey]: [] }));
       setLocationErrors((current) => ({ ...current, [field]: t.locationLoadFailed }));
       setLocationLoadState((current) => ({ ...current, [field]: 'error' }));
+    } finally {
+      if (locationControllers.current[field] === controller) delete locationControllers.current[field];
     }
   };
 
   const resetFor = (nextCountry: CountryCode, nextMode: Mode, history: 'push' | 'replace' | 'none' = 'replace') => {
-    generationController.current?.abort();
-    abortPrefetch();
-    activeRequest.current = null;
+    cancelGeneration();
+    cancelLocationFields(['region', 'city', 'district', 'postcode']);
     selectionRef.current = { country: nextCountry, mode: nextMode };
     setCountryCode(nextCountry); setMode(nextMode); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
     setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setLocationLoadState(emptyLocationLoadState); setError(''); setLocationErrors({}); setLoading(false); setFallbackNotice('');
@@ -584,7 +625,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
     const payload = await response.json() as { data?: CountryAvailability[] };
     const records = payload.data || [];
-    const available = new Set(records.filter((country) => country.residentialAvailable).map((country) => country.code));
+    const available = new Set(records.filter((country) => country.available ?? country.residentialAvailable).map((country) => country.code));
     residentialCountriesRef.current = available;
     setResidentialCountries(available);
     setCountriesReady(true);
@@ -755,7 +796,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       const current = activeRequest.current;
       if (!current || current.requestId !== context.requestId || current.country !== context.country || current.mode !== context.mode) return;
       if (!response.ok || !payload.data) throw new Error(payload.error?.code || 'API_ERROR');
-      const expectedMode = overrides.ipRegion ? 'ip-region' : context.mode;
+      const expectedMode = generationResponseMode(context.country, overrides.ipRegion);
       if (payload.data.requestId !== context.requestId || payload.data.mode !== expectedMode) return;
       if (!overrides.ipRegion && payload.data.country !== context.country) return;
       if (!overrides.ipRegion && selectionRef.current.country !== context.country) return;
@@ -768,8 +809,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         setLocations(emptyLocations); setLocationMeta(emptyLocationMeta);
         updateUrl(nextCountry, 'replace');
         setIpRegionResult({ matchLevel: payload.data.ipMatchLevel, ...payload.data.ipRegion });
-        void loadOptions('region', '', { country: nextCountry, residential: context.mode === 'residential', region: '', regionId: '', cityId: '' });
-        void loadOptions('city', '', { country: nextCountry, residential: context.mode === 'residential', region: '', regionId: '', cityId: '' });
+        void loadOptions('region', '', { country: nextCountry, residential: nextCountry === 'CN', region: '', regionId: '', city: '', cityId: '' });
+        void loadOptions('city', '', { country: nextCountry, residential: nextCountry === 'CN', region: '', regionId: '', city: '', cityId: '' });
       } else {
         setIpRegionResult(null);
         const level = payload.data.filterMatchLevel;
@@ -795,7 +836,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     void generate({ ipRegion: true, ip: manualIp, strategy: 'instant' });
   };
 
-  const submit = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => { event.preventDefault(); void generate(); };
+  const submit = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => { event.preventDefault(); if (!loading) void generate(); };
   const showToastMessage = (kind: 'success' | 'error', message: string) => {
     window.clearTimeout(copyToastTimer.current);
     setCopyToast({ kind, message });
@@ -833,7 +874,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     }
   };
   const applyShortcut = (shortcut: LocationShortcut) => {
-    abortPrefetch();
+    cancelGeneration(); cancelLocationFields(['region', 'city', 'district', 'postcode']);
+    setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setLocationLoadState(emptyLocationLoadState); setLocationErrors({});
     const overrides: GenerationOptions = {};
     if (shortcut.type === 'region') {
       setRegion(shortcut.value); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
@@ -841,12 +883,12 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       void loadOptions('city', '', { region: shortcut.value, regionId: '' });
     }
     if (shortcut.type === 'city') {
-      setCity(shortcut.value); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
-      Object.assign(overrides, { city: shortcut.value, cityId: '', district: '', postcode: '', postcodeId: '' });
+      setRegion(''); setRegionId(''); setCity(shortcut.value); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+      Object.assign(overrides, { region: '', regionId: '', city: shortcut.value, cityId: '', district: '', postcode: '', postcodeId: '' });
     }
     if (shortcut.type === 'postcode') {
-      setPostcode(shortcut.value); setPostcodeId('');
-      Object.assign(overrides, { postcode: shortcut.value, postcodeId: '' });
+      setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(shortcut.value); setPostcodeId('');
+      Object.assign(overrides, { region: '', regionId: '', city: '', cityId: '', district: '', postcode: shortcut.value, postcodeId: '' });
     }
     void generate(overrides);
   };
@@ -881,7 +923,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   // target script; every other case goes through the translation endpoint.
   const storedVariantTrusted = Boolean(result) && (addressLanguage === 'en' || addressLanguage === 'zh-CN')
     && storedVariantLooksLocalized(result!.address.componentVariants[addressLanguage], addressLanguage);
-  const untrustedAddressLanguage = Boolean(result) && addressLanguage !== 'native'
+  const isChinaPinyin = Boolean(result) && result!.address.countryCode === 'CN' && addressLanguage === 'pinyin';
+  const untrustedAddressLanguage = Boolean(result) && !isChinaPinyin && addressLanguage !== 'native'
     && !matchesNativeLanguage(addressLanguage, result!.address.nativeLanguage)
     && !storedVariantTrusted;
   const translationKey = result && untrustedAddressLanguage ? `${result.address.id}:${addressLanguage}` : '';
@@ -905,9 +948,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
             entry = { status: 'ready', components: payload.data.components, postalLines: payload.data.lines, singleLine: payload.data.singleLine };
           }
         }
-      } catch (reason) {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      }
+      } catch { /* Keep the complete original address available when translation fails. */ }
+      if (controller.signal.aborted) return;
       setAddressTranslations((current) => {
         const entries = Object.entries(current);
         const bounded = entries.length >= 60 ? Object.fromEntries(entries.slice(-30)) : current;
@@ -915,7 +957,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       });
     })();
     return () => controller.abort();
-  }, [translationKey]);
+  }, [translationKey, translationRetry]);
 
   const translationEntry = translationKey ? addressTranslations[translationKey] : undefined;
   const translationReady = translationEntry?.status === 'ready';
@@ -926,7 +968,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const presentation = result
     ? translationReady
       ? { language: 'native' as const, postalLines: translationEntry.postalLines, singleLine: translationEntry.singleLine }
-      : addressDisplayPresentation(result, displayedAddressLanguage, locale)
+      : addressDisplayPresentation(result, displayedAddressLanguage, locale, result.generatedUnit)
     : undefined;
   const components = result
     ? translationReady
@@ -1006,10 +1048,10 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
             {ipRegionResult && <div className="ip-region-result"><span><b>{t.matchLevel}</b>{ipMatchLabel}</span><span>{[ipRegionResult.targetRegion, ipRegionResult.targetCity].filter(Boolean).join(' · ')}</span>{ipRegionResult.distanceKm !== undefined && <span>{ipRegionResult.distanceKm.toFixed(1)} km</span>}</div>}
           </section>
           <section className="generator-card panel">
-            <header className="generator-heading"><h1>{generatorTitle(selectedCountryName, locale, t.residentialMode)}</h1></header>
+            <header className="generator-heading"><h1>{generatorTitle(selectedCountryName, locale, residential ? t.residentialMode : t.normalMode)}</h1></header>
             <form className={`filter-grid filters-${filterFields.length}`} onSubmit={submit}>
-              {filterFields.includes('region') && <Combobox locale={locale} label={selectedCountry.searchLabels.region[textLocale]} value={region} options={locations.regions} placeholder={t.allRegions} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.region} state={locationLoadState.region} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onOpen={() => void loadOptions('region')} onRetry={() => void loadOptions('region', locationQueries.current.region)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
-                abortPrefetch();
+              {filterFields.includes('region') && <Combobox locale={locale} label={selectedCountry.searchLabels.region[textLocale]} value={region} options={locations.regions} placeholder={t.allRegions} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.region} state={locationLoadState.region} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onOpen={() => void loadOptions('region')} onRetry={() => void loadOptions('region', locationQueries.current.region, locationRetries.current.region)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
+                cancelGeneration(); cancelLocationFields(['city', 'district', 'postcode']);
                 setRegion(value); setRegionId(option.id || ''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
                 setLocations((current) => ({ ...current, cities: [], districts: [], postcodes: [] }));
                 setLocationMeta((current) => ({ ...current, city: emptyLocationMeta.city, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
@@ -1017,26 +1059,24 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
                 setLocationErrors((current) => ({ ...current, city: '', district: '', postcode: '' }));
                 void loadOptions('city', '', { region: value, regionId: option.id || '' });
               }}/>}
-              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
-                abortPrefetch();
+              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city, locationRetries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
+                cancelGeneration(); cancelLocationFields(['district', 'postcode']);
                 setCity(value); setCityId(option.id || ''); setDistrict(''); setPostcode(''); setPostcodeId('');
                 setLocations((current) => ({ ...current, districts: [], postcodes: [] }));
                 setLocationMeta((current) => ({ ...current, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
                 setLocationLoadState((current) => ({ ...current, district: 'idle', postcode: 'idle' }));
                 setLocationErrors((current) => ({ ...current, district: '', postcode: '' }));
                 if (value && option.regionId && option.regionValue) { setRegion(option.regionValue); setRegionId(option.regionId); }
-                if (filterFields.includes('district')) void loadOptions('district', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
-                if (filterFields.includes('postcode')) void loadOptions('postcode', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
+                if (filterFields.includes('district')) void loadOptions('district', '', { region: option.regionValue || region, regionId: option.regionId || regionId, city: value, cityId: option.id || '' });
+                if (filterFields.includes('postcode')) void loadOptions('postcode', '', { region: option.regionValue || region, regionId: option.regionId || regionId, city: value, cityId: option.id || '' });
               }}/>}
-              {filterFields.includes('district') && <Combobox locale={locale} label={(selectedCountry.searchLabels.district || selectedCountry.searchLabels.city)[textLocale]} value={district} options={locations.districts} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.district} state={locationLoadState.district} total={locationMeta.district.total} hasMore={Boolean(locationMeta.district.nextCursor)} onOpen={() => void loadOptions('district')} onRetry={() => void loadOptions('district', locationQueries.current.district)} onLoadMore={() => loadOptions('district', locationQueries.current.district, { cursor: locationMeta.district.nextCursor, append: true })} onSearch={(query) => loadOptions('district', query)} onChange={(value) => {
-                abortPrefetch();
+              {filterFields.includes('district') && <Combobox locale={locale} label={(selectedCountry.searchLabels.district || selectedCountry.searchLabels.city)[textLocale]} value={district} options={locations.districts} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.district} state={locationLoadState.district} total={locationMeta.district.total} hasMore={Boolean(locationMeta.district.nextCursor)} onOpen={() => void loadOptions('district')} onRetry={() => void loadOptions('district', locationQueries.current.district, locationRetries.current.district)} onLoadMore={() => loadOptions('district', locationQueries.current.district, { cursor: locationMeta.district.nextCursor, append: true })} onSearch={(query) => loadOptions('district', query)} onChange={(value) => {
+                cancelGeneration();
                 setDistrict(value);
               }}/>}
-              {filterFields.includes('postcode') && <Combobox locale={locale} label={selectedCountry.searchLabels.postcode[textLocale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.postcode} state={locationLoadState.postcode} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onOpen={() => void loadOptions('postcode')} onRetry={() => void loadOptions('postcode', locationQueries.current.postcode)} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
-                abortPrefetch();
+              {filterFields.includes('postcode') && <Combobox locale={locale} label={selectedCountry.searchLabels.postcode[textLocale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.postcode} state={locationLoadState.postcode} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onOpen={() => void loadOptions('postcode')} onRetry={() => void loadOptions('postcode', locationQueries.current.postcode, locationRetries.current.postcode)} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
+                cancelGeneration();
                 setPostcode(value); setPostcodeId(option.id || '');
-                if (value && option.parentId && option.parentValue) { setCity(option.parentValue); setCityId(option.parentId); }
-                if (value && option.regionId && option.regionValue) { setRegion(option.regionValue); setRegionId(option.regionId); }
               }}/>}
               <button className="generate-button" disabled={loading} type="submit">{loading ? t.generating : t.generate}</button>
             </form>
@@ -1047,7 +1087,13 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
           {result && presentation && components && <>
             <section className="address-card panel">
               <header className="section-heading"><h2>{t.address}</h2><span className="address-heading-actions"><button type="button" className={`favorite-toggle ${favoriteIds.has(favoriteIdFor(result)) ? 'active' : ''}`} aria-pressed={favoriteIds.has(favoriteIdFor(result))} aria-label={favoritesCopy[locale].save} title={favoritesCopy[locale].save} onClick={() => void toggleFavorite()}><Bookmark aria-hidden="true"/></button><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></span></header>
-              <AddressLanguageControl value={addressLanguage} onChange={changeAddressLanguage} locale={locale} />
+              <AddressLanguageControl value={addressLanguage} onChange={changeAddressLanguage} locale={locale} countryCode={result.address.countryCode} />
+              {translationEntry?.status === 'fallback' && <div className="translation-error compact-notice" role="status">
+                <span>{translationErrorText[locale]}</span><button type="button" className="text-button" onClick={() => {
+                  setAddressTranslations((current) => { const next = { ...current }; delete next[translationKey]; return next; });
+                  setTranslationRetry((value) => value + 1);
+                }}>{filterRetryLabel[locale]}</button>
+              </div>}
               <div className="address-table" aria-busy={translationLoading || undefined} style={translationLoading ? { opacity: 0.55, transition: 'opacity .2s' } : undefined}>
                 {resultFields.map(({ field, label }) => {
                   const value = resultValues[field];
@@ -1058,7 +1104,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
                 <AddressBlock title={t.standardAddress} copyLabel={copied === 'postal' ? t.copied : t.copy} onCopy={() => void copy('postal', presentation.postalLines.join('\n'))}><address>{presentation.postalLines.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address></AddressBlock>
                 <AddressBlock title={t.singleLine} copyLabel={copied === 'single' ? t.copied : t.copy} onCopy={() => void copy('single', presentation.singleLine)}><p>{presentation.singleLine}</p></AddressBlock>
               </div>
-              <div className="address-meta"><span><b>{t.propertyType}</b>{result.address.propertyType === 'apartment' ? t.apartment : result.address.propertyType === 'residential' ? t.residential : t.unknown}</span>{result.generatedUnit?.provenance === 'synthetic' && <span><b>{t.unitSource}</b>{t.syntheticUnit}</span>}{source && <span><b>{t.source}</b><a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.sourceName}</a></span>}{source?.sourceLicense && <span><b>{t.license}</b>{source.sourceLicenseUrl ? <a href={source.sourceLicenseUrl} target="_blank" rel="noreferrer">{source.sourceLicense}</a> : source.sourceLicense}</span>}</div>
+              <div className="address-meta">{result.address.matchLevel === 'street' ? <span><b>{t.matchLevel}</b>{t.street}</span> : <span><b>{t.propertyType}</b>{result.address.propertyType === 'apartment' ? t.apartment : result.address.propertyType === 'residential' ? t.residential : t.unknown}</span>}{result.generatedUnit?.provenance === 'synthetic' && <span><b>{t.unitSource}</b>{t.syntheticUnit}</span>}{source && <span><b>{t.source}</b><a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.sourceName}</a></span>}{source?.sourceLicense && <span><b>{t.license}</b>{source.sourceLicenseUrl ? <a href={source.sourceLicenseUrl} target="_blank" rel="noreferrer">{source.sourceLicense}</a> : source.sourceLicense}</span>}</div>
             </section>
 
             <ProfileLanguageControl value={profileLanguage} onChange={changeProfileLanguage} locale={locale} />
@@ -1096,7 +1142,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
                 {amapMapEnabled && mapDisplay?.amapApiKey && mapDisplay.serviceHost && <article className="map-provider-card"><h3>{t.amapMap}</h3><AmapPreview
                   apiKey={mapDisplay.amapApiKey} serviceHost={mapDisplay.serviceHost} countryCode={result.address.countryCode}
                   latitude={result.address.coordinates.latitude} longitude={result.address.coordinates.longitude}
-                  label={presentation.singleLine} locale={locale} errorText={t.mapLoadFailed}/></article>}
+                  label={presentation.singleLine} locale={locale} errorText={t.mapLoadFailed} retryText={filterRetryLabel[locale]}/></article>}
               </div>
             </section>}
           </>}
@@ -1115,9 +1161,25 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   </div>;
 }
 
+const translationErrorText: Record<Locale, string> = {
+  en: 'Translation is unavailable. Showing the original address.',
+  'zh-CN': '翻译暂时不可用，当前显示完整原文。', 'zh-TW': '翻譯暫時無法使用，目前顯示完整原文。',
+  ja: '翻訳を利用できません。元の住所を表示しています。', ko: '번역을 사용할 수 없습니다. 원래 주소를 표시합니다.',
+  de: 'Übersetzung nicht verfügbar. Die Originaladresse wird angezeigt.',
+  fr: 'Traduction indisponible. L’adresse d’origine est affichée.',
+  es: 'La traducción no está disponible. Se muestra la dirección original.',
+  pt: 'Tradução indisponível. O endereço original é exibido.'
+};
 const filterRetryLabel: Record<Locale, string> = {
   en: 'Retry', 'zh-CN': '重试', 'zh-TW': '重試', ja: '再試行', ko: '다시 시도',
   de: 'Erneut versuchen', fr: 'Réessayer', es: 'Reintentar', pt: 'Tentar novamente'
+};
+
+const optionPageText: Record<Locale, [string, string, string]> = {
+  en: ['Previous page', 'Next page', 'Load more'], 'zh-CN': ['上一页', '下一页', '加载更多'], 'zh-TW': ['上一頁', '下一頁', '載入更多'],
+  ja: ['前のページ', '次のページ', 'さらに読み込む'], ko: ['이전 페이지', '다음 페이지', '더 불러오기'],
+  de: ['Vorherige Seite', 'Nächste Seite', 'Mehr laden'], fr: ['Page précédente', 'Page suivante', 'Charger plus'],
+  es: ['Página anterior', 'Página siguiente', 'Cargar más'], pt: ['Página anterior', 'Próxima página', 'Carregar mais']
 };
 
 function Combobox({ locale, label, value, options, placeholder, unavailableLabel, loadingLabel, errorLabel, state, total, hasMore = false, clientFilter = false, onOpen, onRetry, onLoadMore, onChange, onSearch }: {
@@ -1131,11 +1193,15 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [pageIndex, setPageIndex] = useState(0);
+  const pendingPage = useRef<number | null>(null);
+  const searchedQuery = useRef('');
   const skipValueSync = useRef(false);
   const onSearchRef = useRef(onSearch);
   const onOpenRef = useRef(onOpen);
   const selected = options.find((option) => option.value === value);
   const selectedLabel = selected ? locationOptionLabel(selected, locale) : value;
+  const text = optionPageText[locale];
   useEffect(() => { onSearchRef.current = onSearch; }, [onSearch]);
   useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
   useEffect(() => {
@@ -1145,61 +1211,92 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
   useEffect(() => {
     if (!open || clientFilter || !onSearchRef.current) return;
     const searchQuery = selectedLabel === query ? '' : query;
-    const timer = window.setTimeout(() => void onSearchRef.current?.(searchQuery), 280);
+    if (searchedQuery.current === searchQuery) return;
+    const timer = window.setTimeout(() => { searchedQuery.current = searchQuery; void onSearchRef.current?.(searchQuery); }, 280);
     return () => window.clearTimeout(timer);
   }, [query, open, selectedLabel, clientFilter]);
-  useEffect(() => setActiveIndex(0), [query, clientFilter]);
+  useEffect(() => { setActiveIndex(0); setPageIndex(0); pendingPage.current = null; }, [query, clientFilter]);
   useEffect(() => {
-    const close = (event: MouseEvent) => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
       if (!root.current?.contains(event.target as Node)) { setOpen(false); setQuery(selectedLabel); }
     };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [selectedLabel]);
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [open, selectedLabel]);
   const searchQuery = selectedLabel === query ? '' : query;
-  const visibleOptions = clientFilter ? filterLocationOptions(options, searchQuery) : options;
-  const openMenu = () => {
-    if (!open) void onOpenRef.current?.();
-    setOpen(true);
-  };
-  const renderedOptions = visibleOptions.slice(0, LOCATION_OPTION_RENDER_LIMIT)
+  const visibleOptions = (clientFilter ? filterLocationOptions(options, searchQuery) : options)
+    .filter((option) => !option.disabled && option.availableCount !== 0);
+  const pages = Math.max(1, Math.ceil(visibleOptions.length / LOCATION_OPTION_RENDER_LIMIT));
+  const currentPage = Math.min(pageIndex, pages - 1);
+  const start = currentPage * LOCATION_OPTION_RENDER_LIMIT;
+  const renderedOptions = visibleOptions.slice(start, start + LOCATION_OPTION_RENDER_LIMIT)
     .map((option) => ({ ...option, label: locationOptionLabel(option, locale) }));
   const values: LocationOption[] = [{ value: '', label: placeholder }, ...renderedOptions];
+  useEffect(() => {
+    if (pendingPage.current !== null && state === 'ready') {
+      setPageIndex(Math.min(pendingPage.current, pages - 1)); pendingPage.current = null; setActiveIndex(0);
+    }
+  }, [options, state, pages]);
+  useEffect(() => {
+    if (open) document.getElementById(`${id}-option-${Math.min(activeIndex, values.length - 1)}`)?.scrollIntoView({ block: 'nearest' });
+  }, [id, activeIndex, currentPage, open, values.length]);
+  const openMenu = () => {
+    if (!open) { searchedQuery.current = ''; void onOpenRef.current?.(); setPageIndex(0); setActiveIndex(0); }
+    setOpen(true);
+  };
   const select = (option: LocationOption) => {
-    if (option.disabled) return;
-    setQuery(option.label === placeholder ? '' : option.label); onChange(option.value, option); setOpen(false); setActiveIndex(0);
+    setQuery(option.value ? option.label : ''); onChange(option.value, option); setOpen(false); setActiveIndex(0);
+  };
+  const changePage = (next: number) => { setPageIndex(next); setActiveIndex(0); };
+  const loadMore = () => {
+    if (state === 'loading') return;
+    pendingPage.current = Math.floor(visibleOptions.length / LOCATION_OPTION_RENDER_LIMIT);
+    void onLoadMore?.();
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'ArrowDown') { event.preventDefault(); openMenu(); setActiveIndex((index) => Math.min(index + 1, values.length - 1)); }
-    if (event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex((index) => Math.max(index - 1, 0)); }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!open) { openMenu(); return; }
+      setActiveIndex((index) => Math.max(0, Math.min(index + (event.key === 'ArrowDown' ? 1 : -1), values.length - 1)));
+    }
+    if (event.key === 'PageDown' && open && currentPage + 1 < pages) { event.preventDefault(); changePage(currentPage + 1); }
+    if (event.key === 'PageUp' && open && currentPage > 0) { event.preventDefault(); changePage(currentPage - 1); }
     if (event.key === 'Enter' && open) { event.preventDefault(); select(values[activeIndex] || values[0]); }
-    if (event.key === 'Escape') { setOpen(false); setQuery(selectedLabel); }
+    if (event.key === 'Escape') { event.preventDefault(); setOpen(false); setQuery(selectedLabel); }
   };
-  return <div className="filter custom-combobox" ref={root}>
+  return <div className="filter custom-combobox" ref={root} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) { setOpen(false); setQuery(selectedLabel); }
+  }}>
     <label htmlFor={id}>{label}</label>
     <div className={`combobox-control ${open ? 'open' : ''}`}>
-      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-activedescendant={open ? `${id}-option-${activeIndex}` : undefined} aria-autocomplete="list" aria-busy={state === 'loading'} value={query} placeholder={placeholder} onFocus={openMenu} onChange={(event) => {
+      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-activedescendant={open ? `${id}-option-${Math.min(activeIndex, values.length - 1)}` : undefined} aria-autocomplete="list" aria-busy={state === 'loading'} value={query} placeholder={placeholder} onFocus={openMenu} onChange={(event) => {
         const nextQuery = event.target.value;
         if (value && nextQuery !== selectedLabel) {
-          skipValueSync.current = true;
-          onChange('', { value: '', label: placeholder });
+          skipValueSync.current = true; onChange('', { value: '', label: placeholder });
         }
         setQuery(nextQuery); setOpen(true); setActiveIndex(0);
       }} onKeyDown={keyDown}/>
-      <button type="button" aria-label={label} onClick={() => open ? setOpen(false) : openMenu()}>▾</button>
+      <button type="button" aria-label={label} aria-expanded={open} onMouseDown={(event) => event.preventDefault()} onClick={() => open ? setOpen(false) : openMenu()}><ChevronDown size={16} aria-hidden="true" /></button>
     </div>
-    {open && <div className="combobox-popup" id={`${id}-list`} role="listbox">
-      {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} disabled={option.disabled} key={`${option.value}-${index}`} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{option.availableCount > 0 ? new Intl.NumberFormat(locale).format(option.availableCount) : unavailableLabel}</small>}</button>)}
+    {open && <div className="combobox-popup">
+      <div className="combobox-options" id={`${id}-list`} role="listbox" aria-label={label}>
+        {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} key={option.id || option.value} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{new Intl.NumberFormat(locale).format(option.availableCount)}</small>}</button>)}
+      </div>
       <div className="combobox-status" role="status" aria-live="polite">
         {state === 'loading' ? <span>{loadingLabel}</span>
           : state === 'error' ? <><span>{errorLabel}</span>{onRetry && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onRetry()}>{filterRetryLabel[locale]}</button>}</>
-            : <span>{visibleOptions.length}/{clientFilter ? options.length : total}</span>}
-        {state !== 'error' && hasMore && onLoadMore && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>+100</button>}
+            : <span>{visibleOptions.length ? `${start + 1}–${start + renderedOptions.length}` : unavailableLabel} / {clientFilter ? visibleOptions.length : total}</span>}
+        {pages > 1 && <span className="combobox-pagination">
+          <button type="button" aria-label={text[0]} disabled={currentPage === 0} onMouseDown={(event) => event.preventDefault()} onClick={() => changePage(currentPage - 1)}><ChevronLeft size={16} /></button>
+          <button type="button" aria-label={text[1]} disabled={currentPage + 1 >= pages} onMouseDown={(event) => event.preventDefault()} onClick={() => changePage(currentPage + 1)}><ChevronRight size={16} /></button>
+        </span>}
+        {state !== 'error' && hasMore && onLoadMore && <button type="button" disabled={state === 'loading'} onMouseDown={(event) => event.preventDefault()} onClick={loadMore}>{text[2]}</button>}
       </div>
     </div>}
   </div>;
 }
-function AddressLanguageControl({ value, onChange, locale }: { value: AddressDisplayLanguage; onChange: (language: AddressDisplayLanguage) => void; locale: Locale }) {
+function AddressLanguageControl({ value, onChange, locale, countryCode }: { value: AddressDisplayLanguage; onChange: (language: AddressDisplayLanguage) => void; locale: Locale; countryCode: CountryCode }) {
   const t = messages[locale];
   const otherLanguages = localeDefinitions.filter(({ code }) => code !== 'en' && code !== 'zh-CN');
   const otherSelected = value !== 'native' && value !== 'en' && value !== 'zh-CN';
@@ -1207,6 +1304,7 @@ function AddressLanguageControl({ value, onChange, locale }: { value: AddressDis
     <button type="button" className={value === 'en' ? 'active' : ''} aria-pressed={value === 'en'} onClick={() => onChange('en')}>{profileLanguageNames.en}</button>
     <button type="button" className={value === 'zh-CN' ? 'active' : ''} aria-pressed={value === 'zh-CN'} onClick={() => onChange('zh-CN')}>{profileLanguageNames['zh-CN']}</button>
     <button type="button" className={value === 'native' ? 'active' : ''} aria-pressed={value === 'native'} onClick={() => onChange('native')}>{t.originalAddress}</button>
+    {countryCode === 'CN' && <button type="button" className={value === 'pinyin' ? 'active' : ''} aria-pressed={value === 'pinyin'} onClick={() => onChange('pinyin')}>{locale === 'zh-CN' ? '拼音' : 'Pinyin'}</button>}
     <select className={otherSelected ? 'active' : ''} aria-label={profileLanguageControlText[locale].other} value={otherSelected ? value : ''} onChange={(event) => onChange(event.target.value as Locale)}>
       <option value="" disabled>{profileLanguageControlText[locale].other}</option>
       {otherLanguages.map(({ code }) => <option key={code} value={code}>{profileLanguageNames[code]}</option>)}

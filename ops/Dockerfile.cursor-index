@@ -1,0 +1,5 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chown=address:address server/database/active-country-index.mjs server/database/migrate-active-country-index.mjs ./server/database/
+ENTRYPOINT ["node", "server/database/migrate-active-country-index.mjs"]
+CMD []

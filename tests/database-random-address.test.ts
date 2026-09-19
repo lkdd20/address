@@ -5,6 +5,16 @@ import {
 import type { CountryCode } from '../src/domain/types';
 
 describe('database random address index loader', () => {
+  it('uses the same derived administrative labels as the SQL generation index', async () => {
+    const native = { admin1: '九龍', admin1Code: 'KLN', locality: '觀塘區' };
+    const en = { admin1: 'Kowloon', admin1Code: 'KLN', locality: 'Kwun Tong' };
+    const row = { id: 'fixture', country_code: 'HK', admin1: 'Hong Kong', admin1_code: '', locality: 'Kwun Tong',
+      administrative_patch_json: JSON.stringify({ native, en, 'zh-CN': native }) };
+    const database = { prepare: () => ({ bind() { return this; }, all: async () => ({ results: [row] }) }) };
+    expect((await loadRandomAddressIndexRows(database as never, ['HK']))[0].regionValues).toEqual(['Kowloon', 'KLN']);
+    const revisions = { prepare: () => ({ first: async () => ({ address_version: 'source', administrative_version: 'admin-v2' }) }) };
+    expect(await loadRandomAddressVersionToken(revisions as never)).toBe('source:::admin-v2');
+  });
   it('loads complete address pools in country-scoped queries', async () => {
     const calls: Array<{ sql: string; country?: string }> = [];
     const database = {

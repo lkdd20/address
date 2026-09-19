@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { ChinaDataService } from '../server/china/service';
 import { ControlStore } from '../server/control/store';
 import { initializeTestDatabase, openTestDatabase, type PostgresDatabase } from './helpers/postgres-test-database.mjs';
-import { countChinaCommunities, pickChinaCommunityAddress } from '../server/api/repositories/china-community';
+import { chinaCommunityPublicationClause, countChinaCommunities, pickChinaCommunityAddress } from '../server/api/repositories/china-community';
 import { updateCountryPolicy, upsertNodeTarget } from '../server/sync/address-policy.mjs';
 import type { CommunityCandidate } from '../server/china/providers';
+import { formatChinaPinyinPresentation } from '../src/domain/address-format';
+import { validateAddressQuality } from '../src/domain/address-quality.mjs';
+import app from '../server/api/index';
+import { queryLocationCatalog } from '../server/api/repositories/location-catalog';
 
 const candidate = (provider: CommunityCandidate['provider'], providerPoiId: string, address: string): CommunityCandidate => ({
   provider,
@@ -54,6 +59,395 @@ describe('China community storage integration', () => {
     vi.unstubAllGlobals();
     addressDb.close();
     controlDb.close();
+  });
+
+  const seedStaleCoverage = async (service: ChinaDataService): Promise<void> => {
+    await processCandidate(service, { ...candidate('amap', 'coverage-fixture', '文化路18号'), postcode: '064000' });
+    const now = new Date().toISOString();
+    await addressDb.batch([
+      addressDb.prepare(`INSERT INTO sync_country_state(country_code,status,address_count,residential_count,updated_at)
+        VALUES ('CN','ready',9,9,?) ON CONFLICT(country_code) DO UPDATE SET address_count=9,residential_count=9`).bind(now),
+      addressDb.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,
+        residential_count,total_count,updated_at) VALUES ('CN','','CN',0,'中国',9,9,?)`).bind(now)
+    ]);
+  };
+
+  const expectChinaCoverage = async (count: number): Promise<void> => {
+    expect(await addressDb.prepare("SELECT address_count,residential_count FROM sync_country_state WHERE country_code='CN'").first())
+      .toEqual({ address_count: count, residential_count: count });
+    expect(await addressDb.prepare("SELECT total_count,residential_count FROM admin_coverage_stats WHERE node_key='CN'").first())
+      .toEqual({ total_count: count, residential_count: count });
+  };
+
+  it('generates from the synthetic city ID emitted for a published city missing from the catalog', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    await processCandidate(service, { ...candidate('amap', 'synthetic-city', '文化路18号'), postcode: '064000' });
+    await addressDb.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,path) VALUES
+      (1000,'CN','HE','Hebei','河北省','河北省','CN/HE'),
+      (1001,'CN','SC','Sichuan','四川省','四川省','CN/SC');`);
+    const options = await queryLocationCatalog(addressDb, { country: 'CN', field: 'city', regionId: '1000' });
+    expect(options.options).toHaveLength(1);
+    const cityId = options.options[0].id!;
+    expect(cityId).toMatch(/^cn-city-/u);
+    const env = { ADDRESS_DB: addressDb, LOCATION_DB: addressDb };
+    const response = await app.request(`/api/v1/generate?country=CN&regionId=1000&cityId=${cityId}`, {}, env);
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.result.address.components).toMatchObject({ admin1: '河北省', locality: '唐山市' });
+    for (const query of [`country=CN&regionId=1001&cityId=${cityId}`, `country=US&cityId=${cityId}`,
+      `country=CN&cityId=${cityId}&city=${encodeURIComponent('其他市')}`, 'country=CN&cityId=cn-city-ff']) {
+      expect((await app.request(`/api/v1/generate?${query}`, {}, env)).status).not.toBe(200);
+    }
+  });
+
+  it('honors numeric China city IDs even when no city name is supplied', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    await processCandidate(service, { ...candidate('amap', 'numeric-city', '文化路18号'), postcode: '064000' });
+    await addressDb.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,path)
+      VALUES (1000,'CN','HE','Hebei','河北省','河北省','CN/HE');
+      INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name) VALUES
+      (1000,'CN',1000,'Tangshan','唐山市','唐山市'),(1001,'CN',1000,'Other City','其他市','其他市');`);
+    const env = { ADDRESS_DB: addressDb, LOCATION_DB: addressDb };
+    const covered = await app.request('/api/v1/generate?country=CN&cityId=1000', {}, env);
+    expect(covered.status).toBe(200);
+    expect((await covered.json()).data.result.address.components.locality).toBe('唐山市');
+    const empty = await app.request('/api/v1/generate?country=CN&cityId=1001', {}, env);
+    expect(empty.status).toBe(404);
+  });
+
+  it.each(['succeeded', 'paused_quota', 'failed'])('refreshes China coverage after a %s exit without a global pool scan', async (status) => {
+    const service = new ChinaDataService(addressDb, control);
+    await seedStaleCoverage(service);
+    const batch = addressDb.batch.bind(addressDb);
+    vi.spyOn(addressDb, 'batch').mockImplementation((statements) => {
+      if (statements.some((statement) => String((statement as unknown as { query: string }).query).startsWith('INSERT INTO strict_pool_rows'))) {
+        return Promise.reject(Object.assign(new Error('Global scan timeout'), { code: '57014' }));
+      }
+      return batch(statements);
+    });
+    await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,updated_at)
+      VALUES ('amap','130208',1,'paused',?)`).bind(new Date().toISOString()).run();
+    vi.spyOn(service as unknown as { fetchPage(): Promise<unknown> }, 'fetchPage').mockImplementation(async () => {
+      await addressDb.prepare('UPDATE cn_communities_v2 SET active=0').run();
+      if (status === 'failed') throw Object.assign(new Error('Fixture source failure'), { code: 'FIXTURE' });
+      return status === 'paused_quota' ? null : { rawCount: 0, candidates: [], pageSignature: 'coverage-end' };
+    });
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 5 }], ['amap']);
+    expect((await control.runs(1))[0].status).toBe(status);
+    expect(await countChinaCommunities(addressDb)).toBe(0);
+    await expectChinaCoverage(0);
+  });
+
+  it.each(['wake', 'initializeTargets'])('repairs China coverage on %s without reopening source checkpoints', async (entry) => {
+    const service = new ChinaDataService(addressDb, control);
+    await seedStaleCoverage(service);
+    await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,strategy_version,updated_at)
+      VALUES ('amap','130208',8,'exhausted','fixture','2026-01-01T00:00:00.000Z')`).run();
+    const checkpoints = (await addressDb.prepare('SELECT * FROM cn_sync_checkpoints').all()).results;
+    const communities = (await addressDb.prepare('SELECT * FROM cn_communities_v2').all()).results;
+    const credentials = await control.listCredentials();
+    const fetch = vi.fn(() => { throw new Error('Unexpected upstream request'); });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      if (entry === 'wake') await service.wake(60_000);
+      else await service.initializeTargets({ scheduleContinuation: false });
+      await expectChinaCoverage(1);
+      expect((await addressDb.prepare('SELECT * FROM cn_sync_checkpoints').all()).results).toEqual(checkpoints);
+      expect((await addressDb.prepare('SELECT * FROM cn_communities_v2').all()).results).toEqual(communities);
+      expect(await control.listCredentials()).toEqual(credentials);
+      expect(await control.runs(1)).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await service.close(); }
+  });
+
+  it.each([['57014', 3], ['55P03', 3], ['FIXTURE', 1]] as const)('bounds and records coverage failure %s without retrying a source', async (code, attempts) => {
+    const service = new ChinaDataService(addressDb, control);
+    const batch = addressDb.batch.bind(addressDb);
+    let refreshAttempts = 0;
+    vi.spyOn(addressDb, 'batch').mockImplementation((statements) => {
+      if (statements.some((statement) => String((statement as unknown as { query: string }).query).startsWith('DELETE FROM admin_coverage_stats'))) {
+        refreshAttempts += 1;
+        return Promise.reject(Object.assign(new Error('Fixture refresh failure'), { code }));
+      }
+      return batch(statements);
+    });
+    const audit = vi.spyOn(control, 'audit');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await service.wake(60_000);
+      expect(refreshAttempts).toBe(attempts);
+      expect(audit).toHaveBeenCalledWith('system', 'china.coverage.refresh_failed', 'CN', { code, attempts });
+      expect(log).toHaveBeenCalledWith('[china-sync] coverage refresh failed', code);
+      expect(await control.runs(1)).toEqual([]);
+    } finally { log.mockRestore(); await service.close(); }
+  });
+
+  it('recovers a transient coverage failure before automatic scheduling without source requests', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    await seedStaleCoverage(service);
+    const batch = addressDb.batch.bind(addressDb);
+    let refreshAttempts = 0;
+    vi.spyOn(addressDb, 'batch').mockImplementation((statements) => {
+      if (statements.some((statement) => String((statement as unknown as { query: string }).query).startsWith('DELETE FROM admin_coverage_stats'))
+        && refreshAttempts++ === 0) return Promise.reject(Object.assign(new Error('Fixture lock wait'), { code: '55P03' }));
+      return batch(statements);
+    });
+    try {
+      await service.wake(60_000);
+      await expectChinaCoverage(1);
+      expect(refreshAttempts).toBe(2);
+      expect(await control.runs(1)).toEqual([]);
+    } finally { await service.close(); }
+  });
+
+  it('retains official same-name direct administration but renders each place once', async () => {
+    const now = new Date().toISOString();
+    await addressDb.batch([
+      ['44', null, 'province', '广东省'], ['4419', '44', 'city', '东莞市'], ['441900', '4419', 'district', '东莞市']
+    ].map(([code, parent, level, name]) => addressDb.prepare(`INSERT INTO cn_admin_areas(
+      adcode,parent_adcode,level,name,full_path,source_version,updated_at) VALUES (?,?,?,?,?,'fixture',?)`)
+      .bind(code, parent, level, name, String(name), now)));
+    const service = new ChinaDataService(addressDb, control);
+    await processCandidate(service, { ...candidate('amap', 'direct-admin-fixture', '文化路18号'),
+      province: '广东省', city: '东莞市', district: '东莞市', township: '', adcode: '441900',
+      latitude: 23.02, longitude: 113.75, postcode: '523000' });
+    const address = await pickChinaCommunityAddress(addressDb, { city: '东莞市' }, 'direct-admin');
+    expect(address).toBeDefined();
+    expect(address!.components).toMatchObject({ locality: '东莞市', district: '东莞市' });
+    expect(validateAddressQuality({ countryCode: 'CN', components: address!.components }).valid).toBe(true);
+    expect(address!.nativeAddress.match(/东莞市/gu)).toHaveLength(1);
+    expect(address!.addressVariants.en.match(/Dongguan City/gu)).toHaveLength(1);
+    expect(formatChinaPinyinPresentation(address!.components, '').singleLine.match(/Dongguan Shi/gu)).toHaveLength(1);
+    await addressDb.prepare("UPDATE cn_admin_areas SET name='Invalid District' WHERE adcode='441900'").run();
+    expect(await countChinaCommunities(addressDb)).toBe(0);
+  });
+
+  it.each([
+    ['文化路18号', 'Wenhua Road', '18'],
+    ['雁栖镇十八路30号', 'Shiba Road, Yanqi Town', '30'],
+    ['乐安街道金融大街55号', "Jinrong Street, Le'an Subdistrict", '55'],
+    ['中山路18弄6号', 'Zhongshan Road', '6, Lane 18']
+  ])('renders semantic English independently of Pinyin for %s', async (delivery, street, houseNumber) => {
+    const service = new ChinaDataService(addressDb, control);
+    await processCandidate(service, { ...candidate('amap', 'english-source', delivery), postcode: '064000' });
+    const address = await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'english-contract');
+    expect(address).toBeDefined();
+    expect(address!.componentVariants.en).toMatchObject({
+      houseNumber, street, buildingName: 'Guangming Residential Community',
+      admin1: 'Hebei Province', locality: 'Tangshan City', district: 'Fengrun District'
+    });
+    const transliteration = formatChinaPinyinPresentation(address!.components, '').singleLine;
+    expect(transliteration).toContain('Guangming Xiaoqu');
+    expect(transliteration).toContain('Hebei Sheng');
+    expect(transliteration).not.toMatch(/Road|Street|Province|Residential Community|Lane/u);
+    expect(transliteration).not.toMatch(/\p{Script=Han}/u);
+  });
+
+  it.each([
+    [{ city: '厦门' }, 2, ['厦门', '厦门市']],
+    [{ region: '福建' }, 2, ['福建', '福建省']],
+    [{ district: '湖里' }, 2, ['湖里', '湖里区']],
+    [{ region: '福建', city: '厦门', district: '湖里' }, 8, ['福建', '福建省', '厦门', '厦门市', '湖里', '湖里区']]
+  ] as const)('bounds every administrative alias window before merging %j', async (filters, branches, aliases) => {
+    const bind = vi.fn((..._values: unknown[]) => ({ all: async () => ({ results: [] }) }));
+    const prepare = vi.fn((_sql: string) => ({ bind }));
+    await pickChinaCommunityAddress({ prepare } as never, filters, 'alias-index');
+    const sql = prepare.mock.calls[0][0];
+    expect(sql.match(/UNION ALL/gu)).toHaveLength(branches - 1);
+    expect(sql.match(/LIMIT 16/gu)).toHaveLength(branches + 1);
+    expect(sql).not.toMatch(/community\.(province|city|district) IN \(\?/u);
+    expect(sql).not.toContain('REPLACE(community.');
+    expect(bind.mock.calls[0]).toEqual(expect.arrayContaining([...aliases]));
+  });
+
+  it('keeps coordinate matching separate from alias random windows', async () => {
+    const bind = vi.fn((..._values: unknown[]) => ({ all: async () => ({ results: [] }) }));
+    const prepare = vi.fn((_sql: string) => ({ bind }));
+    await pickChinaCommunityAddress({ prepare } as never, { city: '厦门' }, 'nearby', { latitude: 24.48, longitude: 118.09 });
+    expect(prepare.mock.calls[0][0]).toContain('community.city IN (');
+    expect(prepare.mock.calls[0][0]).toContain('source_count DESC,community.id LIMIT 500');
+    expect(prepare.mock.calls[0][0]).not.toContain('UNION ALL');
+  });
+
+  it('preserves ordered full-pool selection and wraparound across alias combinations', async () => {
+    const now = new Date().toISOString();
+    await addressDb.batch(Array.from({ length: 52 }, (_, index) => {
+      const id = `alias-fixture-${index}`;
+      return [
+        addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,
+          postcode,provider_address,longitude,latitude,first_seen_at,last_seen_at,updated_at)
+          VALUES (?,'测试小区',?,'河北省',?,?,'064000',?,118.16,39.83,?,?,?)`)
+          .bind(id, id, index >= 48 ? '秦皇岛市' : index % 2 ? '唐山市' : '唐山',
+            index % 4 < 2 ? '丰润区' : '丰润', `测试路${index + 1}号`, now, now, now),
+        addressDb.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,
+          raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at)
+          VALUES ('amap',?,?,'测试小区',118.16,39.83,'GCJ-02',?,?,?)`).bind(id, id, id, now, now)
+      ];
+    }).flat());
+    const rows = (await addressDb.prepare(`SELECT community.id,community.city,
+      (hashtextextended(community.id,0) & 2147483647) AS random_key FROM cn_communities_v2 community
+      WHERE ${chinaCommunityPublicationClause('community')} AND community.city IN ('唐山','唐山市')
+      ORDER BY random_key,community.id`).all<{ id: string; city: string; random_key: number }>()).results;
+    expect(rows).toHaveLength(48);
+    const hash = (value: string) => createHash('sha256').update(value).digest().readUInt32BE(0);
+    const pivot = (seed: string) => hash(`${seed}:china-community`) & 0x7fffffff;
+    const seeds = Array.from({ length: 12 }, (_, index) => `alias-${index}`);
+    const wrapSeed = Array.from({ length: 1000 }, (_, index) => `wrap-${index}`)
+      .find((seed) => pivot(seed) > Number(rows.at(-1)!.random_key));
+    expect(wrapSeed).toBeDefined();
+    seeds.push(wrapSeed!);
+    const selectedCities = new Set<string>();
+    for (const seed of seeds) {
+      const key = pivot(seed);
+      const window = [...rows.filter((row) => Number(row.random_key) >= key),
+        ...rows.filter((row) => Number(row.random_key) < key)].slice(0, 16);
+      const expected = window[hash(`${seed}:candidate`) % window.length];
+      for (const filters of [{ city: '唐山' },
+        { region: '河北省', city: '唐山市', district: '丰润', postcode: '064000', q: '测试路' }]) {
+        const address = await pickChinaCommunityAddress(addressDb, filters, seed);
+        expect(address?.id).toBe(`cn-community-${expected.id}`);
+        expect(address?.components.postcode).toBe('064000');
+        selectedCities.add(address!.components.locality);
+      }
+    }
+    expect(selectedCities).toEqual(new Set(['唐山', '唐山市']));
+  }, 15_000);
+
+  it('labels the earliest provider recovery as cooldown instead of a later quota reset', async () => {
+    const nextAvailableAt = new Date(Date.now() + 60_000).toISOString();
+    vi.stubGlobal('fetch', async () => Response.json({ providers: {
+      amap: { known: true, available: false, nextResetAt: nextAvailableAt, waitState: 'cooldown_wait' },
+      baidu: { known: true, available: false, nextResetAt: new Date(Date.now() + 3_600_000).toISOString(), waitState: 'quota_wait' },
+      tencent: { known: false, available: false, nextResetAt: null, waitState: 'blocked' }
+    } }));
+    const service = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://fixture', masterKey: Buffer.alloc(32, 7),
+      credentialBroker: { url: 'https://broker.example.test', token: 'fixture-broker-token-for-tests' }
+    });
+    const state = await (service as unknown as { credentialState(): Promise<unknown> }).credentialState();
+    expect(state).toMatchObject({ eligible: false, reason: 'cooldown', nextAvailableAt });
+  });
+
+  it('rejects ambiguous China postcode candidates in both indexed and direct lookup', () => {
+    const service = new ChinaDataService(addressDb, control);
+    const rows = ['064000', '064001'].map((code) => ({
+      code, locality_name: '丰润区', region_name: 'Hebei', region_native_name: '河北省',
+      region_zh_name: '河北省', latitude: null, longitude: null
+    }));
+    const resolver = (service as unknown as {
+      resolveChinaPostcode(value: CommunityCandidate, catalog: typeof rows, index?: Map<string, typeof rows>): string;
+    }).resolveChinaPostcode.bind(service);
+    const value = candidate('amap', 'postcode-ambiguity', '文化路18号');
+    expect(resolver(value, rows)).toBe('');
+    expect(resolver(value, rows, new Map([['河北\u0000丰润', rows]]))).toBe('');
+    expect(resolver(value, [rows[0]])).toBe('064000');
+    expect(resolver(value, [rows[0], { ...rows[0] }])).toBe('064000');
+  });
+
+  it.each([10, -10])('continues the same China page after a short broker pacing wait (%i ms)', async (waitMs) => {
+    let calls = 0;
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      if (!String(input).includes('/v1/requests')) return Response.json({ providers: {} });
+      calls += 1;
+      return calls === 1 ? Response.json({ code: 'SOURCE_RATE_LIMITED',
+        nextAvailableAt: new Date(Date.now() + waitMs).toISOString() }, { status: 429 })
+        : Response.json({ data: { status: '1', pois: [] } });
+    });
+    const service = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://fixture', masterKey: Buffer.alloc(32, 7),
+      credentialBroker: { url: 'https://broker.example.test', token: 'fixture-broker-token-for-tests' }
+    });
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 5 }], ['amap']);
+    expect(calls).toBe(2);
+    expect((await control.runs(1))[0].status).toBe('succeeded');
+  });
+
+  it('bounds repeated broker pacing waits instead of spinning on the same page', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls += 1;
+      return Response.json({ code: 'SOURCE_RATE_LIMITED',
+        nextAvailableAt: new Date(Date.now() + 10).toISOString() }, { status: 429 });
+    });
+    const service = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://fixture', masterKey: Buffer.alloc(32, 7),
+      credentialBroker: { url: 'https://broker.example.test', token: 'fixture-broker-token-for-tests' }
+    });
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 5 }], ['amap']);
+    expect(calls).toBe(3);
+    expect((await control.runs(1))[0].status).toBe('paused_quota');
+    const history = await control.syncHistory(1, 'CN') as { items: Array<Record<string, unknown>> };
+    expect(history.items[0]).toMatchObject({ completedAt: expect.any(String), candidateCount: 0,
+      acceptedCount: 0, rejectedCount: 0, beforeCount: 0, afterCount: 0, netGrowth: 0 });
+  });
+
+  it('records China raw candidates, valid duplicates and rejection reasons independently of net growth', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    const duplicate = candidate('amap', 'existing-community', '文化路18号');
+    await processCandidate(service, duplicate);
+    const value = candidate('amap', 'new-community', '建设路20号');
+    const rejected = candidate('amap', 'missing-number', '文化路');
+    const page = vi.spyOn(service as unknown as { fetchPage(): Promise<unknown> }, 'fetchPage');
+    page.mockResolvedValueOnce({ rawCount: 4, candidates: [duplicate, value, rejected], pageSignature: 'history-page' })
+      .mockResolvedValue({ rawCount: 0, candidates: [], pageSignature: 'history-end' });
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 10 }], ['amap']);
+    const history = await control.syncHistory(1, 'CN') as { items: Array<Record<string, unknown>> };
+    expect(history.items[0]).toMatchObject({ candidateCount: 4, acceptedCount: 2, rejectedCount: 2,
+      beforeCount: 1, afterCount: 2, netGrowth: 1, completedAt: expect.any(String),
+      rejectionReasons: { adapter_rejected: 1, invalid_delivery_address: 1 },
+      metrics: { rawCount: 4, duplicateCount: 1, insertedCount: 1 } });
+  });
+
+  it('does not invent growth or candidate statistics from incomplete legacy progress', async () => {
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await control.updateRun(runId, 'paused_quota', { accepted: 7 });
+    const history = await control.syncHistory(1, 'CN') as { items: Array<Record<string, unknown>> };
+    expect(history.items[0]).toMatchObject({ completedAt: expect.any(String), candidateCount: null,
+      acceptedCount: null, rejectedCount: null, beforeCount: null, afterCount: null, netGrowth: null });
+  });
+
+  it('exposes missing postcode rejection in China history without publishing the candidate', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    vi.spyOn(service as unknown as { chinaPostcodeCatalog(): Promise<unknown[]> }, 'chinaPostcodeCatalog')
+      .mockResolvedValue([{ code: '100000', locality_name: '海淀区', region_name: 'Beijing',
+        region_native_name: '北京市', region_zh_name: '北京市', latitude: null, longitude: null }]);
+    vi.spyOn(service as unknown as { fetchPage(): Promise<unknown> }, 'fetchPage')
+      .mockResolvedValueOnce({ rawCount: 1, candidates: [candidate('amap', 'missing-postcode', '文化路18号')], pageSignature: 'postcode-page' })
+      .mockResolvedValue({ rawCount: 0, candidates: [], pageSignature: 'postcode-end' });
+    const runId = await control.createRun('china-communities', { providers: ['amap'] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 10 }], ['amap']);
+    const history = await control.syncHistory(1, 'CN') as { items: Array<Record<string, unknown>> };
+    expect(history.items[0]).toMatchObject({ candidateCount: 1, acceptedCount: 0, rejectedCount: 1,
+      beforeCount: 0, afterCount: 0, netGrowth: 0, rejectionReasons: { missing_postcode: 1 } });
+    expect(await countChinaCommunities(addressDb)).toBe(0);
+  });
+
+  it.each(['baidu', 'tencent'] as const)('stops %s at a repeated tail page and persists the completed window', async (provider) => {
+    await control.addCredential({ provider, label: 'tail-test', secret: 'tail-fixture', qpsLimit: 100 });
+    const calls: number[] = [];
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      calls.push(Number(url.searchParams.get(provider === 'baidu' ? 'page_num' : 'page_index')));
+      return Response.json(provider === 'baidu'
+        ? { status: 0, results: [{ uid: 'repeated-rejected-result' }] }
+        : { status: 0, data: [{ id: 'repeated-rejected-result' }] });
+    });
+    const service = new ChinaDataService(addressDb, control);
+    const runId = await control.createRun('china-communities', { providers: [provider] });
+    await service.runSync(runId, [{ id: '130208', province: '河北省', city: '唐山市', district: '丰润区',
+      query: '唐山市丰润区', targetCount: 5 }], [provider]);
+    expect(calls).toEqual(provider === 'baidu' ? [0, 1] : [1, 2]);
+    expect(await addressDb.prepare('SELECT status,page,last_error,page_signature FROM cn_sync_checkpoints WHERE provider=?')
+      .bind(provider).first()).toMatchObject({ status: 'exhausted', page: 2,
+        last_error: 'repeated_page_signature', page_signature: expect.any(String) });
   });
 
   it('selects unfiltered communities through the full-pool hash index', async () => {
@@ -133,7 +527,7 @@ describe('China community storage integration', () => {
       });
       await vi.advanceTimersByTimeAsync(2_100);
       expect(start).toHaveBeenCalledOnce();
-      service.close();
+      await service.close();
     } finally {
       vi.useRealTimers();
     }
@@ -168,6 +562,20 @@ describe('China community storage integration', () => {
     ]);
   });
 
+  it('keeps an all-network provider failure retryable instead of pausing it as quota', async () => {
+    await control.addCredential({ provider: 'amap', label: 'network-only', secret: 'network-only-key', qpsLimit: 100 });
+    vi.stubGlobal('fetch', async () => { throw Object.assign(new Error('ECONNRESET'), { code: 'ECONNRESET' }); });
+    const service = new ChinaDataService(addressDb, control);
+    const fetchPage = (service as unknown as {
+      fetchPage(provider: 'amap', target: Record<string, unknown>, page: number, accepted: number, requested: () => Promise<void>): Promise<unknown>;
+    }).fetchPage.bind(service);
+    await expect(fetchPage('amap', {
+      id: '110105', province: '北京市', city: '北京市', district: '朝阳区', query: '北京市朝阳区', targetCount: 5
+    }, 1, 0, async () => undefined)).resolves.toBeNull();
+    expect(await addressDb.prepare('SELECT status,last_error FROM cn_sync_checkpoints WHERE provider=? AND city=?')
+      .bind('amap', '110105').first()).toMatchObject({ status: 'failed' });
+  });
+
   it('routes worker page requests through the credential broker without a local provider key', async () => {
     const token = 'china-broker-client-token-fixture-0001';
     const calls: Array<{ url: string; authorization: string; body: Record<string, unknown> }> = [];
@@ -200,13 +608,15 @@ describe('China community storage integration', () => {
       })
     })]);
     expect(await control.listCredentials()).toEqual([]);
-    service.close();
+    await service.close();
   });
 
-  it('keeps an Amap key healthy when its v3 compatibility fallback succeeds', async () => {
+  it('accounts for exactly one HTTP request per direct Amap credential use', async () => {
     const id = await control.addCredential({ provider: 'amap', label: 'fallback', secret: 'fallback-key', qpsLimit: 100 });
+    const urls: string[] = [];
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
       const url = new URL(String(input));
+      urls.push(url.pathname);
       return url.pathname.startsWith('/v5/')
         ? new Response('<html>blocked</html>', { status: 200 })
         : Response.json({ status: '1', pois: [] });
@@ -215,11 +625,14 @@ describe('China community storage integration', () => {
     const fetchPage = (service as unknown as {
       fetchPage(provider: 'amap', target: Record<string, unknown>, page: number, accepted: number, requested: () => Promise<void>): Promise<unknown>;
     }).fetchPage.bind(service);
-    await fetchPage('amap', {
+    let requests = 0;
+    expect(await fetchPage('amap', {
       id: '110105', province: '北京市', city: '北京市', district: '朝阳区', query: '北京市朝阳区', targetCount: 5
-    }, 1, 0, async () => undefined);
+    }, 1, 0, async () => { requests += 1; })).toMatchObject({ rawCount: 0 });
+    expect(urls).toEqual(['/v3/place/text']);
+    expect(requests).toBe(urls.length);
     expect(await control.listCredentials()).toEqual([
-      expect.objectContaining({ id, status: 'healthy', failureCount: 0, quotaUsed: 1 })
+      expect.objectContaining({ id, status: 'healthy', failureCount: 0, quotaUsed: urls.length })
     ]);
   });
 
@@ -266,7 +679,7 @@ describe('China community storage integration', () => {
       components: { houseNumber: '6号', street: '阜通东大街', buildingName: '望京花园', district: '朝阳区' },
       componentVariants: {
         native: { houseNumber: '6号', street: '阜通东大街' },
-        en: { houseNumber: '6', street: 'Fu tong dong da jie' },
+        en: { houseNumber: '6', street: 'Futongdong Street' },
         'zh-CN': { houseNumber: '6号', street: '阜通东大街' }
       }
     });
@@ -279,7 +692,7 @@ describe('China community storage integration', () => {
       .toMatchObject({ components: { district: '朝阳区' } });
     expect(await pickChinaCommunityAddress(addressDb, { region: '北京市', city: '北京市', district: '海淀区' }, 'seed'))
       .toBeUndefined();
-  });
+  }, 15_000);
 
   it('does not publish a China provider address whose trailing text prevents deterministic house-number splitting', async () => {
     const now = new Date().toISOString();
@@ -370,8 +783,8 @@ describe('China community storage integration', () => {
     const rows = (await addressDb.prepare(`SELECT provider_poi_id,decision,rejection_reason,strategy_version
       FROM cn_ingest_candidates ORDER BY provider_poi_id`).all<Record<string, unknown>>()).results;
     expect(rows).toEqual([
-      expect.objectContaining({ provider_poi_id: 'accepted-poi', decision: 'accepted', rejection_reason: '', strategy_version: 'community-poi-v7' }),
-      expect.objectContaining({ provider_poi_id: 'rejected-poi', decision: 'rejected', rejection_reason: 'invalid_delivery_address', strategy_version: 'community-poi-v7' })
+      expect.objectContaining({ provider_poi_id: 'accepted-poi', decision: 'accepted', rejection_reason: '', strategy_version: 'community-poi-v9-amap-compatible' }),
+      expect.objectContaining({ provider_poi_id: 'rejected-poi', decision: 'rejected', rejection_reason: 'invalid_delivery_address', strategy_version: 'community-poi-v9-amap-compatible' })
     ]);
   });
 
@@ -382,6 +795,18 @@ describe('China community storage integration', () => {
     expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'baidu-only')).toMatchObject({
       verificationLevel: 'L1', components: { buildingName: '光明小区' }
     });
+  });
+
+  it('keeps accepted source evidence when a refresh is missing a required postcode', async () => {
+    const service = new ChinaDataService(addressDb, control);
+    const value = { ...candidate('baidu', 'incomplete-refresh', '文化路18号'), postcode: '064000' };
+    expect(await processCandidate(service, value)).toBe(1);
+    expect(await countChinaCommunities(addressDb)).toBe(1);
+    Object.assign(service, { postcodeCatalogPromise: Promise.resolve([{ code: '100000', locality_name: 'Other district',
+      region_name: 'Other province', region_native_name: '', region_zh_name: '', latitude: null, longitude: null }]) });
+    expect(await processCandidate(service, { ...value, postcode: '' })).toBe(0);
+    expect(await addressDb.prepare("SELECT decision FROM cn_ingest_candidates WHERE provider_poi_id='incomplete-refresh'").first('decision')).toBe('rejected');
+    expect(await countChinaCommunities(addressDb)).toBe(1);
   });
 
   it('does not publish a non-residential provider category even when other fields look valid', async () => {
@@ -514,7 +939,7 @@ describe('China community storage integration', () => {
     let requests = 0;
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
       requests += 1;
-      const page = Number(new URL(String(input)).searchParams.get('page_num'));
+      const page = Number(new URL(String(input)).searchParams.get('page'));
       return new Response(JSON.stringify({ status: '1', pois: page === 1 ? [{
         id: 'poi-1', name: '望京花园', address: '阜通东大街6号', location: '116.47,39.995',
         pname: '北京市', cityname: '北京市', adname: '朝阳区', adcode: '110105', typecode: '120302'
@@ -530,6 +955,7 @@ describe('China community storage integration', () => {
     }
     expect(status, JSON.stringify((await control.runs(10)).find((run) => run.id === runId))).toBe('succeeded');
     expect(requests).toBe(2);
+    await service.close();
   });
 
   it('uses all configured China map providers during a district sync', async () => {
@@ -550,7 +976,7 @@ describe('China community storage integration', () => {
       const url = new URL(String(input));
       const provider = url.hostname.includes('amap') ? 'amap' : url.hostname.includes('baidu') ? 'baidu' : 'tencent';
       requested.add(provider);
-      const page = provider === 'amap' ? Number(url.searchParams.get('page_num')) : provider === 'baidu'
+      const page = provider === 'amap' ? Number(url.searchParams.get('page')) : provider === 'baidu'
         ? Number(url.searchParams.get('page_num')) + 1 : Number(url.searchParams.get('page_index'));
       if (provider === 'amap') return Response.json({ status: '1', pois: page === 1 ? [{
         id: 'amap-poi', name: '望京花园', address: '阜通东大街6号', location: '116.47,39.995',
@@ -579,12 +1005,13 @@ describe('China community storage integration', () => {
       .all<{ provider: string }>()).results.map((row) => row.provider)).toEqual(['amap', 'baidu', 'tencent']);
     const run = (await control.runs(10)).find((value) => value.id === runId) as { progress?: { published?: number } } | undefined;
     expect(run?.progress?.published).toBe(await countChinaCommunities(addressDb));
+    await service.close();
   });
 
   it('yields the event loop and tracks published counts in memory during a large sync', async () => {
     await control.addCredential({ provider: 'amap', label: 'bulk', secret: 'bulk-key', qpsLimit: 100 });
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
-      const page = Number(new URL(String(input)).searchParams.get('page_num'));
+      const page = Number(new URL(String(input)).searchParams.get('page'));
       return Response.json({ status: '1', pois: page === 1 ? Array.from({ length: 30 }, (_, index) => ({
         id: `bulk-poi-${index}`, name: `光明${index}小区`, address: `文化路${index + 1}号`, location: '118.162,39.832',
         pname: '河北省', cityname: '唐山市', adname: '丰润区', adcode: '130208', typecode: '120302'
@@ -616,7 +1043,7 @@ describe('China community storage integration', () => {
   }, 15_000);
 
   describe('dual completion criteria', () => {
-    const hex = (value: string): string => Buffer.from(value, 'utf8').toString('hex').toUpperCase();
+    const hex = (value: string): string => Buffer.from(value, 'utf8').toString('hex');
     const areaCandidate = (
       province: string, city: string, district: string, adcode: string, index: number,
       provider: CommunityCandidate['provider'] = 'amap'
@@ -682,9 +1109,9 @@ describe('China community storage integration', () => {
       const requestedRegions: string[] = [];
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
         const url = new URL(String(input));
-        const region = url.searchParams.get('region') || '';
+        const region = url.searchParams.get('city') || '';
         requestedRegions.push(region);
-        const page = Number(url.searchParams.get('page_num'));
+        const page = Number(url.searchParams.get('page'));
         return Response.json(page === 1 && region === '130202' ? amapPage('130202', '路南区', 5) : { status: '1', pois: [] });
       });
       const runId = await control.createRun('china-communities', { mode: 'test', targets: 2, providers: ['amap'] });
@@ -698,6 +1125,98 @@ describe('China community storage integration', () => {
       expect(await addressDb.prepare("SELECT COUNT(*) AS total FROM cn_communities_v2 WHERE district='路南区' AND active=1")
         .first('total')).toBe(2);
       expect((await control.runs(10)).find((run) => run.id === runId)?.status).toBe('succeeded');
+    });
+
+    it('continues to later provider pages when an earlier raw page has no publishable candidates', async () => {
+      await updateCountryPolicy(addressDb, 'CN', {
+        targetCount: 1, minPerNode: 1, coverageRatio: 1, level1Min: 0, level2Min: 0
+      });
+      await insertAreaTarget('130208', '河北省', '唐山市', '丰润区', 1);
+      await control.addCredential({ provider: 'amap', label: 'pagination', secret: 'pagination-key', qpsLimit: 100 });
+      const pages: number[] = [];
+      vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+        const page = Number(new URL(String(input)).searchParams.get('page'));
+        pages.push(page);
+        if (page === 1) return Response.json({
+          status: '1',
+          pois: [{
+            id: 'rejected-page-one', name: '丰润商场', address: '建设路1号', location: '118.18,39.63',
+            pname: '河北省', cityname: '唐山市', adname: '丰润区', adcode: '130208', typecode: '060100'
+          }]
+        });
+        return Response.json(page === 2 ? amapPage('130208', '丰润区', 1) : { status: '1', pois: [] });
+      });
+      const service = new ChinaDataService(addressDb, control);
+      const runId = await control.createRun('china-communities', { mode: 'test', targets: 1, providers: ['amap'] });
+      await service.runSync(runId, [syncTarget('130208', '河北省', '唐山市', '丰润区', 1)], ['amap']);
+      expect(pages).toEqual([1, 2]);
+      expect(await countChinaCommunities(addressDb)).toBe(1);
+      expect(await addressDb.prepare("SELECT page,status FROM cn_sync_checkpoints WHERE provider='amap' AND city='130208'")
+        .first()).toMatchObject({ page: 3, status: 'baseline' });
+    });
+
+    it('resumes a legacy rejected-page checkpoint from the following page', async () => {
+      await updateCountryPolicy(addressDb, 'CN', {
+        targetCount: 1, minPerNode: 1, coverageRatio: 1, level1Min: 0, level2Min: 0
+      });
+      await insertAreaTarget('130208', '河北省', '唐山市', '丰润区', 1);
+      await control.addCredential({ provider: 'amap', label: 'legacy-page', secret: 'legacy-page-key', qpsLimit: 100 });
+      await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
+        VALUES ('amap','130208',1,'adapter_rejected_all',0,?,'community-poi-v9-amap-compatible')`).bind(new Date().toISOString()).run();
+      const pages: number[] = [];
+      vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+        const page = Number(new URL(String(input)).searchParams.get('page'));
+        pages.push(page);
+        return Response.json(page === 2 ? amapPage('130208', '丰润区', 1) : { status: '1', pois: [] });
+      });
+      const service = new ChinaDataService(addressDb, control);
+      const runId = await control.createRun('china-communities', { mode: 'test', targets: 1, providers: ['amap'] });
+      await service.runSync(runId, [syncTarget('130208', '河北省', '唐山市', '丰润区', 1)], ['amap']);
+      expect(pages).toEqual([2]);
+      expect(await countChinaCommunities(addressDb)).toBe(1);
+    });
+
+    it('does not exhaust China while a configured provider is only waiting for quota', async () => {
+      await updateCountryPolicy(addressDb, 'CN', {
+        targetCount: 1, minPerNode: 2, coverageRatio: 1, level1Min: 0, level2Min: 0
+      });
+      await insertAreaTarget('130208', '河北省', '唐山市', '丰润区', 2);
+      const service = new ChinaDataService(addressDb, control);
+      await seedDistrict(service, '河北省', '唐山市', '丰润区', '130208', 1);
+      await control.addCredential({ provider: 'amap', label: 'scanned', secret: 'scanned-key', qpsLimit: 100 });
+      const baiduId = await control.addCredential({ provider: 'baidu', label: 'waiting', secret: 'waiting-key', qpsLimit: 100 });
+      await control.reportCredential(baiduId, 'quota');
+      await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
+        VALUES ('amap','130208',1,'exhausted',0,?,'community-poi-v9-amap-compatible')`).bind(new Date().toISOString()).run();
+      const runId = await control.createRun('china-communities', { mode: 'test', targets: 1, providers: ['amap'] });
+      const result = await service.runSync(runId, [syncTarget('130208', '河北省', '唐山市', '丰润区', 2)], ['amap']);
+      expect(result).toEqual({ syncState: 'below_target', waitReason: '' });
+      await (service as unknown as { scheduleContinuation(): Promise<void> }).scheduleContinuation();
+      const status = await service.status() as { syncState: string; waitReason: string; nextAttemptAt: string | null };
+      expect(status).toMatchObject({ syncState: 'quota_wait', waitReason: 'quota' });
+      expect(status.nextAttemptAt).not.toBeNull();
+      await service.close();
+    });
+
+    it('schedules healthy Amap v5 capacity when only its legacy v3 checkpoint is terminal', async () => {
+      await updateCountryPolicy(addressDb, 'CN', {
+        targetCount: 1, minPerNode: 2, coverageRatio: 1, level1Min: 0, level2Min: 0
+      });
+      await insertAreaTarget('130208', '河北省', '唐山市', '丰润区', 2);
+      const service = new ChinaDataService(addressDb, control);
+      await seedDistrict(service, '河北省', '唐山市', '丰润区', '130208', 1);
+      await control.addCredential({ provider: 'amap', label: 'v5-ready', secret: 'v5-ready-key', qpsLimit: 100 });
+      const tencentId = await control.addCredential({
+        provider: 'tencent', label: 'waiting', secret: 'waiting-key', qpsLimit: 100
+      });
+      await control.reportCredential(tencentId, 'quota');
+      await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
+        VALUES ('amap','130208',1,'exhausted',0,?,'community-poi-v7')`).bind(new Date().toISOString()).run();
+
+      await (service as unknown as { scheduleContinuation(delayMs: number): Promise<void> }).scheduleContinuation(60_000);
+
+      expect(await service.status()).toMatchObject({ syncState: 'below_target', waitReason: 'ready' });
+      await service.close();
     });
 
     it('stops immediately without requests when count and coverage targets are both met', async () => {
@@ -737,7 +1256,7 @@ describe('China community storage integration', () => {
       await control.addCredential({ provider: 'amap', label: 'dry', secret: 'dry-key', qpsLimit: 100 });
       const requestedRegions: string[] = [];
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
-        requestedRegions.push(new URL(String(input)).searchParams.get('region') || '');
+        requestedRegions.push(new URL(String(input)).searchParams.get('city') || '');
         return Response.json({ status: '1', pois: [] });
       });
       const runId = await control.createRun('china-communities', { mode: 'test', targets: 3, providers: ['amap'] });
@@ -752,7 +1271,7 @@ describe('China community storage integration', () => {
       const status = await service.status() as { nextAttemptAt: string | null };
       expect(status).toMatchObject({ syncState: 'source_limited', waitReason: 'coverage_sources_exhausted' });
       expect(status.nextAttemptAt).toBeNull();
-      service.close();
+      await service.close();
     });
 
     it('keeps syncing districts of an under-floor province beyond min_per_node until the floor is met', async () => {
@@ -770,9 +1289,9 @@ describe('China community storage integration', () => {
       const requestedRegions: string[] = [];
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
         const url = new URL(String(input));
-        const region = url.searchParams.get('region') || '';
+        const region = url.searchParams.get('city') || '';
         requestedRegions.push(region);
-        const page = Number(url.searchParams.get('page_num'));
+        const page = Number(url.searchParams.get('page'));
         const district = region === '130208' ? '丰润区' : '路南区';
         return Response.json(page === 1 ? amapPage(region, district, 1) : { status: '1', pois: [] });
       });
@@ -797,7 +1316,7 @@ describe('China community storage integration', () => {
       await control.addCredential({ provider: 'amap', label: 'noop', secret: 'noop-key', qpsLimit: 100 });
       // All 8 pages consumed on a previous run without a terminal status: page overflow, not 'exhausted'.
       await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
-        VALUES ('amap','130208',9,'baseline',0,?,'community-poi-v7')`).bind(new Date().toISOString()).run();
+        VALUES ('amap','130208',9,'baseline',0,?,'community-poi-v9-amap-compatible')`).bind(new Date().toISOString()).run();
       let requests = 0;
       vi.stubGlobal('fetch', async () => {
         requests += 1;
@@ -812,7 +1331,7 @@ describe('China community storage integration', () => {
       const status = await service.status() as { nextAttemptAt: string | null };
       expect(status).toMatchObject({ syncState: 'source_limited', waitReason: 'coverage_sources_exhausted' });
       expect(status.nextAttemptAt).toBeNull();
-      service.close();
+      await service.close();
     });
 
     it('retries an amap-exhausted district with tencent before baidu on fresh per-provider checkpoints', async () => {
@@ -826,7 +1345,7 @@ describe('China community storage integration', () => {
         await control.addCredential({ provider, label: provider, secret: `${provider}-key`, qpsLimit: 100 });
       }
       await addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
-        VALUES ('amap','130208',3,'exhausted',0,?,'community-poi-v7')`).bind(new Date().toISOString()).run();
+        VALUES ('amap','130208',3,'exhausted',0,?,'community-poi-v9-amap-compatible')`).bind(new Date().toISOString()).run();
       const order: string[] = [];
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
         const url = new URL(String(input));
@@ -882,10 +1401,10 @@ describe('China community storage integration', () => {
       expect(await service.status()).toMatchObject({
         syncState: 'source_limited', waitReason: 'coverage_sources_exhausted', nextAttemptAt: null
       });
-      service.close();
+      await service.close();
     });
 
-    it('prunes overridden node excess keeping cross-verified communities and audits the retirement', async () => {
+    it('treats overridden node targets as minimums without retiring valid communities', async () => {
       await updateCountryPolicy(addressDb, 'CN', {
         targetCount: 1, minPerNode: 1, coverageRatio: 1, level1Min: 0, level2Min: 0
       });
@@ -905,10 +1424,11 @@ describe('China community storage integration', () => {
       await execute(service, runId, [], ['amap']);
       const survivors = (await addressDb.prepare(`SELECT canonical_name,verification_level FROM cn_communities_v2
         WHERE active=1 ORDER BY canonical_name`).all<Record<string, unknown>>()).results;
-      expect(survivors).toEqual([expect.objectContaining({ canonical_name: '光明1302080小区', verification_level: 'L2' })]);
-      expect(await addressDb.prepare('SELECT COUNT(*) AS total FROM cn_communities_v2 WHERE active=0').first('total')).toBe(2);
+      expect(survivors).toHaveLength(3);
+      expect(survivors).toContainEqual(expect.objectContaining({ canonical_name: '光明1302080小区', verification_level: 'L2' }));
+      expect(await addressDb.prepare('SELECT COUNT(*) AS total FROM cn_communities_v2 WHERE active=0').first('total')).toBe(0);
       const audit = (await control.audits(20)).find((entry) => entry.action === 'china.communities.prune');
-      expect(audit).toMatchObject({ actor: 'system', target: districtKey });
+      expect(audit).toBeUndefined();
       expect((await control.runs(10)).find((run) => run.id === runId)?.status).toBe('succeeded');
     });
   });
@@ -923,7 +1443,8 @@ describe('China community storage integration', () => {
         .bind(adcode, province, city, district, `${city}${district}`, targetCount, Number(adcode), new Date().toISOString()).run();
     const insertCheckpoint = (provider: string, city: string, page: number, status: string) =>
       addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,updated_at,strategy_version)
-        VALUES (?,?,?,?,0,?,'community-poi-v7')`).bind(provider, city, page, status, new Date().toISOString()).run();
+        VALUES (?,?,?,?,0,?,?)`).bind(provider, city, page, status, new Date().toISOString(),
+        provider === 'amap' ? 'community-poi-v9-amap-compatible' : 'community-poi-v7').run();
     const fengrunAreas = async (): Promise<void> => {
       await insertAdminArea('130000', null, 'province', '河北省');
       await insertAdminArea('1302', '130000', 'city', '唐山市');
@@ -952,8 +1473,8 @@ describe('China community storage integration', () => {
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
         const url = new URL(String(input));
         const keywords = url.searchParams.get('keywords') || '';
-        const page = Number(url.searchParams.get('page_num'));
-        calls.push({ keywords, page, region: url.searchParams.get('region') || '' });
+        const page = Number(url.searchParams.get('page'));
+        calls.push({ keywords, page, region: url.searchParams.get('city') || '' });
         if (keywords === '甲镇' && page === 2) return Response.json(townshipPois('甲', 2));
         if (keywords === '乙镇' && page === 1) return Response.json(townshipPois('乙', 1, '振兴路'));
         return Response.json({ status: '1', pois: [] });
@@ -967,7 +1488,7 @@ describe('China community storage integration', () => {
         { keywords: '甲镇', page: 3, region: '130208' },
         { keywords: '乙镇', page: 2, region: '130208' }
       ]);
-      expect(result.syncState).toBe('below_target');
+      expect(result).toEqual({ syncState: 'source_limited', waitReason: 'validated_sources_exhausted' });
       expect(await countChinaCommunities(addressDb)).toBe(3);
       const checkpoints = (await addressDb.prepare(`SELECT city,page,status FROM cn_sync_checkpoints
         WHERE provider='amap' AND city IN ('130208001','130208002') ORDER BY city`).all<Record<string, unknown>>()).results;
@@ -990,7 +1511,7 @@ describe('China community storage integration', () => {
       const calls: Array<{ keywords: string; page: number }> = [];
       vi.stubGlobal('fetch', async (input: string | URL | Request) => {
         const url = new URL(String(input));
-        const page = Number(url.searchParams.get('page_num'));
+        const page = Number(url.searchParams.get('page'));
         calls.push({ keywords: url.searchParams.get('keywords') || '', page });
         return Response.json(page === 1 ? shared : { status: '1', pois: [] });
       });
@@ -1065,7 +1586,7 @@ describe('China community storage integration', () => {
         .bind(now, now).run();
       const service = new ChinaDataService(addressDb, control);
       await service.initializeTargets();
-      service.close();
+      await service.close();
       expect(await addressDb.prepare("SELECT decision,rejection_reason FROM cn_ingest_candidates WHERE provider_poi_id='cq-replay'")
         .first<Record<string, unknown>>()).toMatchObject({ decision: 'accepted', rejection_reason: '' });
       expect(await countChinaCommunities(addressDb)).toBe(1);

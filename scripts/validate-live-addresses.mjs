@@ -29,16 +29,14 @@ for (const country of supportedCountries) {
   }
   const ordinaryAvailable = Number(entry.addressCount) > 0;
   const residentialAvailable = Number(entry.residentialCount) > 0 && entry.residentialAvailable === true;
-  if (ordinaryAvailable || residentialAvailable) {
-    if (!ordinaryAvailable) registryErrors.push(`${country} has no ordinary address data`);
-    if (includeResidential && !residentialAvailable) registryErrors.push(`${country} has no residential address data`);
-    if (ordinaryAvailable && (!includeResidential || residentialAvailable)) availableCountries.add(country);
-  }
-  const expectedMode = ordinaryAvailable && (!includeResidential || residentialAvailable) ? 'synchronized-pool' : 'sync-required';
+  if (ordinaryAvailable) availableCountries.add(country);
+  if (country === 'CN' && !residentialAvailable) registryErrors.push(`${country} has no residential address data`);
+  const expectedMode = ordinaryAvailable ? 'synchronized-pool' : 'sync-required';
   if (entry.generationMode !== expectedMode) registryErrors.push(`${country} generation mode is ${entry.generationMode}, expected ${expectedMode}`);
 }
 const allCountries = supportedCountries.filter((country) => availableCountries.has(country));
-const residentialCountries = allCountries;
+const residentialCountries = supportedCountries.filter((country) => availableCountries.has(country)
+  && Number(registryByCode.get(country)?.residentialCount) > 0 && registryByCode.get(country)?.residentialAvailable === true);
 const sampleCount = Math.max(1, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '3', 10) || 3);
 const samples = Array.from({ length: sampleCount }, (_, index) => index + 1);
 const jobs = [

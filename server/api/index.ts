@@ -13,15 +13,14 @@ import { originAllowed, parseAllowedOrigins } from '../lib/origin-policy';
 import type { GeneratedBundle } from '../../src/domain/types';
 import type { VerifiedAddress } from '../../src/domain/types';
 import {
-  orderedCandidate,
   resolveCatalogTarget,
   resolveNearestCatalogTarget,
   type CatalogTarget,
   type AddressFilters
 } from './repositories/address-repository';
 import { loadAddressPoolV2AddressById, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
-import { decodeSyntheticDistrictId, queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
-import { chinaCommunityPublicationClause, countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
+import { CN_SYNTHETIC_CITY_PREFIX, decodeSyntheticCityId, decodeSyntheticDistrictId, queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
+import { countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
 import { isTranslatableLocale, translateAddressComponents } from './services/address-translation';
 import { clientContextFromRequest } from './services/client-context';
 import { lookupManualIpContext, ManualIpLookupError } from './services/ip-geolocation';
@@ -48,6 +47,8 @@ interface Bindings {
   TRUST_PROXY?: string;
   API_TOKEN_AUTHENTICATED?: boolean;
   BATCH_GENERATION_CONCURRENCY?: string;
+  GENERATION_SLOT?: { tryAcquire: () => boolean; release: () => void };
+  BATCH_GENERATION_SLOT?: { tryAcquire: () => boolean; release: () => void };
   incoming?: { socket?: { remoteAddress?: string } };
 }
 
@@ -140,13 +141,7 @@ const measureStage = async <T,>(timings: GenerateTimings, stage: GenerateTimingS
   }
 };
 
-const toleratePoolFailure = async <T,>(task: () => Promise<T>): Promise<T | undefined> => {
-  try {
-    return await task();
-  } catch {
-    return undefined;
-  }
-};
+const toleratePoolFailure = async <T,>(task: () => Promise<T>): Promise<T | undefined> => task();
 
 const serverTiming = (startedAt: number, timings: GenerateTimings): string => [
   ['total', performance.now() - startedAt],
@@ -164,14 +159,23 @@ export const filterProviderCandidates = (candidates: VerifiedAddress[]): Verifie
       candidate.components.street
     ]));
 
-const locationCacheKey = (country: string, field: string, residential: boolean, region: string | undefined, query: string): string => {
+const locationCacheKey = (
+  country: string, field: string, residential: boolean, region: string | undefined, query: string,
+  regionId: string | undefined, city: string | undefined, cityId: string | undefined,
+  cursor: string | undefined, limit: number
+): string => {
   const url = new URL('https://address.internal/location-options');
-  url.searchParams.set('version', '2');
+  url.searchParams.set('version', '3');
   url.searchParams.set('country', country);
   url.searchParams.set('field', field);
   url.searchParams.set('residential', String(residential));
   if (region) url.searchParams.set('region', region);
+  if (regionId) url.searchParams.set('regionId', regionId);
+  if (city) url.searchParams.set('city', city);
+  if (cityId) url.searchParams.set('cityId', cityId);
   if (query) url.searchParams.set('query', query);
+  if (cursor) url.searchParams.set('cursor', cursor);
+  url.searchParams.set('limit', String(limit));
   return url.href;
 };
 
@@ -179,18 +183,31 @@ const readLocationCache = <T,>(key: string): T | undefined => locationCache.get(
 
 const writeLocationCache = (key: string, data: unknown): void => locationCache.set(key, data, LOCATION_CACHE_SECONDS);
 
+const withGenerationSlot = async (
+  env: Bindings,
+  task: () => Promise<Response>
+): Promise<Response> => {
+  const slot = env.GENERATION_SLOT;
+  const batchSlot = env.BATCH_GENERATION_SLOT;
+  const selected = batchSlot || slot;
+  if (!selected) return task();
+  if (!selected.tryAcquire()) {
+    return Response.json({ error: 'GENERATION_BUSY' }, {
+      status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': '2' }
+    });
+  }
+  try { return await task(); }
+  finally { selected.release(); }
+};
+
 const addressPoolCounts = async (db: Database | undefined): Promise<Map<string, number>> => {
   const counts = new Map<string, number>();
   if (!db) return counts;
   const cached = poolMetadataCache.get(db as object);
   if (cached?.v1 && cached.expiresAt > Date.now()) return cached.v1;
-  try {
-    const rows = await db.prepare('SELECT country_code, COUNT(*) AS total FROM address_pool WHERE active = 1 GROUP BY country_code')
-      .all<{ country_code: string; total: number }>();
-    for (const row of rows.results || []) counts.set(row.country_code, Number(row.total || 0));
-  } catch (error) {
-    if (process.env.NODE_ENV === 'test') throw error;
-  }
+  const rows = await db.prepare('SELECT country_code, COUNT(*) AS total FROM address_pool WHERE active = 1 GROUP BY country_code')
+    .all<{ country_code: string; total: number }>();
+  for (const row of rows.results || []) counts.set(row.country_code, Number(row.total || 0));
   poolMetadataCache.set(db as object, { ...poolMetadataCache.get(db as object), expiresAt: Date.now() + 30_000, v1: counts });
   return counts;
 };
@@ -229,14 +246,25 @@ const addressPoolV2Counts = async (db: Database | undefined): Promise<Map<string
   if (!db) return counts;
   const cached = poolMetadataCache.get(db as object);
   if (cached?.v2 && cached.expiresAt > Date.now()) return cached.v2;
-  try {
-    const rows = await db.prepare(`SELECT country_code,address_count AS total,
+  const [stateRows, indexRows] = await Promise.all([
+    db.prepare(`SELECT country_code,address_count AS total,
       residential_count AS residential FROM sync_country_state ORDER BY country_code`)
-      .all<AddressPoolV2CountRow>();
-    for (const row of rows.results || []) {
-      counts.set(row.country_code, { total: Number(row.total || 0), residential: Number(row.residential || 0) });
-    }
-  } catch {}
+      .all<AddressPoolV2CountRow>(),
+    db.prepare(`SELECT country_code,COUNT(*) AS total,SUM(residential_ready) AS residential
+      FROM address_generation_index WHERE active=1 GROUP BY country_code ORDER BY country_code`)
+      .all<AddressPoolV2CountRow>()
+  ]);
+  const indexed = new Map((indexRows.results || []).map((row) => [row.country_code, {
+    total: Number(row.total || 0), residential: Number(row.residential || 0)
+  }]));
+  for (const row of stateRows.results || []) {
+    counts.set(row.country_code, indexed.get(row.country_code) || {
+      total: Number(row.total || 0), residential: Number(row.residential || 0)
+    });
+  }
+  for (const [countryCode, count] of indexed) {
+    if (!counts.has(countryCode)) counts.set(countryCode, count);
+  }
   poolMetadataCache.set(db as object, { ...poolMetadataCache.get(db as object), expiresAt: Date.now() + 30_000, v2: counts });
   return counts;
 };
@@ -258,27 +286,23 @@ const hotPoolCoverage = async (
     FROM pool_coverage coverage
     WHERE coverage.country_code IN (${placeholders})
   )`;
-  try {
-    const summary = await db.prepare(`${evaluated}
-      SELECT country_code, COUNT(*) AS slot_count, SUM(active_count) AS active_count,
-        SUM(CASE WHEN active_count >= minimum_count AND refresh_status = 'ready' THEN 1 ELSE 0 END) AS ready_slot_count
-      FROM evaluated GROUP BY country_code ORDER BY country_code`)
-      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<HotPoolCountryRow>();
-    const lowWater = await db.prepare(`${evaluated}
-      SELECT coverage_key, country_code, admin1_key, locality_key, property_type, active_count,
-        minimum_count, refresh_status, expires_at
-      FROM evaluated
-      WHERE active_count < minimum_count OR refresh_status <> 'ready'
-      ORDER BY (minimum_count - active_count) DESC, country_code, coverage_key LIMIT 100`)
-      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<LowWaterSlotRow>();
-    return {
-      available: true,
-      countries: summary.results || [],
-      lowWaterSlots: lowWater.results || []
-    };
-  } catch {
-    return { available: false, countries: [], lowWaterSlots: [] };
-  }
+  const summary = await db.prepare(`${evaluated}
+    SELECT country_code, COUNT(*) AS slot_count, SUM(active_count) AS active_count,
+      SUM(CASE WHEN active_count >= minimum_count AND refresh_status = 'ready' THEN 1 ELSE 0 END) AS ready_slot_count
+    FROM evaluated GROUP BY country_code ORDER BY country_code`)
+    .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<HotPoolCountryRow>();
+  const lowWater = await db.prepare(`${evaluated}
+    SELECT coverage_key, country_code, admin1_key, locality_key, property_type, active_count,
+      minimum_count, refresh_status, expires_at
+    FROM evaluated
+    WHERE active_count < minimum_count OR refresh_status <> 'ready'
+    ORDER BY (minimum_count - active_count) DESC, country_code, coverage_key LIMIT 100`)
+    .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<LowWaterSlotRow>();
+  return {
+    available: true,
+    countries: summary.results || [],
+    lowWaterSlots: lowWater.results || []
+  };
 };
 
 app.use('*', async (context, next) => {
@@ -318,21 +342,25 @@ app.get('/api/v1/countries', async (context) => {
     countChinaCommunities(context.env.ADDRESS_DB)
   ]);
   if (context.env.LOCATION_DB) {
-    const rows = await context.env.LOCATION_DB.prepare('SELECT country_code, SUM(address_count) AS total FROM residential_coverage GROUP BY country_code')
+    const rows = await context.env.LOCATION_DB.prepare('SELECT country_code, SUM(GREATEST(total_count,address_count)) AS total FROM residential_coverage GROUP BY country_code')
       .all<{ country_code: string; total: number }>();
     for (const row of rows.results || []) coverage.set(row.country_code, Number(row.total || 0));
   }
   const hasPoolDatabase = Boolean(context.env.LOCATION_DB || context.env.ADDRESS_DB);
   const data = countries.map((country) => {
     const v2 = poolV2Counts.get(country.code);
-    const synchronizedCount = context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
-    const addressCount = country.code === 'CN' && chinaCommunities > 0 ? chinaCommunities : synchronizedCount;
-    const residentialCount = addressCount;
+    const synchronizedCount = context.env.ADDRESS_DB ? v2?.total || 0 : coverage.get(country.code) || 0;
+    // China is stored in its own community table. Always use its publication
+    // count, including zero, so a stale sync_country_state value cannot leak
+    // into the public country list.
+    const addressCount = country.code === 'CN' && context.env.ADDRESS_DB ? chinaCommunities : synchronizedCount;
+    const residentialCount = country.code === 'CN' ? addressCount : v2?.residential || 0;
     return {
       ...country,
       addressCount: hasPoolDatabase ? addressCount : null,
       residentialCount: hasPoolDatabase ? residentialCount : country.residentialCapability ? null : 0,
       residentialAvailable: hasPoolDatabase ? residentialCount > 0 : false,
+      available: hasPoolDatabase ? addressCount > 0 : false,
       generationMode: addressCount > 0 ? 'synchronized-pool' : 'sync-required'
     };
   });
@@ -342,15 +370,14 @@ app.get('/api/v1/countries', async (context) => {
 
 app.get('/api/v1/availability', async (context) => {
   if (!context.env.ADDRESS_DB) return context.json({ data: [] });
-  const rows = (await context.env.ADDRESS_DB.prepare(`SELECT code,MAX(count) AS count FROM (
-      SELECT country_code AS code,residential_count AS count FROM sync_country_state WHERE status='ready'
-      UNION ALL SELECT country_code AS code,SUM(address_count) AS count FROM residential_coverage GROUP BY country_code
-      UNION ALL SELECT country_code AS code,SUM(active_count) AS count FROM address_datasets WHERE status='active' GROUP BY country_code
-      UNION ALL SELECT 'CN' AS code,COUNT(*) AS count FROM cn_communities_v2 community
-        WHERE ${chinaCommunityPublicationClause('community')}
-    ) GROUP BY code HAVING MAX(count)>0 ORDER BY code`).all<{ code: string; count: number }>()).results;
+  const [counts, chinaCount] = await Promise.all([
+    addressPoolV2Counts(context.env.ADDRESS_DB), countChinaCommunities(context.env.ADDRESS_DB)
+  ]);
+  counts.set('CN', { total: chinaCount, residential: chinaCount });
   context.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
-  return context.json({ data: rows.map((row) => ({ code: row.code, residentialAvailable: Number(row.count) > 0 })) });
+  return context.json({ data: [...counts].filter(([, count]) => count.total > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([code, count]) => ({ code, available: true, residentialAvailable: count.residential > 0 })) });
 });
 
 app.get('/api/v1/client-context', async (context) => {
@@ -378,6 +405,7 @@ app.get('/api/v1/locations/search', async (context) => {
   const region = context.req.query('region') || undefined;
   const regionId = context.req.query('regionId') || undefined;
   const cityId = context.req.query('cityId') || undefined;
+  const city = context.req.query('city') || undefined;
   const cursor = context.req.query('cursor') || undefined;
   const limit = Number.parseInt(context.req.query('limit') || '100', 10);
   const residential = context.req.query('residential') === 'true';
@@ -389,6 +417,7 @@ app.get('/api/v1/locations/search', async (context) => {
       region,
       regionId,
       cityId,
+      city,
       residential,
       cursor,
       limit
@@ -402,8 +431,10 @@ app.get('/api/v1/locations/search', async (context) => {
       total: catalog.total,
       availableTotal: catalog.availableTotal,
       nextCursor: catalog.nextCursor,
+      revision: catalog.revision || '',
       source: catalog.source
     };
+    context.header('X-Address-Catalog-Revision', catalog.revision || '');
     context.header('Cache-Control', 'no-store');
     return context.json({ data: responseData });
   }
@@ -412,7 +443,7 @@ app.get('/api/v1/locations/search', async (context) => {
     context.header('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
     return context.json({ data: { regions, cities: [], districts: [], postcodes: [], matches: regions } });
   }
-  const cacheKey = locationCacheKey(config.code, field, residential, region, query);
+  const cacheKey = locationCacheKey(config.code, field, residential, region, query, regionId, city, cityId, cursor, limit);
   const cached = readLocationCache<{ regions: ReturnType<typeof locationOptions>; cities: ReturnType<typeof locationOptions>; districts: ReturnType<typeof locationOptions>; postcodes: ReturnType<typeof locationOptions>; matches: ReturnType<typeof locationOptions> }>(cacheKey);
   if (cached) {
     context.header('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
@@ -461,7 +492,7 @@ app.get('/api/v1/locations/hierarchy', async (context) => {
     query: context.req.query('q')?.trim() || undefined,
     regionId: parentType === 'region' ? parentId : undefined,
     cityId: parentType === 'city' ? parentId : undefined,
-    residential: context.req.query('residential') !== 'false',
+    residential: country === 'CN' || context.req.query('residential') === 'true',
     cursor: context.req.query('cursor') || undefined,
     limit: Number.parseInt(context.req.query('limit') || '100', 10)
   });
@@ -480,7 +511,22 @@ app.get('/api/v1/locations/hierarchy', async (context) => {
 app.get('/api/v1/generate', async (context) => {
   const startedAt = performance.now();
   const timings: GenerateTimings = { pool: 0, provider: 0, localize: 0 };
-  const ipRegionMode = context.req.query('mode') === 'ip-region';
+  const modeQuery = context.req.query('mode');
+  const strategyQuery = context.req.query('strategy');
+  const boundedQueries = [
+    ['q', 300], ['region', 300], ['city', 300], ['district', 300], ['postcode', 300],
+    ['regionId', 160], ['cityId', 160], ['districtId', 160], ['postcodeId', 160],
+    ['seed', 300], ['requestId', 160], ['ip', 64]
+  ] as const;
+  if (modeQuery && modeQuery !== 'ip-region'
+    || strategyQuery && !['random', 'instant'].includes(strategyQuery)
+    || boundedQueries.some(([name, maximum]) => {
+      const value = context.req.query(name);
+      return value !== undefined && (value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value));
+    })) {
+    throw new DomainError('INVALID_GENERATION_REQUEST', 'Generation query parameters are invalid or too long.', 400);
+  }
+  const ipRegionMode = modeQuery === 'ip-region';
   const manualIp = context.req.query('ip');
   let ipContext: ClientContext | undefined;
   if (ipRegionMode) {
@@ -502,14 +548,17 @@ app.get('/api/v1/generate', async (context) => {
   if (residentialQuery && !['true', 'false'].includes(residentialQuery)) {
     throw new DomainError('INVALID_RESIDENTIAL', 'Residential must be true or false.');
   }
-  // The public generator exposes verified residential records only. The
-  // legacy query flag is accepted for client compatibility but never
-  // re-enables an ordinary-address pool.
-  const residential = true;
+  const residential = countryCode === 'CN' || residentialQuery === 'true';
   const seed = context.req.query('seed') || crypto.randomUUID();
-  const strategy = context.req.query('strategy') === 'instant' ? 'instant' : 'random';
+  const strategy = strategyQuery === 'instant' ? 'instant' : 'random';
   const requestId = context.req.query('requestId') || crypto.randomUUID();
   const mode = ipRegionMode ? 'ip-region' : residential ? 'residential' : 'address';
+  const cityId = context.req.query('cityId') || undefined;
+  const cityFromId = decodeSyntheticCityId(cityId);
+  if (cityId?.startsWith(CN_SYNTHETIC_CITY_PREFIX) && (!cityFromId || countryCode !== 'CN'
+    || (context.req.query('city') && context.req.query('city')!.trim() !== cityFromId))) {
+    throw new DomainError('INVALID_LOCATION', 'The selected city ID does not match the requested location.', 400);
+  }
   const districtId = context.req.query('districtId') || undefined;
   const districtFromId = decodeSyntheticDistrictId(districtId);
   if (districtId && (!districtFromId || countryCode !== 'CN')) {
@@ -519,14 +568,14 @@ app.get('/api/v1/generate', async (context) => {
     q: context.req.query('q') || undefined,
     region: context.req.query('region') || undefined,
     regionId: context.req.query('regionId') || undefined,
-    city: context.req.query('city') || undefined,
-    cityId: context.req.query('cityId') || undefined,
+    city: context.req.query('city') || cityFromId,
+    cityId,
     district: context.req.query('district') || districtFromId,
     districtId,
     postcode: context.req.query('postcode') || undefined,
     postcodeId: context.req.query('postcodeId') || undefined
   };
-  if (requestedFilters.district && !country.addressSchema.filters.includes('district')) {
+  if ((requestedFilters.district || requestedFilters.districtId) && !country.addressSchema.filters.includes('district')) {
     throw new DomainError('INVALID_LOCATION', `District filtering is not supported for ${countryCode}.`, 400);
   }
   const filters: AddressFilters = ipRegionMode ? { q: requestedFilters.q } : requestedFilters;
@@ -547,6 +596,10 @@ app.get('/api/v1/generate', async (context) => {
   let catalogLookupFailed = false;
   let target: CatalogTarget | undefined;
   try {
+    const syntheticCity = !ipRegionMode && cityFromId;
+    const catalogFilters = syntheticCity ? { ...filters, city: undefined, cityId: undefined } : filters;
+    const lookupRequired = syntheticCity
+      ? Boolean(filters.region || filters.regionId || filters.postcode || filters.postcodeId) : hasLocationFilter;
     const nearestCatalog = ipRegionMode && ipCoordinates && context.env.LOCATION_DB
       ? await resolveNearestCatalogTarget(context.env.LOCATION_DB, country.code, ipCoordinates)
       : undefined;
@@ -554,17 +607,28 @@ app.get('/api/v1/generate', async (context) => {
       ? nearestCatalog?.target || (context.env.LOCATION_DB
         ? await resolveCatalogTarget(context.env.LOCATION_DB, country.code, ipLocationFilters, seed)
         : undefined)
-      : context.env.LOCATION_DB && hasLocationFilter
-        ? await resolveCatalogTarget(context.env.LOCATION_DB, country.code, filters, seed)
+      : context.env.LOCATION_DB && lookupRequired
+        ? await resolveCatalogTarget(context.env.LOCATION_DB, country.code, catalogFilters, seed)
         : undefined;
+    if (syntheticCity && (!lookupRequired || target)) {
+      target = { regionAliases: [], ...target, city: syntheticCity, cityNative: syntheticCity,
+        cityAliases: [syntheticCity], bucket: `city-${cityId}` };
+    }
   } catch {
     catalogLookupFailed = true;
   }
-  if (context.env.LOCATION_DB && hasLocationFilter && !target && !catalogLookupFailed) {
-    throw new DomainError('INVALID_LOCATION', 'The selected region, city, or postcode is not present in the location catalog.', 400);
+  if (hasLocationFilter && catalogLookupFailed) {
+    throw new DomainError('LOCATION_CATALOG_UNAVAILABLE', 'Location filters are temporarily unavailable. Please retry.', 503);
   }
+  // Catalog identities enrich aliases; the published pool remains the authority
+  // on whether a requested locality exists. Keep valid text filters usable when
+  // the catalog stores an alternate name, while stable IDs still fail closed.
+  if (!target && hasLocationFilter) target = {
+    regionAliases: filters.region ? [filters.region] : [],
+    cityAliases: filters.city ? [filters.city] : [],
+    bucket: `filter-${countryCode}-${filters.city || filters.region || filters.postcode || ''}`
+  };
 
-  let candidates: VerifiedAddress[] = [];
   const sourcesTried: string[] = [];
   let pooledSource = '';
   let ipMatchLevel: 'coordinate' | 'city' | 'region' | 'country' | undefined;
@@ -577,7 +641,13 @@ app.get('/api/v1/generate', async (context) => {
     if (country.code === 'CN' && residential) {
       const community = await toleratePoolFailure(() => pickChinaCommunityAddress(
         context.env.ADDRESS_DB,
-        ipRegionMode ? ipLocationFilters : filters,
+        ipRegionMode ? ipLocationFilters : {
+          ...filters,
+          region: target?.regionNative || filters.region
+            || (filters.regionId || filters.cityId ? target?.region : undefined),
+          city: filters.city || (filters.cityId ? target?.cityNative || target?.city : undefined),
+          postcode: filters.postcode || (filters.postcodeId ? target?.postcode : undefined)
+        },
         seed,
         ipRegionMode ? ipCoordinates : undefined
       ));
@@ -638,6 +708,23 @@ app.get('/api/v1/generate', async (context) => {
       filterMatchLevel = 'exact';
       return current;
     }
+    // The location catalog can carry a coarser or differently named parent
+    // region than the published pool. Keep the city request usable when the
+    // exact city itself is published, and report the relaxed scope.
+    if (filters.city && (filters.region || filters.regionId)) {
+      const cityFilters: AddressFilters = { ...filters, region: undefined, regionId: undefined };
+      const cityTarget: CatalogTarget | undefined = target ? { ...target, region: undefined, regionId: undefined, regionAliases: [] } : undefined;
+      const cityAddress = await toleratePoolFailure(() =>
+        pickAddressPoolV2Address(context.env.ADDRESS_DB, country.code, residential, cityFilters, cityTarget, seed)
+      );
+      if (cityAddress) {
+        pooledSource = 'address-pool-v2';
+        filterMatchLevel = 'region';
+        resolvedFilters = cityFilters;
+        resolvedTarget = cityTarget;
+        return cityAddress;
+      }
+    }
     // Keep the legacy in-memory service as an opt-in compatibility fallback
     // for tests and deployments that explicitly provide it. Production no
     // longer starts that service, so normal reads remain DB-first.
@@ -673,10 +760,9 @@ app.get('/api/v1/generate', async (context) => {
     return undefined;
   });
   if (pooled) {
-    candidates = [pooled];
     sourcesTried.push(pooledSource);
   }
-  if (candidates.length === 0) {
+  if (!pooled) {
     throw new DomainError(
       ipRegionMode ? 'IP_REGION_NO_RESULT' : 'NO_POOL_COVERAGE',
       ipRegionMode
@@ -686,18 +772,8 @@ app.get('/api/v1/generate', async (context) => {
     );
   }
 
-  let result: GeneratedBundle | undefined;
-  let selectedCandidate: VerifiedAddress | undefined;
-  const maxAttempts = Math.min(12, candidates.length);
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const selected = orderedCandidate(candidates, seed, attempt);
-    result = generateBundle(selected, residential, seed, undefined);
-    selectedCandidate = selected;
-    break;
-  }
-  if (!result) {
-    throw new DomainError('ADDRESS_NOT_RESOLVED', 'No synchronized address passed the publication gate.', 404);
-  }
+  const selectedCandidate = pooled;
+  const result = generateBundle(selectedCandidate, residential, seed, undefined);
   context.header('Cache-Control', 'no-store');
   context.header('Server-Timing', serverTiming(startedAt, timings));
   const ipRegion = ipContext ? {
@@ -718,7 +794,7 @@ app.get('/api/v1/generate', async (context) => {
       filters: resolvedFilters,
       sourcesTried,
       ...(eligibleCount === undefined ? {} : { eligibleCount }),
-      ...(ipRegionMode ? { ipMatchLevel, ipRegion } : { filterMatchLevel: filterMatchLevel || (candidates.length ? 'exact' : undefined) }),
+      ...(ipRegionMode ? { ipMatchLevel, ipRegion } : { filterMatchLevel: filterMatchLevel || 'exact' }),
       result
     }
   });
@@ -733,7 +809,7 @@ app.post('/api/v1/generate/batch', async (context) => {
     || !filters || typeof filters !== 'object' || Array.isArray(filters)) {
     throw new DomainError('INVALID_BATCH_REQUEST', 'Count must be an integer from 1 through 50 and filters must be an object.', 400);
   }
-  const allowedFilterNames = ['country', 'region', 'regionId', 'city', 'cityId', 'district', 'districtId', 'postcode', 'postcodeId', 'q'] as const;
+  const allowedFilterNames = ['country', 'region', 'regionId', 'city', 'cityId', 'district', 'districtId', 'postcode', 'postcodeId', 'q', 'residential'] as const;
   const unknownBodyField = Object.keys(body).find((name) => !['count', 'filters', 'options', 'excludeAddressIds'].includes(name));
   const unknownFilter = Object.keys(filters).find((name) => !allowedFilterNames.includes(name as typeof allowedFilterNames[number]));
   if (unknownBodyField || unknownFilter) throw new DomainError('INVALID_BATCH_REQUEST', `Unknown batch field: ${unknownBodyField || `filters.${unknownFilter}`}.`, 400);
@@ -741,6 +817,11 @@ app.post('/api/v1/generate/batch', async (context) => {
   for (const name of allowedFilterNames) {
     const value = filters[name];
     if (value === undefined || value === null || value === '') continue;
+    if (name === 'residential') {
+      if (typeof value !== 'boolean') throw new DomainError('INVALID_BATCH_REQUEST', 'residential must be a boolean.', 400);
+      stringFilters[name] = String(value);
+      continue;
+    }
     if (typeof value !== 'string' || value.length > 300) throw new DomainError('INVALID_BATCH_REQUEST', `${name} must be a string of at most 300 characters.`, 400);
     stringFilters[name] = value;
   }
@@ -765,6 +846,19 @@ app.post('/api/v1/generate/batch', async (context) => {
 
   const seed = typeof requestedSeed === 'string' && requestedSeed ? requestedSeed : crypto.randomUUID();
   const requestId = typeof requestedId === 'string' && requestedId ? requestedId : crypto.randomUUID();
+  const requestSignal = context.req.raw.signal;
+  const requestAbortError = () => requestSignal.reason || Object.assign(new Error('Request was aborted'), { name: 'AbortError', code: 'REQUEST_ABORTED' });
+  const throwIfRequestAborted = () => { if (requestSignal.aborted) throw requestAbortError(); };
+  const abortable = async <T,>(task: Promise<T>): Promise<T> => {
+    if (requestSignal.aborted) throw requestAbortError();
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(requestAbortError());
+      requestSignal.addEventListener('abort', onAbort, { once: true });
+    });
+    try { return await Promise.race([task, aborted]); }
+    finally { if (onAbort) requestSignal.removeEventListener('abort', onAbort); }
+  };
   const excluded = new Set(exclusions as string[]);
   const selected = new Set<string>();
   const results: GeneratedBundle[] = [];
@@ -776,28 +870,39 @@ app.post('/api/v1/generate/batch', async (context) => {
   let attempts = 0;
 
   const generateOne = async (attempt: number): Promise<{ result?: GeneratedBundle; error?: { code: string; message: string; status: number } }> => {
+    throwIfRequestAborted();
     const url = new URL('/api/v1/generate', 'http://address.internal');
     for (const [name, value] of Object.entries(stringFilters)) url.searchParams.set(name, value);
     url.searchParams.set('strategy', String(strategy));
     url.searchParams.set('seed', `${seed}:${attempt}`);
     url.searchParams.set('requestId', `${requestId}:${attempt + 1}`);
-    const response = await app.fetch(new Request(url), context.env);
-    const payload = await response.json() as { data?: { result?: GeneratedBundle }; error?: { code?: string; message?: string } };
+    const response = await withGenerationSlot(context.env, () => Promise.resolve(app.fetch(
+      new Request(url, { signal: requestSignal }), context.env
+    )));
+    throwIfRequestAborted();
+    const payload = await response.json() as {
+      data?: { result?: GeneratedBundle };
+      error?: { code?: string; message?: string } | string;
+    };
     if (!response.ok) return { error: {
-      code: payload.error?.code || 'BATCH_GENERATION_FAILED',
-      message: payload.error?.message || 'Address generation failed.',
+      code: typeof payload.error === 'string' ? payload.error : payload.error?.code || 'BATCH_GENERATION_FAILED',
+      message: typeof payload.error === 'string' ? payload.error : payload.error?.message || 'Address generation failed.',
       status: response.status
     } };
-    return { result: payload.data?.result };
+    if (!payload.data?.result) return { error: {
+      code: 'BATCH_GENERATION_FAILED', message: 'Address generation returned no result.', status: 502
+    } };
+    return { result: payload.data.result };
   };
 
   while (results.length < Number(count) && attempts < maximumAttempts) {
+    throwIfRequestAborted();
     const roundSize = Math.min(batchConcurrency, maximumAttempts - attempts, Math.max(1, (Number(count) - results.length) * 2));
     const roundStart = attempts;
     attempts += roundSize;
-    const round = await Promise.all(Array.from({ length: roundSize }, (_, index) => generateOne(roundStart + index)));
+    const round = await abortable(Promise.all(Array.from({ length: roundSize }, (_, index) => generateOne(roundStart + index))));
     const failure = round.find((item) => item.error)?.error;
-    if (failure && results.length === 0) throw new DomainError(failure.code, failure.message, failure.status);
+    if (failure) throw new DomainError(failure.code, failure.message, failure.status);
     for (const item of round) {
       const result = item.result;
       const id = result?.address.id;
@@ -993,11 +1098,22 @@ app.onError((error, context) => {
     );
   }
   if (error instanceof DomainError) {
-    const status = [400, 404, 502, 503].includes(error.status) ? error.status : 500;
+    const status = [400, 404, 429, 502, 503].includes(error.status) ? error.status : 500;
     return context.json(
       { error: { code: error.code, message: error.message } },
-      status as 400 | 404 | 500 | 502 | 503
+      status as 400 | 404 | 429 | 500 | 502 | 503
     );
+  }
+  const code = String((error as { code?: unknown })?.code || '').toUpperCase();
+  const errorName = error instanceof Error ? error.name : '';
+  if (errorName === 'AbortError' || code === 'REQUEST_ABORTED') return new Response(null, { status: 499 });
+  if (code === 'DATABASE_UNAVAILABLE' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
+    || code === 'ECONNABORTED' || code === 'ETIMEDOUT' || code === 'EPIPE' || code === 'ENETUNREACH'
+    || code === 'EHOSTUNREACH' || code === 'ERR_SOCKET_CLOSED' || code === 'CONNECTION_TERMINATED'
+    || code === 'CONNECTION_CLOSED' || code === '57P01' || code === '57P02' || code === '57P03'
+    || code === '53300' || code === '55006' || code === '55P03' || code === '57014'
+    || code === '40001' || code === '40P01' || code.startsWith('08')) {
+    return context.json({ error: { code: 'DATABASE_UNAVAILABLE', message: 'The service database is temporarily unavailable.' } }, 503);
   }
   console.error(error);
   return context.json({ error: { code: 'INTERNAL_ERROR', message: 'Unexpected service error' } }, 500);

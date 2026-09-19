@@ -729,10 +729,7 @@ def main():
     store_path = pathlib.Path(args.store_file)
     store_path.parent.mkdir(parents=True, exist_ok=True)
     if checkpoint.get("abr_complete") and not store_path.exists():
-        checkpoint = {"version": 1, "abr_complete": False, "abr_completed_cities": [], "plateau_completed": [],
-                      "plateau_building_completed": [],
-                      "osm_scanned_ways": 0, "osm_complete": False, "final_complete": False}
-        write_checkpoint(args.checkpoint_file, checkpoint)
+        raise RuntimeError("Japan ABR candidate store is missing for a completed checkpoint")
     if args.stage != "abr" and not checkpoint.get("abr_complete"):
         raise RuntimeError("Japan ABR candidate checkpoint must complete before this stage")
     connection = open_candidate_store(store_path)

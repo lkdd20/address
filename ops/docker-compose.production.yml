@@ -218,6 +218,8 @@ services:
 
   sync:
     image: ${ADDRESS_SYNC_IMAGE:?Set ADDRESS_SYNC_IMAGE}
+    env_file:
+      - ./config/address.env
     environment: !override
       <<: *production-environment
       SYNC_HOST: 0.0.0.0
@@ -233,6 +235,8 @@ services:
         condition: service_healthy
       gateway:
         condition: service_healthy
+    healthcheck:
+      start_period: 3m
     stop_grace_period: 95m
 
 secrets:

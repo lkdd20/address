@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { englishMessages, messages } from '../src/domain/i18n';
 import {
-  isLocale, localeDefinitions, localeFromPath, matchLocale, pathForLocale, supportedLocales
+  isLocale, localeDefinitions, localeFromPath, matchLocale, pathForLocale, safeReturnPath, supportedLocales
 } from '../src/domain/locales';
 
 describe('localized URL routing', () => {
+  it('normalizes return paths and rejects origin changes including backslash URLs', () => {
+    const origin = 'https://address.example';
+    for (const value of [null, '', '//untrusted.invalid/', '/\\untrusted.invalid/', '/\t/untrusted.invalid/',
+      'https://untrusted.invalid/', 'javascript:alert(1)', 'relative']) {
+      expect(safeReturnPath(value, origin, '/en/'), String(value)).toBe('/en/');
+    }
+    expect(safeReturnPath('/en/../zh-CN/?country=SG#filters', origin, '/en/')).toBe('/zh-CN/?country=SG#filters');
+    expect(safeReturnPath('/en/?q=https://untrusted.invalid/', origin, '/en/')).toBe('/en/?q=https://untrusted.invalid/');
+  });
   it('keeps the supported locale registry complete and uses autonyms', () => {
     expect(supportedLocales).toEqual(['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'de', 'fr', 'es', 'pt']);
     expect(localeDefinitions.map(({ label }) => label)).toEqual([

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import app from '../server/api/index';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { translateAddressComponents } from '../server/api/services/address-translation';
@@ -39,6 +39,63 @@ const kanaAddress = {
 };
 
 describe('address translation service', () => {
+  it.each([['2-chome', 'translated'], ['999-chome', 'fallback']])('checks the actual value of a translated CJK ordinal: %s', async (translated, status) => {
+    const address = { ...jp, componentVariants: { ...jp.componentVariants,
+      en: { houseNumber: '1', street: '二丁目', locality: 'Tokyo', postcode: '100-0001' } } };
+    expect((await translateAddressComponents(address, 'de', {},
+      googleFetcher((value) => value === '二丁目' ? translated : value))).status).toBe(status);
+  });
+
+  it.each([['street', 'Rue 99'], ['admin1Code', 'WRONG']])('rejects a cached translation with a changed %s identifier', async (field, value) => {
+    const db = openTestDatabase(':memory:');
+    await initializeTestDatabase(db);
+    try {
+      const address = { ...gb, componentVariants: { ...gb.componentVariants,
+        en: { ...gb.componentVariants.en, street: 'Main Street 21' } } };
+      const first = await translateAddressComponents(address, 'fr', { LOCATION_DB: db },
+        googleFetcher((text) => text === 'Main Street 21' ? 'Rue 21' : text));
+      expect(first.status).toBe('translated');
+      if (first.status !== 'translated') return;
+      await db.prepare('UPDATE translation_cache SET value=?').bind(JSON.stringify({ provider: 'fixture',
+        components: { ...first.components, [field]: value } })).run();
+      expect((await translateAddressComponents(address, 'fr', {
+        LOCATION_DB: db, GOOGLE_TRANSLATION_ENABLED: 'false'
+      }, failingFetcher)).status).toBe('unavailable');
+    } finally { await db.close(); }
+  });
+
+  it('uses DeepL before Youdao and Google, with validation before fallback', async () => {
+    const calls: string[] = [];
+    const deepl = vi.fn(async (values: string[]) => { calls.push('deepl'); return values; });
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('googleapis')) {
+        calls.push('google');
+        return googleFetcher((value) => value === 'さくらどおり' ? '樱花大道' : value)(input, init);
+      }
+      calls.push('youdao');
+      return youdaoFetcher((value) => value)(input, init);
+    }) as typeof fetch;
+    const bindings = { DEEPL_TRANSLATE: deepl, YOUDAO_APP_KEY: 'key', YOUDAO_APP_SECRET: 'secret' };
+    expect((await translateAddressComponents(kanaAddress, 'zh-CN', bindings, fetcher)).status).toBe('translated');
+    expect(calls).toEqual(['deepl', 'youdao', 'google']);
+    calls.length = 0;
+    deepl.mockImplementationOnce(async (values) => { calls.push('deepl'); return values.map((value) => value === 'さくらどおり' ? '樱花大道' : value); });
+    expect((await translateAddressComponents(kanaAddress, 'zh-CN', bindings, fetcher)).status).toBe('translated');
+    expect(calls).toEqual(['deepl']);
+  });
+
+  it('uses OpenAI-compatible translation after DeepL and before paid or keyless fallbacks', async () => {
+    const openAI = vi.fn(async (values: string[]) => values.map((value) => value === 'さくらどおり' ? '樱花大道' : value));
+    const result = await translateAddressComponents(kanaAddress, 'zh-CN', {
+      OPENAI_COMPATIBLE_TRANSLATE: openAI,
+      YOUDAO_APP_KEY: 'unused-key', YOUDAO_APP_SECRET: 'unused-secret'
+    }, failingFetcher);
+    expect(result.status).toBe('translated');
+    expect(openAI).toHaveBeenCalledOnce();
+    if (result.status !== 'translated') return;
+    expect(result.components.street).toBe('樱花大道');
+  });
+
   it('translates semantic components, preserves identifiers and localizes the country line', async () => {
     const result = await translateAddressComponents(gb, 'ja', {}, googleFetcher((value) => `訳:${value}`));
     expect(result.status).toBe('translated');

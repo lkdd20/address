@@ -3,6 +3,7 @@ import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import type { Database } from '../../database/database.mjs';
 import type { VerifiedAddress } from '../../../src/domain/types';
+import { aliasClauseValues, poolLocationAliases } from './address-pool-v2';
 
 const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
 const toTraditionalHan = createTraditionalizer({ from: 'cn', to: 'tw' });
@@ -32,7 +33,7 @@ export interface AddressFilters {
 }
 
 export interface CatalogTarget {
-  coordinates: { latitude: number; longitude: number };
+  coordinates?: { latitude: number; longitude: number };
   regionId?: number;
   region?: string;
   regionNative?: string;
@@ -127,15 +128,14 @@ export const filterCandidates = (
 );
 
 const aliases = (...values: Array<string | null | undefined>): string[] => [...new Set(values.filter((value): value is string => Boolean(value)))];
-const cityAliases = (...values: Array<string | null | undefined>): string[] => {
+export const cityAliases = (...values: Array<string | null | undefined>): string[] => {
   const result = aliases(...values);
   return aliases(...result, ...result.map((value) => value.replace(/\s+City$/i, '').replace(/^City of\s+/i, '')));
 };
 
 const toTarget = (row: TargetRow, kind: string): CatalogTarget | undefined => {
-  if (row.latitude == null || row.longitude == null) return undefined;
   return {
-    coordinates: { latitude: row.latitude, longitude: row.longitude },
+    coordinates: row.latitude == null || row.longitude == null ? undefined : { latitude: row.latitude, longitude: row.longitude },
     regionId: row.region_id || undefined,
     region: row.region_name || undefined,
     regionNative: row.region_native || undefined,
@@ -151,13 +151,50 @@ const toTarget = (row: TargetRow, kind: string): CatalogTarget | undefined => {
   };
 };
 
-const catalogId = (value: string | undefined): number | undefined => {
+export const catalogId = (value: string | undefined): number | undefined => {
   if (!value || !/^\d+$/u.test(value)) return undefined;
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : undefined;
 };
 
-const findRegion = async (
+export interface CatalogRegion {
+  id: number; parent_id: number | null; code: string; name: string; native_name: string; zh_name: string;
+}
+
+export const loadCatalogRegions = async (db: Database, country: string): Promise<CatalogRegion[]> =>
+  (await db.prepare(`SELECT id,parent_id,code,name,native_name,zh_name FROM catalog_regions
+    WHERE country_code=? ORDER BY name,id`).bind(country).all<CatalogRegion>()).results;
+
+export const regionAliasResolver = (rows: CatalogRegion[]) => {
+  const byId = new Map(rows.map((row) => [Number(row.id), row]));
+  const children = new Map<number, number[]>();
+  for (const row of rows) if (row.parent_id != null) {
+    const parent = Number(row.parent_id);
+    children.set(parent, [...children.get(parent) || [], Number(row.id)]);
+  }
+  const cache = new Map<string, string[]>();
+  return (id: number, ancestors = false): string[] => {
+    const key = `${id}:${ancestors}`;
+    if (cache.has(key)) return cache.get(key)!;
+    const names = new Set<string>();
+    const seen = new Set<number>();
+    const pending = [Number(id)];
+    while (pending.length) {
+      const next = pending.pop()!;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      const row = byId.get(next);
+      if (!row) continue;
+      for (const name of aliases(row.name, row.native_name, row.zh_name, row.code)) names.add(name);
+      pending.push(...(ancestors ? row.parent_id == null ? [] : [Number(row.parent_id)] : children.get(next) || []));
+    }
+    const result = [...names]; cache.set(key, result); return result;
+  };
+};
+
+export const catalogDescendantClause = `(child.id=selected.id OR child.path LIKE RTRIM(selected.path,'/') || '/%')`;
+
+export const findRegion = async (
   db: Database,
   country: string,
   value: string | undefined,
@@ -172,12 +209,12 @@ const findRegion = async (
   const variants = hanVariants(value);
   const lowered = [...new Set([value, ...variants].map((entry) => entry.toLowerCase()))];
   const placeholders = lowered.map(() => '?').join(',');
-  const row = await db.prepare(`SELECT r.id FROM catalog_regions r WHERE r.country_code = ?
+  const rows = (await db.prepare(`SELECT r.id FROM catalog_regions r WHERE r.country_code = ?
     AND (LOWER(r.name) IN (${placeholders}) OR LOWER(r.native_name) IN (${placeholders})
       OR LOWER(r.zh_name) IN (${placeholders}) OR LOWER(r.code) IN (${placeholders}))
-    ORDER BY CASE WHEN r.parent_id IS NULL THEN 0 ELSE 1 END, r.id LIMIT 1`)
-    .bind(country, ...lowered, ...lowered, ...lowered, ...lowered).first<{ id: number }>();
-  return row?.id;
+    ORDER BY CASE WHEN r.parent_id IS NULL THEN 0 ELSE 1 END, r.id LIMIT 2`)
+    .bind(country, ...lowered, ...lowered, ...lowered, ...lowered).all<{ id: number }>()).results;
+  return rows.length === 1 ? rows[0].id : undefined;
 };
 
 interface CityIdentity { id: number; region_id: number | null }
@@ -190,7 +227,8 @@ const findCity = async (
   stableId: number | undefined
 ): Promise<CityIdentity | undefined> => {
   const regionScope = regionId === undefined ? '' : `AND c.region_id IN (
-    SELECT child.id FROM catalog_regions selected JOIN catalog_regions child ON child.path LIKE selected.path || '%' WHERE selected.id = ?
+    SELECT child.id FROM catalog_regions selected JOIN catalog_regions child
+      ON child.country_code=selected.country_code AND ${catalogDescendantClause} WHERE selected.id = ?
   )`;
   if (stableId !== undefined) {
     const bindings = regionId === undefined ? [country, stableId] : [country, stableId, regionId];
@@ -201,15 +239,16 @@ const findCity = async (
   if (!value) return undefined;
   const variants = [...new Set([value, ...hanVariants(value)].map((entry) => entry.toLowerCase()))];
   const placeholders = variants.map(() => '?').join(',');
-  const nameMatch = `(LOWER(c.name) IN (${placeholders}) OR LOWER(c.native_name) IN (${placeholders})
-    OR LOWER(c.zh_name) IN (${placeholders})
-    OR LOWER(REPLACE(c.name, ' City', '')) = LOWER(REPLACE(?, ' City', ''))
-    OR LOWER(REPLACE(c.name, 'City of ', '')) = LOWER(REPLACE(?, 'City of ', '')))`;
+  const exactMatch = `(LOWER(c.name) IN (${placeholders}) OR LOWER(c.native_name) IN (${placeholders})
+    OR LOWER(c.zh_name) IN (${placeholders}))`;
   const bindings = regionId === undefined
-    ? [country, ...variants, ...variants, ...variants, value, value]
-    : [country, ...variants, ...variants, ...variants, value, value, regionId];
-  return await db.prepare(`SELECT c.id, c.region_id FROM catalog_cities c WHERE c.country_code = ? AND ${nameMatch} ${regionScope}
-    ORDER BY COALESCE(c.population, 0) DESC, c.id LIMIT 1`).bind(...bindings).first<CityIdentity>() || undefined;
+    ? [country, ...variants, ...variants, ...variants]
+    : [country, ...variants, ...variants, ...variants, regionId];
+  const rows = (await db.prepare(`SELECT c.id, c.region_id FROM catalog_cities c
+    WHERE c.country_code = ? AND ${exactMatch} ${regionScope}
+    ORDER BY COALESCE(c.population, 0) DESC, c.region_id, c.id LIMIT 1`)
+    .bind(...bindings).all<CityIdentity>()).results;
+  return rows[0];
 };
 
 const selectAtOffset = async (
@@ -272,7 +311,7 @@ export const resolveNearestCatalogTarget = async (
       Math.min(180, coordinates.longitude + longitudeRadius)
     ).first<TargetRow>();
     const target = row ? toTarget(row, 'city') : undefined;
-    if (target) return { target, distanceKm: distanceKm(coordinates, target.coordinates), matchLevel: 'city' };
+    if (target?.coordinates) return { target, distanceKm: distanceKm(coordinates, target.coordinates), matchLevel: 'city' };
   }
 
   const row = await db.prepare(`SELECT r.id, r.id AS region_id, NULL AS city_id, NULL AS postcode,
@@ -293,7 +332,7 @@ export const resolveNearestCatalogTarget = async (
     country
   ).first<TargetRow>();
   const target = row ? toTarget(row, 'region') : undefined;
-  return target ? { target, distanceKm: distanceKm(coordinates, target.coordinates), matchLevel: 'region' } : undefined;
+  return target?.coordinates ? { target, distanceKm: distanceKm(coordinates, target.coordinates), matchLevel: 'region' } : undefined;
 };
 
 export const resolveCatalogTarget = async (
@@ -319,14 +358,21 @@ export const resolveCatalogTarget = async (
   if ((filters.city || requestedCityId !== undefined) && !cityIdentity) return undefined;
   const cityId = cityIdentity?.id;
   regionId ??= cityIdentity?.region_id || undefined;
+  const withRegionAliases = async (target: CatalogTarget | undefined): Promise<CatalogTarget | undefined> => {
+    if (target?.regionId) {
+      target.regionAliases = regionAliasResolver(await loadCatalogRegions(db, country))(target.regionId, Boolean(cityIdentity));
+    }
+    return target;
+  };
 
   if (filters.postcode || requestedPostcodeId !== undefined) {
     const scopes: string[] = ['p.country_code = ?'];
     const bindings: unknown[] = [country];
     if (requestedPostcodeId !== undefined) {
-      scopes.push('p.id = ?');
-      bindings.push(requestedPostcodeId);
-    } else {
+      scopes.push('p.code = (SELECT code FROM catalog_postcodes WHERE id = ? AND country_code = ?)');
+      bindings.push(requestedPostcodeId, country);
+    }
+    if (filters.postcode) {
       scopes.push(`LOWER(REPLACE(p.code, ' ', '')) = LOWER(?)`);
       bindings.push(filters.postcode!.replace(/\s/g, ''));
     }
@@ -338,7 +384,8 @@ export const resolveCatalogTarget = async (
       bindings.push(cityId, cityId, cityId);
     }
     if (regionId !== undefined) {
-      scopes.push(`p.region_id IN (SELECT child.id FROM catalog_regions selected JOIN catalog_regions child ON child.path LIKE selected.path || '%' WHERE selected.id = ?)`);
+      scopes.push(`COALESCE(p.region_id,c.region_id) IN (SELECT child.id FROM catalog_regions selected JOIN catalog_regions child
+        ON child.country_code=selected.country_code AND ${catalogDescendantClause} WHERE selected.id = ?)`);
       bindings.push(regionId);
     }
     const where = scopes.join(' AND ');
@@ -356,14 +403,53 @@ export const resolveCatalogTarget = async (
         bindings,
         `${country}:${seed}:postcode`
       );
-    return row ? toTarget(row, 'postcode') : undefined;
+    let target = row ? toTarget(row, 'postcode') : undefined;
+    if (!target && filters.postcode && requestedPostcodeId === undefined && country !== 'CN') {
+      const parent = cityId !== undefined || regionId !== undefined
+        ? await resolveCatalogTarget(db, country, {
+          regionId: regionId === undefined ? undefined : String(regionId),
+          cityId: cityId === undefined ? undefined : String(cityId)
+        }, seed) : undefined;
+      if ((cityId !== undefined || regionId !== undefined) && !parent) return undefined;
+      const postcode = normalize(filters.postcode).replace(/\s/gu, '').toUpperCase();
+      target = { regionAliases: [], cityAliases: [], ...parent, postcode, bucket: `postcode-${country}-${postcode}` };
+    }
+    if (target && !cityIdentity) {
+      target.cityId = undefined; target.city = undefined; target.cityNative = undefined; target.cityAliases = [];
+      if (!filters.region && requestedRegionId === undefined) {
+        target.regionId = undefined; target.region = undefined; target.regionNative = undefined;
+        target.regionCode = undefined; target.regionAliases = [];
+      }
+    }
+    if (target && !cityIdentity && regionId !== undefined) target.regionId = regionId;
+    target = await withRegionAliases(target);
+    if (target && country !== 'CN') {
+      const clauses = ['country_code=?', 'active=1', 'postcode_key=?'];
+      const values: unknown[] = [country, normalize(target.postcode).replace(/\s/gu, '')];
+      const regionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'],
+        poolLocationAliases([filters.region, ...target.regionAliases]));
+      const cityClause = aliasClauseValues(['locality_key', 'postal_locality_key'],
+        poolLocationAliases([filters.city, ...target.cityAliases]));
+      if (regionClause) {
+        clauses.push(regionClause.sql);
+        values.push(...regionClause.values);
+      }
+      if (cityClause) {
+        clauses.push(cityClause.sql);
+        values.push(...cityClause.values);
+      }
+      const available = await db.prepare(`SELECT address_id FROM address_generation_index WHERE ${clauses.join(' AND ')} LIMIT 1`)
+        .bind(...values).first();
+      if (!available) return undefined;
+    }
+    return target;
   }
 
   if (cityId !== undefined) {
     const row = await db.prepare(`SELECT ${targetColumns} FROM catalog_cities c LEFT JOIN catalog_regions r ON r.id = c.region_id
-      WHERE c.id = ? AND COALESCE(c.latitude, r.latitude) IS NOT NULL AND COALESCE(c.longitude, r.longitude) IS NOT NULL LIMIT 1`)
+      WHERE c.id = ? LIMIT 1`)
       .bind(cityId).first<TargetRow>();
-    return row ? toTarget(row, 'city') : undefined;
+    return withRegionAliases(row ? toTarget(row, 'city') : undefined);
   }
 
   if (regionId !== undefined) {
@@ -371,9 +457,9 @@ export const resolveCatalogTarget = async (
       NULL AS city_name, NULL AS city_native, NULL AS city_zh,
       r.name AS region_name, r.native_name AS region_native, r.zh_name AS region_zh, r.code AS region_code,
       r.latitude, r.longitude FROM catalog_regions r
-      WHERE r.id = ? AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL LIMIT 1`)
+      WHERE r.id = ? LIMIT 1`)
       .bind(regionId).first<TargetRow>();
-    return row ? toTarget(row, 'region') : undefined;
+    return withRegionAliases(row ? toTarget(row, 'region') : undefined);
   }
 
   const where = `c.country_code = ? AND COALESCE(c.population, 0) >= 5000 AND c.latitude IS NOT NULL AND c.longitude IS NOT NULL`;

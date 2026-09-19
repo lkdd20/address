@@ -4,7 +4,8 @@ import { ArrowLeft, Database, Globe2, House, Maximize2, Search, Target, X } from
 import { countryByCode, isCountryCode } from '../domain/countries';
 import { localeDefinitions, localizedCountryName, pathForLocale } from '../domain/locales';
 import type { Locale } from '../domain/types';
-import { WorldCoverageMap } from './WorldCoverageMap';
+import { messages } from '../domain/i18n';
+import { useMapDialogFocus, WorldCoverageMap } from './WorldCoverageMap';
 
 interface CoverageLevel { key: string; labelEn: string; labelZh: string; covered: number; qualified: number; total: number }
 export interface CoverageNode {
@@ -72,6 +73,7 @@ export default function PublicMonitor({ locale }: { locale: Locale }) {
   const [continent, setContinent] = useState<Continent>('all');
   const [sort, setSort] = useState<'high' | 'low' | 'name'>('high');
   const [expanded, setExpanded] = useState(false);
+  const dialogRef = useMapDialogFocus(expanded, () => setExpanded(false));
   const [mapHost] = useState(() => {
     if (typeof document === 'undefined') return undefined;
     const host = document.createElement('div');
@@ -79,14 +81,20 @@ export default function PublicMonitor({ locale }: { locale: Locale }) {
     return host;
   });
   const loadId = useRef(0);
+  const request = useRef<AbortController | undefined>(undefined);
   const trailRef = useRef<CoverageNode[]>([]);
   const parentRef = useRef('');
 
   const load = async (parent = '') => {
     const id = ++loadId.current;
+    request.current?.abort();
+    const controller = new AbortController(); request.current = controller;
     setLoading(true); setError(false);
     try {
-      const response = await fetch(`/web-api/v1/public-monitor${parent ? `?parent=${encodeURIComponent(parent)}` : ''}`, { headers: { Accept: 'application/json' } });
+      const response = await fetch(`/web-api/v1/public-monitor${parent ? `?parent=${encodeURIComponent(parent)}` : ''}`, {
+        headers: { Accept: 'application/json' }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)])
+      });
+      if (id !== loadId.current) return;
       if (response.status === 401) {
         window.location.assign(`/${locale}/access/?next=${encodeURIComponent(window.location.pathname)}`);
         return;
@@ -94,19 +102,11 @@ export default function PublicMonitor({ locale }: { locale: Locale }) {
       if (!response.ok) throw new Error('MONITOR_UNAVAILABLE');
       const payload = await response.json() as { data: MonitorData };
       if (id === loadId.current) setData(payload.data);
-    } catch { if (id === loadId.current) setError(true); }
+    } catch { if (id === loadId.current) { setError(true); setExpanded(false); } }
     finally { if (id === loadId.current) setLoading(false); }
   };
 
-  useEffect(() => { void load(); }, []);
-  useEffect(() => {
-    if (!expanded) return;
-    const previousOverflow = document.body.style.overflow;
-    const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setExpanded(false); };
-    document.body.style.overflow = 'hidden';
-    window.addEventListener('keydown', close);
-    return () => { document.body.style.overflow = previousOverflow; window.removeEventListener('keydown', close); };
-  }, [expanded]);
+  useEffect(() => { void load(); return () => { loadId.current += 1; request.current?.abort(); }; }, []);
   const open = (node: CoverageNode) => {
     if (!node.childCount) return;
     if (parentRef.current === node.key) return;
@@ -156,8 +156,8 @@ export default function PublicMonitor({ locale }: { locale: Locale }) {
         <section className="dashboard-card country-data-table monitor-table"><header><h2>{root ? t.list : regionName(trail.at(-1)!, locale)}</h2>{root && <div className="country-table-tools"><label className="country-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t.search} /></label><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="high">{t.high}</option><option value="low">{t.low}</option><option value="name">{t.name}</option></select><select value={continent} onChange={(event) => setContinent(event.target.value as Continent)}><option value="all">{t.allContinents}</option>{(['asia', 'europe', 'northAmerica', 'southAmerica', 'africa', 'oceania'] as const).map((value) => <option key={value} value={value}>{t[value]}</option>)}</select></div>}</header>
           <div className="table-scroll"><table><thead><tr><th>{root ? t.country : t.name}</th><th>{t.count}</th><th>{t.regions}</th></tr></thead><tbody>{visible.map((node) => <tr key={node.key}><td><button className="monitor-region-button" disabled={!node.childCount} onClick={() => open(node)}>{regionName(node, locale)}</button></td><td className="numeric-cell">{node.residentialCount.toLocaleString()}</td><td>{coverage(node)}</td></tr>)}</tbody></table>{!visible.length && <div className="empty-table">{t.empty}</div>}</div>
         </section>
-        {expanded && <div className="map-dialog-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setExpanded(false); }}><section className="map-dialog" role="dialog" aria-modal="true"><header><h2>{t.distribution}</h2><button className="icon-button" aria-label={t.close} onClick={() => setExpanded(false)}><X size={18} /></button></header>{mapHost && <MapSlot host={mapHost} />}</section></div>}
-        {mapHost && createPortal(<WorldCoverageMap countries={data.countries} selected={selectedCountry} label={(node) => regionName(node, locale)} ariaLabel={t.distribution} onSelect={open} onBack={() => backTo(-1)} expanded={expanded} />, mapHost)}
+        {expanded && <div className="map-dialog-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setExpanded(false); }}><section ref={dialogRef} tabIndex={-1} className="map-dialog" role="dialog" aria-modal="true" aria-label={t.distribution}><header><h2>{t.distribution}</h2><button className="icon-button" aria-label={t.close} onClick={() => setExpanded(false)}><X size={18} /></button></header>{mapHost && <MapSlot host={mapHost} />}</section></div>}
+        {mapHost && createPortal(<WorldCoverageMap countries={data.countries} selected={selectedCountry} label={(node) => regionName(node, locale)} ariaLabel={t.distribution} onSelect={open} onBack={() => backTo(-1)} expanded={expanded} mapText={{ loading: t.loading, error: messages[locale].mapLoadFailed, retry: t.retry }} />, mapHost)}
       </>}
     </main>
   </div>;

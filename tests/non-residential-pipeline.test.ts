@@ -98,7 +98,7 @@ describe('non-residential provider gates', () => {
 });
 
 describe('non-residential v2 repository gate', () => {
-  it('drops an institutional record already present in the runtime view', async () => {
+  it('allows real non-residential addresses but rejects a false residential claim', async () => {
     const row = {
       id: 'institution', country_code: 'US', admin1: 'Pennsylvania', admin1_code: 'PA', locality: 'Philadelphia',
       postal_locality: 'Philadelphia', district: '', postcode: '19103', street: 'Market Street', house_number: '1',
@@ -107,7 +107,7 @@ describe('non-residential v2 repository gate', () => {
       component_variants_json: JSON.stringify({
         native: { houseNumber: '1', street: 'Market Street', buildingName: 'Philadelphia City Hall', locality: 'Philadelphia', postcode: '19103' },
         en: { houseNumber: '1', street: 'Market Street', buildingName: 'Philadelphia City Hall', locality: 'Philadelphia', postcode: '19103' },
-        'zh-CN': { houseNumber: '1', street: '市场街', buildingName: '费城市政厅', locality: '费城', postcode: '19103' }
+        'zh-CN': { houseNumber: '1', street: '市场街', buildingName: '费城市政厅', locality: '费城', admin1: '宾夕法尼亚州', postcode: '19103' }
       }),
       address_variants_json: JSON.stringify({
         native: 'Philadelphia City Hall, 1 Market Street, Philadelphia, PA 19103',
@@ -123,7 +123,7 @@ describe('non-residential v2 repository gate', () => {
       component_variants_json: JSON.stringify({
         native: { houseNumber: '10', street: 'Market Street', buildingName: 'Market Street Residence', locality: 'Philadelphia', postcode: '19103' },
         en: { houseNumber: '10', street: 'Market Street', buildingName: 'Market Street Residence', locality: 'Philadelphia', postcode: '19103' },
-        'zh-CN': { houseNumber: '10', street: '市场街', buildingName: '市场街住宅', locality: '费城', postcode: '19103' }
+        'zh-CN': { houseNumber: '10', street: '市场街', buildingName: '市场街住宅', locality: '费城', admin1: '宾夕法尼亚州', postcode: '19103' }
       }),
       address_variants_json: JSON.stringify({
         native: 'Market Street Residence, 10 Market Street, Philadelphia, PA 19103',
@@ -151,7 +151,13 @@ describe('non-residential v2 repository gate', () => {
       'US', false, {}, undefined, 'fixture'
     );
 
-    expect(result?.id).toBe('pool-v2-residence');
-    expect(result?.components.buildingName).toBe('Market Street Residence');
+    expect(result?.id).toBe('pool-v2-institution');
+    expect(result?.propertyType).toBe('unknown');
+    row.property_type = 'residential';
+    const rejectedClaim = await pickAddressPoolV2Address(
+      database as unknown as Parameters<typeof pickAddressPoolV2Address>[0],
+      'US', false, {}, undefined, 'fixture'
+    );
+    expect(rejectedClaim?.id).toBe('pool-v2-residence');
   });
 });

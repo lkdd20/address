@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Globe2, Minus, Plus, RotateCcw } from 'lucide-react';
 import type {
   ExpressionSpecification,
@@ -11,6 +11,7 @@ import type {
   StyleSpecification
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 
 export interface WorldCoverageCountry {
   countryCode: string;
@@ -26,7 +27,41 @@ interface WorldCoverageMapProps<T extends WorldCoverageCountry> {
   onSelect: (country: T) => void;
   onBack?: () => void;
   expanded?: boolean;
+  mapText?: { loading: string; error: string; retry: string };
 }
+
+export const useMapDialogFocus = (open: boolean, close: () => void) => {
+  const root = useRef<HTMLElement>(null);
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusable = () => [...root.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
+    ) || []].filter((element) => element.getClientRects().length > 0);
+    (focusable()[0] || root.current)?.focus();
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return; }
+      if (event.key !== 'Tab') return;
+      const values = focusable();
+      if (!values.length) { event.preventDefault(); root.current?.focus(); return; }
+      const first = values[0]; const last = values[values.length - 1];
+      if (!root.current?.contains(document.activeElement)) { event.preventDefault(); first.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', keyDown);
+    return () => {
+      document.removeEventListener('keydown', keyDown);
+      document.body.style.overflow = overflow;
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, [open]);
+  return root;
+};
 
 type GeoJsonGeometry = {
   type: string;
@@ -47,7 +82,10 @@ type GeoJsonCollection = {
 type MapLibre = typeof import('maplibre-gl');
 let maplibrePromise: Promise<MapLibre> | undefined;
 const loadMapLibre = (): Promise<MapLibre> => {
-  maplibrePromise ||= import('maplibre-gl').then((module) => (module as { default?: MapLibre }).default ?? module);
+  maplibrePromise ||= import('maplibre-gl').then((module) => {
+    module.setWorkerUrl(workerUrl);
+    return module;
+  }).catch((error) => { maplibrePromise = undefined; throw error; });
   return maplibrePromise;
 };
 
@@ -59,10 +97,10 @@ let sourcePromise: Promise<GeoJsonCollection> | undefined;
 const admin1Promises = new Map<string, Promise<GeoJsonCollection | undefined>>();
 
 const loadWorldSource = (): Promise<GeoJsonCollection> => {
-  sourcePromise ||= fetch(sourceUrl).then(async (response) => {
+  sourcePromise ||= fetch(sourceUrl, { signal: AbortSignal.timeout(15_000) }).then(async (response) => {
     if (!response.ok) throw new Error(`WORLD_MAP_${response.status}`);
     return await response.json() as GeoJsonCollection;
-  });
+  }).catch((error) => { sourcePromise = undefined; throw error; });
   return sourcePromise;
 };
 
@@ -70,7 +108,7 @@ const loadAdmin1Source = (code: string): Promise<GeoJsonCollection | undefined> 
   const normalized = code.toUpperCase();
   let request = admin1Promises.get(normalized);
   if (!request) {
-    request = fetch(admin1Url(normalized)).then(async (response) => {
+    request = fetch(admin1Url(normalized), { signal: AbortSignal.timeout(15_000) }).then(async (response) => {
       if (response.status === 404) return undefined;
       if (!response.ok) throw new Error(`ADMIN1_MAP_${response.status}`);
       const value = await response.json() as GeoJsonCollection;
@@ -266,8 +304,11 @@ const buildSources = <T extends WorldCoverageCountry>(source: GeoJsonCollection,
 };
 
 export function WorldCoverageMap<T extends WorldCoverageCountry>({
-  countries, selected, label, ariaLabel, onSelect, onBack, expanded = false
+  countries, selected, label, ariaLabel, onSelect, onBack, expanded = false,
+  mapText = { loading: 'Loading map…', error: 'The map could not load. You can still use the data list.', retry: 'Retry' }
 }: WorldCoverageMapProps<T>) {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | undefined>(undefined);
   const sourceRef = useRef<GeoJsonCollection | undefined>(undefined);
@@ -298,6 +339,10 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
     let active = true;
     let map: MapLibreMap | undefined;
     let observer: ResizeObserver | undefined;
+    let initialized = false;
+    setState('loading'); sourceRef.current = undefined;
+    const fail = () => { if (active) setState('error'); };
+    const timeout = window.setTimeout(() => { if (!initialized) fail(); }, 15_000);
 
     const initialize = async (map: MapLibreMap, maplibre: MapLibre) => {
       const source = await loadWorldSource();
@@ -436,7 +481,7 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
       const onMove = (event: MapLayerMouseEvent) => {
         const feature = event.features?.[0];
         const code = String(feature?.properties?.country_code || '');
-        const country = values.byCode.get(code);
+        const country = countriesRef.current.find((entry) => entry.countryCode.toUpperCase() === code);
         map.getCanvas().style.cursor = country?.childCount ? 'pointer' : '';
         if (!country) { popup.remove(); return; }
         if (selectedRef.current?.countryCode.toUpperCase() === code) { popup.remove(); return; }
@@ -451,7 +496,7 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
       const onLeave = () => { map.getCanvas().style.cursor = ''; popup.remove(); };
       const onClick = (event: MapLayerMouseEvent) => {
         const code = String(event.features?.[0]?.properties?.country_code || '');
-        const country = values.byCode.get(code);
+        const country = countriesRef.current.find((entry) => entry.countryCode.toUpperCase() === code);
         if (!country?.childCount || selectedRef.current?.countryCode.toUpperCase() === code) return;
         selectedRef.current = country;
         selectRef.current(country);
@@ -491,13 +536,19 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
       observer.observe(containerRef.current);
       created.once('load', () => {
         created.setMaxBounds(worldBounds);
-        void initialize(created, maplibre);
+        void initialize(created, maplibre).then(() => {
+          if (!active) return;
+          const ready = () => { if (active) { initialized = true; window.clearTimeout(timeout); setState('ready'); } };
+          if (created.loaded()) ready(); else created.once('idle', ready);
+        }).catch(fail);
       });
+      created.on('error', fail);
     };
-    void setup();
+    void setup().catch(fail);
 
     return () => {
       active = false;
+      window.clearTimeout(timeout);
       observer?.disconnect();
       loadAdmin1Ref.current = async () => undefined;
       syncAdmin1Ref.current = () => undefined;
@@ -505,7 +556,7 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
       map?.remove();
       mapRef.current = undefined;
     };
-  }, []);
+  }, [attempt]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -535,16 +586,20 @@ export function WorldCoverageMap<T extends WorldCoverageCountry>({
     if (bounds) map.fitBounds(bounds, { padding: expanded ? 90 : 54, maxZoom: 6, duration: 650 });
   }, [countries, expanded, selected]);
 
-  return <div className={`world-map-layout${expanded ? ' expanded' : ''}`} aria-label={ariaLabel}>
+  return <div className={`world-map-layout${expanded ? ' expanded' : ''}`} aria-label={ariaLabel} data-map-state={state}>
     <div ref={containerRef} className="world-distribution-map" />
+    {state !== 'ready' && <div className="world-map-state" role={state === 'error' ? 'alert' : 'status'}>
+      <span>{state === 'error' ? mapText.error : mapText.loading}</span>
+      {state === 'error' && <button type="button" onClick={() => setAttempt((value) => value + 1)}>{mapText.retry}</button>}
+    </div>}
     <div className="map-legend" aria-hidden="true">
       {['500K+', '100K', '10K', '1K', '1+', '0'].map((value, index) => <span key={value}><i className={`scale-${index}`} />{value}</span>)}
     </div>
     <div className="map-zoom-controls">
       {selected && onBack && <button type="button" aria-label="Back to world view" onClick={onBack}><Globe2 size={14} /></button>}
-      <button type="button" aria-label="Zoom in" onClick={() => mapRef.current?.zoomIn()}><Plus size={15} /></button>
-      <button type="button" aria-label="Zoom out" onClick={() => mapRef.current?.zoomOut()}><Minus size={15} /></button>
-      <button type="button" aria-label="Reset map" onClick={() => mapRef.current?.easeTo({ center: [105, 18], zoom: expanded ? 1.35 : 1.05 })}><RotateCcw size={14} /></button>
+      <button type="button" disabled={state !== 'ready'} aria-label="Zoom in" onClick={() => mapRef.current?.zoomIn()}><Plus size={15} /></button>
+      <button type="button" disabled={state !== 'ready'} aria-label="Zoom out" onClick={() => mapRef.current?.zoomOut()}><Minus size={15} /></button>
+      <button type="button" disabled={state !== 'ready'} aria-label="Reset map" onClick={() => mapRef.current?.easeTo({ center: [105, 18], zoom: expanded ? 1.35 : 1.05 })}><RotateCcw size={14} /></button>
     </div>
   </div>;
 }

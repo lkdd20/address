@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS address_datasets (
 
 CREATE TABLE IF NOT EXISTS address_pool (
   id TEXT PRIMARY KEY,
+  canonical_key TEXT NOT NULL DEFAULT '',
   country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
   admin1 TEXT NOT NULL DEFAULT '',
   admin1_code TEXT NOT NULL DEFAULT '',
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS address_pool (
   district TEXT NOT NULL DEFAULT '',
   postcode TEXT NOT NULL DEFAULT '',
   street TEXT NOT NULL CHECK (length(trim(street)) > 0),
-  house_number TEXT NOT NULL CHECK (length(trim(house_number)) > 0),
+  house_number TEXT NOT NULL DEFAULT '',
   building_name TEXT NOT NULL DEFAULT '',
   latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
   longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
@@ -86,6 +87,10 @@ CREATE TABLE IF NOT EXISTS address_pool (
   CHECK (active = 1 OR retired_at IS NOT NULL)
 );
 
+ALTER TABLE address_pool ADD COLUMN IF NOT EXISTS canonical_key TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_address_pool_canonical_key
+  ON address_pool(country_code,canonical_key) WHERE canonical_key <> '';
+
 CREATE TABLE IF NOT EXISTS address_generation_index (
   address_id TEXT PRIMARY KEY REFERENCES address_pool(id) ON UPDATE CASCADE ON DELETE CASCADE,
   country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
@@ -111,6 +116,12 @@ CREATE TABLE IF NOT EXISTS address_generation_index (
   source_revision TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE address_pool ADD COLUMN IF NOT EXISTS match_level TEXT NOT NULL DEFAULT 'premise'
+  CHECK (match_level IN ('street','premise','subpremise'));
+ALTER TABLE address_pool DROP CONSTRAINT IF EXISTS address_pool_house_number_check;
+UPDATE address_pool SET match_level='subpremise'
+WHERE match_level='premise' AND trim(component_variants_json::jsonb -> 'native' ->> 'unit') <> '';
 
 CREATE TABLE IF NOT EXISTS address_pool_revisions (
   kind TEXT PRIMARY KEY,
@@ -205,7 +216,8 @@ CREATE TABLE IF NOT EXISTS residential_coverage (
   last_verified_at TEXT NOT NULL,
   region_id INTEGER,
   city_id INTEGER,
-  PRIMARY KEY (country_code, region_name, city_name)
+  identity_key TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (country_code, region_name, city_name, identity_key)
 );
 
 CREATE TABLE IF NOT EXISTS translation_cache (
@@ -231,6 +243,12 @@ CREATE TABLE IF NOT EXISTS sync_country_state (
   failure_signature TEXT,
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE residential_coverage ADD COLUMN IF NOT EXISTS total_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE residential_coverage ADD COLUMN IF NOT EXISTS identity_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE residential_coverage DROP CONSTRAINT IF EXISTS residential_coverage_pkey;
+ALTER TABLE residential_coverage ADD CONSTRAINT residential_coverage_pkey PRIMARY KEY (country_code,region_name,city_name,identity_key);
+UPDATE residential_coverage SET total_count=address_count WHERE total_count<address_count;
 
 CREATE TABLE IF NOT EXISTS sync_country_runtime (
   country_code TEXT PRIMARY KEY CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
@@ -316,6 +334,7 @@ CREATE TABLE IF NOT EXISTS cn_communities_v2 (
   city TEXT NOT NULL,
   district TEXT NOT NULL,
   township TEXT NOT NULL DEFAULT '',
+  postcode TEXT NOT NULL DEFAULT '',
   provider_address TEXT NOT NULL DEFAULT '',
   longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
   latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
@@ -337,6 +356,7 @@ CREATE TABLE IF NOT EXISTS cn_community_sources (
   raw_latitude REAL NOT NULL,
   raw_crs TEXT NOT NULL CHECK (raw_crs IN ('GCJ-02','BD-09')),
   response_hash TEXT NOT NULL,
+  accepted_strategy_version TEXT NOT NULL DEFAULT '',
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (provider, provider_poi_id)
@@ -348,6 +368,7 @@ CREATE TABLE IF NOT EXISTS cn_ingest_candidates (
   target_adcode TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   address TEXT NOT NULL DEFAULT '',
+  postcode TEXT NOT NULL DEFAULT '',
   province TEXT NOT NULL DEFAULT '',
   city TEXT NOT NULL DEFAULT '',
   district TEXT NOT NULL DEFAULT '',
@@ -384,6 +405,7 @@ CREATE TABLE IF NOT EXISTS cn_sync_checkpoints (
   status TEXT NOT NULL DEFAULT 'pending',
   accepted_count INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
+  page_signature TEXT,
   updated_at TEXT NOT NULL,
   strategy_version TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (provider, city)
@@ -462,6 +484,8 @@ CREATE TABLE IF NOT EXISTS sync_runtime_settings (
   updated_at TEXT NOT NULL
 );
 
+ALTER TABLE cn_sync_checkpoints ADD COLUMN IF NOT EXISTS page_signature TEXT;
+
 CREATE TABLE IF NOT EXISTS publication_validation_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   revision TEXT NOT NULL,
@@ -472,6 +496,7 @@ CREATE TABLE IF NOT EXISTS publication_validation_state (
 );
 
 CREATE INDEX IF NOT EXISTS idx_address_pool_country_random ON address_pool(country_code, active, random_key, id);
+CREATE INDEX IF NOT EXISTS idx_address_pool_active_country_id ON address_pool(country_code, id) WHERE active=1;
 CREATE INDEX IF NOT EXISTS idx_address_pool_property_random ON address_pool(country_code, property_type, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_residential_random ON address_pool(country_code, active, random_key, id)
   WHERE property_type IN ('residential','apartment');
@@ -543,6 +568,12 @@ CREATE INDEX IF NOT EXISTS idx_cn_communities_generation ON cn_communities_v2(ac
 CREATE INDEX IF NOT EXISTS idx_cn_communities_generation_random
   ON cn_communities_v2(active,((hashtextextended(id,0) & 2147483647)));
 CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(latitude,longitude);
+ALTER TABLE cn_communities_v2 ADD COLUMN IF NOT EXISTS postcode TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_cn_communities_postcode ON cn_communities_v2(postcode,active);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_city_random ON cn_communities_v2(city,active,((hashtextextended(id,0) & 2147483647)),id);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_province_random ON cn_communities_v2(province,active,((hashtextextended(id,0) & 2147483647)),id);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_district_random ON cn_communities_v2(district,active,((hashtextextended(id,0) & 2147483647)),id);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_postcode_random ON cn_communities_v2(postcode,active,((hashtextextended(id,0) & 2147483647)),id);
 CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
 CREATE INDEX IF NOT EXISTS idx_cn_ingest_decision ON cn_ingest_candidates(decision,provider,adcode,last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_cn_ingest_location ON cn_ingest_candidates(city,district,decision);
@@ -639,5 +670,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 20) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 30) AS version
 ON CONFLICT (version) DO NOTHING;

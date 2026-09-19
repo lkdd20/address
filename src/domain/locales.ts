@@ -52,6 +52,16 @@ export const pathForLocale = (pathname: string, locale: Locale): string => {
   return `/${locale}/${suffix}`;
 };
 
+export const safeReturnPath = (value: string | null, origin: string, fallback: string): string => {
+  if (!value?.startsWith('/')) return fallback;
+  try {
+    const target = new URL(value, origin);
+    return target.origin === origin ? `${target.pathname}${target.search}${target.hash}` : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 export const uiTextLocale = (locale: Locale): 'en' | 'zh-CN' => locale === 'zh-CN' || locale === 'zh-TW' ? 'zh-CN' : 'en';
 
 export const localizedCountryName = (countryCode: string, locale: Locale, fallback: string): string => {

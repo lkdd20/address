@@ -7,6 +7,25 @@ describe('Geoapify credential bridge', () => {
     await Promise.all(bridges.splice(0).map((bridge) => bridge.close()));
   });
 
+  it('counts broker dispatches even when a rotated request ultimately fails', async () => {
+    const bridge = createGeoapifyCredentialBridge({
+      brokerClient: {
+        request: async (_operation, _parameters, { maxDispatches, onDispatch }) => {
+          expect(maxDispatches).toBe(32);
+          onDispatch(2);
+          throw Object.assign(new Error('quota'), { code: 'SOURCE_QUOTA_UNAVAILABLE' });
+        }
+      }
+    });
+    bridges.push(bridge);
+    const response = await fetch(await bridge.start(), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latitude: 37.574, longitude: 126.977 })
+    });
+    expect(response.status).toBe(503);
+    expect(bridge.requestCount()).toBe(2);
+  });
+
   it('returns a bounded unavailable response without exposing a credential', async () => {
     const bridge = createGeoapifyCredentialBridge({
       credentialPool: { acquire: async () => null, report: async () => {} },
@@ -54,6 +73,7 @@ describe('Geoapify credential bridge', () => {
     const responses = await Promise.all(requests);
     expect(responses.map(({ status }) => status)).toEqual([200, 200, 200]);
     expect(used).toBe(3);
+    expect(bridge.requestCount()).toBe(3);
     expect(maximumActive).toBe(1);
   });
 

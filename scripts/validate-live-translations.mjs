@@ -6,7 +6,7 @@ const registryResponse = await fetch(`${base}/countries`, { headers: authorizati
 const registry = await registryResponse.json();
 if (!registryResponse.ok) throw new Error(`/countries: ${registry.error?.code || registryResponse.status}`);
 const codes = registry.data.filter((country) => country.generationMode === 'synchronized-pool'
-  && Number(country.addressCount) > 0 && Number(country.residentialCount) > 0 && country.residentialAvailable)
+  && Number(country.addressCount) > 0)
   .map((country) => country.code);
 const localScript = {
   CN: /[\u3400-\u9fff]/, HK: /[\u3400-\u9fff]/, TW: /[\u3400-\u9fff]/,

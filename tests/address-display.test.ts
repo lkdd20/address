@@ -21,6 +21,13 @@ describe('address display localization', () => {
     expect(addressDisplayComponents(bundle, 'zh-CN')).toBe(bundle.address.componentVariants['zh-CN']);
   });
 
+  it('falls back to an available presentation for incomplete legacy snapshots', () => {
+    const bundle = generateBundle(eligibleAddresses('GB', false, now)[0], true, 'display-fallback', undefined, now);
+    const legacy = structuredClone(bundle) as typeof bundle;
+    delete (legacy.addressFormats as Partial<typeof bundle.addressFormats>).en;
+    expect(addressDisplayPresentation(legacy, 'en', 'zh-CN')).toEqual(bundle.addressFormats.native);
+  });
+
   it('renders the full native variant when the display locale matches the address language', () => {
     const bundle = generateBundle(eligibleAddresses('DE', false, now)[0], true, 'display-language', undefined, now);
     expect(bundle.address.nativeLanguage).toBe('de');

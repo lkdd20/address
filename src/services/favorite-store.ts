@@ -9,6 +9,13 @@ const STORE_NAME = 'favorites';
 const REVISION_KEY = 'address-favorites-revision';
 const memory = new Map<string, FavoriteAddress>();
 let databasePromise: Promise<IDBDatabase | null> | null = null;
+let mutationQueue: Promise<void> = Promise.resolve();
+
+const enqueueMutation = <T,>(operation: () => Promise<T>): Promise<T> => {
+  const result = mutationQueue.then(() => operation(), () => operation());
+  mutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+};
 
 const requestValue = <T>(request: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => {
   request.addEventListener('success', () => resolve(request.result), { once: true });
@@ -21,10 +28,18 @@ const transactionDone = (transaction: IDBTransaction): Promise<void> => new Prom
   transaction.addEventListener('error', () => reject(transaction.error || new Error('INDEXED_DB_TRANSACTION_FAILED')), { once: true });
 });
 
+const abortTransaction = async (transaction: IDBTransaction, done: Promise<void>): Promise<void> => {
+  try { transaction.abort(); } catch {}
+  await done.catch(() => undefined);
+};
+
+const readTransactionValues = async (store: IDBObjectStore): Promise<FavoriteAddress[]> =>
+  normalizedFavoritePositions((await requestValue(store.getAll())).filter(isFavoriteAddress));
+
 const openDatabase = (): Promise<IDBDatabase | null> => {
   if (databasePromise) return databasePromise;
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
-  databasePromise = new Promise((resolve) => {
+  databasePromise = new Promise<IDBDatabase | null>((resolve) => {
     const request = indexedDB.open(DATABASE_NAME, FAVORITES_SCHEMA_VERSION);
     request.addEventListener('upgradeneeded', () => {
       const database = request.result;
@@ -38,7 +53,7 @@ const openDatabase = (): Promise<IDBDatabase | null> => {
     request.addEventListener('success', () => resolve(request.result), { once: true });
     request.addEventListener('error', () => resolve(null), { once: true });
     request.addEventListener('blocked', () => resolve(null), { once: true });
-  });
+  }).catch(() => null);
   return databasePromise;
 };
 
@@ -67,73 +82,129 @@ export const listFavorites = async (): Promise<{ values: FavoriteAddress[]; pers
   }
 };
 
-export const saveFavorite = async (bundle: GeneratedBundle): Promise<{ favorite: FavoriteAddress; persistent: boolean }> => {
-  const current = await listFavorites();
-  const id = favoriteIdFor(bundle);
-  const existing = current.values.find((value) => value.id === id);
-  if (!existing && current.values.length >= MAX_FAVORITES) throw new Error('FAVORITES_LIMIT_REACHED');
-  const position = existing?.position || current.values.filter((value) => value.countryCode === bundle.address.countryCode).length + 1;
-  const favorite = favoriteFromBundle(bundle, position);
-  if (existing) favorite.createdAt = existing.createdAt;
-  const database = await openDatabase();
-  if (!database) {
-    memory.set(favorite.id, favorite); broadcast();
-    return { favorite, persistent: false };
-  }
-  const transaction = database.transaction(STORE_NAME, 'readwrite');
-  transaction.objectStore(STORE_NAME).put(favorite);
-  await transactionDone(transaction);
-  broadcast();
-  return { favorite, persistent: true };
-};
+export const saveFavorite = (bundle: GeneratedBundle): Promise<{ favorite: FavoriteAddress; persistent: boolean }> =>
+  enqueueMutation(async () => {
+    const id = favoriteIdFor(bundle);
+    const database = await openDatabase();
+    if (!database) {
+      const current = listFromMemory();
+      const existing = current.find((value) => value.id === id);
+      if (!existing && current.length >= MAX_FAVORITES) throw new Error('FAVORITES_LIMIT_REACHED');
+      const position = existing?.position || current.filter((value) => value.countryCode === bundle.address.countryCode).length + 1;
+      const favorite = favoriteFromBundle(bundle, position);
+      if (existing) favorite.createdAt = existing.createdAt;
+      memory.set(favorite.id, favorite); broadcast();
+      return { favorite, persistent: false };
+    }
+    const transaction = database.transaction(STORE_NAME, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      const store = transaction.objectStore(STORE_NAME);
+      const current = await readTransactionValues(store);
+      const existing = current.find((value) => value.id === id);
+      if (!existing && current.length >= MAX_FAVORITES) {
+        await abortTransaction(transaction, done);
+        throw new Error('FAVORITES_LIMIT_REACHED');
+      }
+      const position = existing?.position || current.filter((value) => value.countryCode === bundle.address.countryCode).length + 1;
+      const favorite = favoriteFromBundle(bundle, position);
+      if (existing) favorite.createdAt = existing.createdAt;
+      store.put(favorite);
+      await done;
+      broadcast();
+      return { favorite, persistent: true };
+    } catch (error) {
+      await abortTransaction(transaction, done);
+      throw error;
+    }
+  });
 
-export const removeFavorite = async (id: string): Promise<boolean> => {
-  const current = await listFavorites();
-  const source = current.values.find((value) => value.id === id);
-  if (!source) return false;
-  const remaining = normalizedFavoritePositions(current.values.filter((value) => value.id !== id))
-    .filter((value) => value.countryCode === source.countryCode);
+export const removeFavorite = (id: string): Promise<boolean> => enqueueMutation(async () => {
   const database = await openDatabase();
   if (!database) {
+    const current = listFromMemory();
+    const source = current.find((value) => value.id === id);
+    if (!source) return false;
+    const remaining = normalizedFavoritePositions(current.filter((value) => value.id !== id))
+      .filter((value) => value.countryCode === source.countryCode);
     memory.delete(id); remaining.forEach((value) => memory.set(value.id, value)); broadcast(); return true;
   }
   const transaction = database.transaction(STORE_NAME, 'readwrite');
-  const store = transaction.objectStore(STORE_NAME);
-  store.delete(id);
-  remaining.forEach((value) => store.put(value));
-  await transactionDone(transaction);
-  broadcast();
-  return true;
-};
+  const done = transactionDone(transaction);
+  try {
+    const store = transaction.objectStore(STORE_NAME);
+    const current = await readTransactionValues(store);
+    const source = current.find((value) => value.id === id);
+    if (!source) { await done; return false; }
+    const remaining = normalizedFavoritePositions(current.filter((value) => value.id !== id))
+      .filter((value) => value.countryCode === source.countryCode);
+    store.delete(id);
+    remaining.forEach((value) => store.put(value));
+    await done;
+    broadcast();
+    return true;
+  } catch (error) {
+    await abortTransaction(transaction, done);
+    throw error;
+  }
+});
 
-export const restoreFavorite = async (favorite: FavoriteAddress): Promise<void> => {
-  const current = await listFavorites();
-  if (current.values.some((value) => value.id === favorite.id)) return;
-  const values = normalizedFavoritePositions([...current.values, favorite]);
-  const changed = values.filter((value) => value.countryCode === favorite.countryCode);
+export const restoreFavorite = (favorite: FavoriteAddress): Promise<void> => enqueueMutation(async () => {
   const database = await openDatabase();
-  if (!database) { changed.forEach((value) => memory.set(value.id, value)); broadcast(); return; }
+  if (!database) {
+    const current = listFromMemory();
+    if (current.some((value) => value.id === favorite.id)) return;
+    if (current.length >= MAX_FAVORITES) throw new Error('FAVORITES_LIMIT_REACHED');
+    const values = normalizedFavoritePositions([...current, favorite]);
+    values.filter((value) => value.countryCode === favorite.countryCode).forEach((value) => memory.set(value.id, value));
+    broadcast(); return;
+  }
   const transaction = database.transaction(STORE_NAME, 'readwrite');
-  const store = transaction.objectStore(STORE_NAME);
-  changed.forEach((value) => store.put(value));
-  await transactionDone(transaction);
-  broadcast();
-};
+  const done = transactionDone(transaction);
+  try {
+    const store = transaction.objectStore(STORE_NAME);
+    const current = await readTransactionValues(store);
+    if (current.some((value) => value.id === favorite.id)) { await done; return; }
+    if (current.length >= MAX_FAVORITES) {
+      await abortTransaction(transaction, done);
+      throw new Error('FAVORITES_LIMIT_REACHED');
+    }
+    const values = normalizedFavoritePositions([...current, favorite]);
+    values.filter((value) => value.countryCode === favorite.countryCode).forEach((value) => store.put(value));
+    await done;
+    broadcast();
+  } catch (error) {
+    await abortTransaction(transaction, done);
+    throw error;
+  }
+});
 
-export const reorderFavorite = async (id: string, position: number): Promise<void> => {
-  const current = await listFavorites();
-  const values = moveFavoriteWithinCountry(current.values, id, position);
-  const source = values.find((value) => value.id === id);
-  if (!source) return;
-  const changed = values.filter((value) => value.countryCode === source.countryCode);
+export const reorderFavorite = (id: string, position: number): Promise<void> => enqueueMutation(async () => {
   const database = await openDatabase();
-  if (!database) { changed.forEach((value) => memory.set(value.id, value)); broadcast(); return; }
+  if (!database) {
+    const values = moveFavoriteWithinCountry(listFromMemory(), id, position);
+    const source = values.find((value) => value.id === id);
+    if (!source) return;
+    values.filter((value) => value.countryCode === source.countryCode)
+      .forEach((value) => memory.set(value.id, { ...value, updatedAt: new Date().toISOString() }));
+    broadcast(); return;
+  }
   const transaction = database.transaction(STORE_NAME, 'readwrite');
-  const store = transaction.objectStore(STORE_NAME);
-  changed.forEach((value) => store.put({ ...value, updatedAt: new Date().toISOString() }));
-  await transactionDone(transaction);
-  broadcast();
-};
+  const done = transactionDone(transaction);
+  try {
+    const store = transaction.objectStore(STORE_NAME);
+    const values = moveFavoriteWithinCountry(await readTransactionValues(store), id, position);
+    const source = values.find((value) => value.id === id);
+    if (!source) { await done; return; }
+    values.filter((value) => value.countryCode === source.countryCode)
+      .forEach((value) => store.put({ ...value, updatedAt: new Date().toISOString() }));
+    await done;
+    broadcast();
+  } catch (error) {
+    await abortTransaction(transaction, done);
+    throw error;
+  }
+});
 
 export const subscribeToFavorites = (listener: () => void): (() => void) => {
   const storage = (event: StorageEvent) => { if (event.key === REVISION_KEY) listener(); };

@@ -151,10 +151,10 @@ describe('non-residential rule coverage', () => {
       .toEqual({ excluded: true, category: 'hospitality_commercial_industrial', term: 'dormitory', field: 'classification' });
   });
 
-  it('rejects an institution before the offline importer writes it', () => {
+  it('rejects a false residential classification before the offline importer writes it', () => {
     const { errors } = normalizeAddress({
       country_code: 'US', street: 'Market Street', house_number: '1', building_name: 'Central Police Station',
-      latitude: '39.95', longitude: '-75.16', property_type: 'unknown', source_id: 'fixture',
+      latitude: '39.95', longitude: '-75.16', property_type: 'residential', source_id: 'fixture',
       source_name: 'Fixture', source_url: 'https://example.test/source', source_license: 'CC0-1.0'
     });
     expect(errors).toContain('non-residential:military_law_justice:buildingName:police station');

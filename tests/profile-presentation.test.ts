@@ -1,9 +1,39 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import App, { localizedExtensionValue, profileValue } from '../src/components/App';
+import App, { generationResponseMode, localizedExtensionValue, profileValue, streetValue } from '../src/components/App';
 import { generateBundle } from '../src/domain/generator';
+import { countryCodes } from '../src/domain/countries';
+import { parsePhoneNumberFromString } from 'libphonenumber-js/max';
 import { eligibleAddresses } from './fixtures/catalog';
 
 const now = new Date('2026-07-20T00:00:00.000Z');
+const execFileAsync = promisify(execFile);
+
+describe('generation response modes', () => {
+  it('accepts ordinary international responses without changing China or IP modes', () => {
+    for (const country of countryCodes) {
+      expect(generationResponseMode(country)).toBe(country === 'CN' ? 'residential' : 'address');
+      expect(generationResponseMode(country, true)).toBe('ip-region');
+    }
+  });
+});
+
+describe('China street display language', () => {
+  it('keeps the English street row free of Chinese suffixes', () => {
+    expect(streetValue('CN', { houseNumber: '18', street: 'Wenhua Road', locality: '', postcode: '' })).toBe('18 Wenhua Road');
+  });
+
+  it('keeps the native house-number suffix exactly once', () => {
+    expect(streetValue('CN', { houseNumber: '18', street: '文化路', locality: '', postcode: '' })).toBe('文化路18号');
+    expect(streetValue('CN', { houseNumber: '18号', street: '文化路', locality: '', postcode: '' })).toBe('文化路18号');
+  });
+
+  it('does not add Chinese text to the Pinyin street row', () => {
+    expect(streetValue('CN', { houseNumber: '18 hao', street: 'Wenhua Lu', locality: '', postcode: '' })).toBe('18 hao Wenhua Lu');
+  });
+});
 
 const nationalPhoneParts = (phone: string): [string, string, string] => {
   const parts = phone.replace(/^\+1 /, '').split(' ');
@@ -12,6 +42,12 @@ const nationalPhoneParts = (phone: string): [string, string, string] => {
 };
 
 describe('regional phone generation', () => {
+  it('generates a GB address under the production tsx runtime', async () => {
+    const script = "import { eligibleAddresses } from './tests/fixtures/catalog'; import { generateBundle } from './src/domain/generator'; const address=eligibleAddresses('GB', false, new Date('2026-07-20T00:00:00.000Z'))[0]; const bundle=generateBundle(address, false, 'gb-runtime-regression'); if (!bundle.profile.phone.startsWith('+44 ')) throw new Error('GB_PHONE_MISSING'); console.log('GB_RUNTIME_OK');";
+    const { stdout } = await execFileAsync(process.execPath, [resolve('node_modules/tsx/dist/cli.mjs'), '-e', script], { cwd: resolve('.') });
+    expect(stdout).toContain('GB_RUNTIME_OK');
+  });
+
   it('uses address-local US and Canadian area codes without a 555 exchange', () => {
     const brooklyn = structuredClone(eligibleAddresses('US', false, now)[0]);
     const philadelphia = structuredClone(brooklyn);
@@ -45,8 +81,8 @@ describe('regional phone generation', () => {
 
   it('uses valid international mobile prefixes and grouping for Mexico, Italy, the Netherlands and Russia', () => {
     const patterns = {
-      MX: /^\+52 55 \d{4} \d{4}$/,
-      IT: /^\+39 320 \d{3} \d{4}$/,
+      MX: /^\+52 (?:33|55|56|81) \d{4} \d{4}$/,
+      IT: /^\+39 3\d{2} \d{3} \d{4}$/,
       NL: /^\+31 6 \d{4} \d{4}$/,
       RU: /^\+7 9\d{2} \d{3} \d{4}$/
     } as const;
@@ -57,6 +93,21 @@ describe('regional phone generation', () => {
           .toMatch(pattern);
       }
     }
+  });
+
+  it.each(countryCodes)('generates 500 varied valid mobile numbers for %s', (countryCode) => {
+    const address = eligibleAddresses(countryCode, false, now)[0];
+    const numbers = new Set<string>();
+    for (let index = 0; index < 500; index += 1) {
+      const value = generateBundle(address, false, `mobile-${index}`, undefined, now).profile.phone;
+      const phone = parsePhoneNumberFromString(value);
+      expect(phone?.isValid(), `${countryCode}:${value}`).toBe(true);
+      expect(phone?.country).toBe(countryCode);
+      expect(['MOBILE', 'FIXED_LINE_OR_MOBILE']).toContain(phone?.getType());
+      if (countryCode === 'GB') expect(phone?.nationalNumber).not.toMatch(/^7700900\d{3}$/u);
+      numbers.add(value);
+    }
+    expect(numbers.size).toBeGreaterThanOrEqual(495);
   });
 });
 

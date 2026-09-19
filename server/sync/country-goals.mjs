@@ -11,18 +11,24 @@ const ratio = (satisfied, total) => total > 0 ? satisfied / total : null;
 const catalogCoverageSummaries = async (database) => {
   const [regionsResult, coverageResult, cityResult, policiesResult] = await Promise.all([
     database.prepare('SELECT id,parent_id,country_code,code FROM catalog_regions').all(),
-    database.prepare(`SELECT country_code,region_id,SUM(address_count) AS address_count
-      FROM residential_coverage WHERE region_id IS NOT NULL
-      GROUP BY country_code,region_id`).all(),
+    database.prepare(`SELECT coverage.country_code,coverage.region_id,
+        SUM(GREATEST(coverage.total_count,coverage.address_count)) AS address_count,MAX(override.min_count) AS override_target
+      FROM residential_coverage coverage LEFT JOIN sync_node_overrides override
+        ON override.node_key=coverage.country_code||':a1:'||encode(convert_to(coverage.region_name,'UTF8'),'hex')
+      WHERE coverage.region_id IS NOT NULL GROUP BY coverage.country_code,coverage.region_id`).all(),
     database.prepare(`WITH city_counts AS (
-        SELECT city_id,SUM(address_count) AS address_count
-        FROM residential_coverage WHERE city_id IS NOT NULL GROUP BY city_id
+        SELECT coverage.city_id,SUM(GREATEST(coverage.total_count,coverage.address_count)) AS address_count,
+          MAX(override.min_count) AS override_target
+        FROM residential_coverage coverage LEFT JOIN sync_node_overrides override
+          ON override.node_key=coverage.country_code||':loc:'||encode(convert_to(coverage.region_name,'UTF8'),'hex')
+            ||':'||encode(convert_to(coverage.city_name,'UTF8'),'hex')
+        WHERE coverage.city_id IS NOT NULL GROUP BY coverage.city_id
       )
       SELECT city.country_code,city.region_id,COUNT(*) AS total,
         SUM(CASE WHEN COALESCE(coverage.address_count,0)>0 THEN 1 ELSE 0 END) AS covered,
-        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.min_per_node THEN 1 ELSE 0 END) AS qualified_lowest,
-        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.level1_min THEN 1 ELSE 0 END) AS qualified_level1,
-        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.level2_min THEN 1 ELSE 0 END) AS qualified_level2
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=COALESCE(coverage.override_target,policy.min_per_node) THEN 1 ELSE 0 END) AS qualified_lowest,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=COALESCE(coverage.override_target,policy.level1_min) THEN 1 ELSE 0 END) AS qualified_level1,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=COALESCE(coverage.override_target,policy.level2_min) THEN 1 ELSE 0 END) AS qualified_level2
       FROM catalog_cities city
       JOIN sync_country_policies policy ON policy.country_code=city.country_code
       LEFT JOIN city_counts coverage ON coverage.city_id=city.id
@@ -49,7 +55,9 @@ const catalogCoverageSummaries = async (database) => {
     return depth;
   };
   const regionCounts = new Map();
+  const regionTargets = new Map();
   for (const row of coverageResult.results || []) {
+    if (row.override_target != null) regionTargets.set(Number(row.region_id), Number(row.override_target));
     const count = Number(row.address_count || 0);
     let region = byId.get(Number(row.region_id));
     const seen = new Set();
@@ -83,9 +91,10 @@ const catalogCoverageSummaries = async (database) => {
     ));
     value.total += 1;
     if (count > 0) value.covered += 1;
-    if (count >= Number(policy.min_per_node || 0)) value.qualified_lowest += 1;
-    if (count >= Number(policy.level1_min || 0)) value.qualified_level1 += 1;
-    if (count >= Number(policy.level2_min || 0)) value.qualified_level2 += 1;
+    const target = regionTargets.get(Number(region.id));
+    if (count >= (target ?? Number(policy.min_per_node || 0))) value.qualified_lowest += 1;
+    if (count >= (target ?? Number(policy.level1_min || 0))) value.qualified_level1 += 1;
+    if (count >= (target ?? Number(policy.level2_min || 0))) value.qualified_level2 += 1;
   }
   for (const row of cityResult.results || []) {
     const countryCode = String(row.country_code);
@@ -101,22 +110,22 @@ export const evaluateCountryGoals = async (database) => {
   const [policiesResult, coverageResult, overridesResult, catalogSummaries] = await Promise.all([
     database.prepare(`SELECT policy.country_code,policy.enabled,policy.target_count,policy.min_per_node,
         policy.coverage_ratio,policy.level1_min,policy.level2_min,
-        CASE WHEN COALESCE(root.residential_count,0)=0 AND COALESCE(state.residential_count,0)>0
-          THEN state.residential_count ELSE COALESCE(root.residential_count,0) END AS current_count
+        COALESCE(root.total_count,state.address_count,0) AS current_count
       FROM sync_country_policies policy
       LEFT JOIN admin_coverage_stats root ON root.node_key=policy.country_code AND root.level=0
       LEFT JOIN sync_country_state state ON state.country_code=policy.country_code
       ORDER BY policy.country_code`).all(),
-    database.prepare(`SELECT coverage.country_code,coverage.level,coverage.region_code,coverage.residential_count,
+    database.prepare(`SELECT coverage.country_code,coverage.level,coverage.region_code,coverage.total_count AS residential_count,
         override.min_count AS override_target
       FROM admin_coverage_stats coverage
       LEFT JOIN sync_node_overrides override ON override.node_key=coverage.node_key
       WHERE coverage.level>0
       ORDER BY coverage.country_code,coverage.level`).all(),
-    database.prepare(`SELECT override.country_code,coverage.level,coverage.region_code,coverage.residential_count,
+    database.prepare(`SELECT override.country_code,COALESCE(coverage.level,override.level) AS level,coverage.region_code,
+        COALESCE(coverage.total_count,0) AS residential_count,
         override.min_count AS target_count
       FROM sync_node_overrides override
-      JOIN admin_coverage_stats coverage ON coverage.node_key=override.node_key
+      LEFT JOIN admin_coverage_stats coverage ON coverage.node_key=override.node_key
       WHERE override.min_count IS NOT NULL AND override.min_count>0`).all(),
     catalogCoverageSummaries(database)
   ]);
@@ -127,7 +136,7 @@ export const evaluateCountryGoals = async (database) => {
     nodesByCountry.set(row.country_code, nodes);
   }
   const overridesByCountry = new Map();
-  for (const row of overridesResult.results.filter(eligibleCoverageNode)) {
+  for (const row of overridesResult.results.filter((row) => !row.region_code || eligibleCoverageNode(row))) {
     const nodes = overridesByCountry.get(row.country_code) || [];
     nodes.push(row);
     overridesByCountry.set(row.country_code, nodes);

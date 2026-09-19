@@ -7,7 +7,7 @@ import {
 } from '../server/sync/address-policy.mjs';
 import { mapConcurrent } from '../server/sync/address-etl.mjs';
 
-const nodeKeyFor = (name) => `CN:a1:${Buffer.from(name, 'utf8').toString('hex').toUpperCase()}`;
+const nodeKeyFor = (name) => `CN:a1:${Buffer.from(name, 'utf8').toString('hex')}`;
 
 const record = (hash, admin1, locality, district = '') => ({
   canonicalHash: hash, countryCode: 'US', qualityScore: 0.9,
@@ -146,10 +146,10 @@ describe('hierarchical address policies', () => {
     await ensureAddressPolicies(database);
     await database.prepare(`INSERT INTO admin_coverage_stats(
       node_key,parent_key,country_code,level,region_name,total_count,updated_at
-    ) VALUES ('US:a1:AA','US','US',1,'Fixture State',12,'2026-07-28T00:00:00Z')`).run();
+    ) VALUES ('US:a1:aa','US','US',1,'Fixture State',12,'2026-07-28T00:00:00Z')`).run();
     await updateCountryPolicy(database, 'US', { targetCount: 100, level1Limit: 20, level2Limit: 5, level3Limit: 2, level4Limit: 0 });
     expect((await listNodePolicies(database, 'US'))[0]).toMatchObject({ inheritedTarget: 20, targetCount: 20, currentCount: 12 });
-    await upsertNodePolicy(database, 'US:a1:AA', 7);
+    await upsertNodePolicy(database, 'US:a1:aa', 7);
     expect((await listNodePolicies(database, 'US'))[0]).toMatchObject({ overrideTarget: 7, targetCount: 7, excess: 5 });
     database.close();
   });
@@ -199,31 +199,31 @@ describe('hierarchical address policies', () => {
     await ensureAddressPolicies(database);
     await database.batch([
       database.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,total_count,updated_at)
-        VALUES ('US:a1:AA','US','US',1,'State A',1200,'2026-08-01T00:00:00Z')`),
+        VALUES ('US:a1:aa','US','US',1,'State A',1200,'2026-08-01T00:00:00Z')`),
       database.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,total_count,updated_at)
-        VALUES ('US:loc:AA:BB','US:a1:AA','US',2,'City B',300,'2026-08-01T00:00:00Z')`),
+        VALUES ('US:loc:aa:bb','US:a1:aa','US',2,'City B',300,'2026-08-01T00:00:00Z')`),
       database.prepare(`INSERT INTO admin_coverage_stats(node_key,parent_key,country_code,level,region_name,total_count,updated_at)
-        VALUES ('US:dist:AA:BB:CC','US:loc:AA:BB','US',3,'District C',3,'2026-08-01T00:00:00Z')`)
+        VALUES ('US:dist:aa:bb:cc','US:loc:aa:bb','US',3,'District C',3,'2026-08-01T00:00:00Z')`)
     ]);
     const byKey = (nodes, key) => nodes.find((node) => node.key === key);
     let nodes = await listCountryNodeTargets(database, 'US');
-    expect(byKey(nodes, 'US:a1:AA')).toMatchObject({
+    expect(byKey(nodes, 'US:a1:aa')).toMatchObject({
       level: 1, defaultTarget: 1_000, overrideTarget: null, targetCount: 1_000, currentCount: 1_200,
       satisfied: true, deficit: 0, excess: 0
     });
-    expect(byKey(nodes, 'US:loc:AA:BB')).toMatchObject({ defaultTarget: 0, targetCount: 0, satisfied: true, deficit: 0 });
-    expect(byKey(nodes, 'US:dist:AA:BB:CC')).toMatchObject({ defaultTarget: 5, targetCount: 5, satisfied: false, deficit: 2 });
-    await expect(upsertNodeTarget(database, 'US:dist:AA:BB:CC', 50_001)).rejects.toThrow('INVALID_POLICY_NODE_TARGET');
-    await expect(upsertNodeTarget(database, 'US:dist:AA:BB:CC', -1)).rejects.toThrow('INVALID_POLICY_NODE_TARGET');
+    expect(byKey(nodes, 'US:loc:aa:bb')).toMatchObject({ defaultTarget: 0, targetCount: 0, satisfied: true, deficit: 0 });
+    expect(byKey(nodes, 'US:dist:aa:bb:cc')).toMatchObject({ defaultTarget: 5, targetCount: 5, satisfied: false, deficit: 2 });
+    await expect(upsertNodeTarget(database, 'US:dist:aa:bb:cc', 50_001)).rejects.toThrow('INVALID_POLICY_NODE_TARGET');
+    await expect(upsertNodeTarget(database, 'US:dist:aa:bb:cc', -1)).rejects.toThrow('INVALID_POLICY_NODE_TARGET');
     await expect(upsertNodeTarget(database, 'US:missing', 10)).rejects.toThrow('POLICY_NODE_NOT_FOUND');
-    await upsertNodeTarget(database, 'US:dist:AA:BB:CC', 2);
-    await upsertNodeTarget(database, 'US:a1:AA', 100);
+    await upsertNodeTarget(database, 'US:dist:aa:bb:cc', 2);
+    await upsertNodeTarget(database, 'US:a1:aa', 100);
     nodes = await listCountryNodeTargets(database, 'US');
-    expect(byKey(nodes, 'US:dist:AA:BB:CC')).toMatchObject({ overrideTarget: 2, targetCount: 2, satisfied: true, deficit: 0 });
-    expect(byKey(nodes, 'US:a1:AA')).toMatchObject({ overrideTarget: 100, targetCount: 100, excess: 1_100 });
-    await deleteNodeTarget(database, 'US:a1:AA');
+    expect(byKey(nodes, 'US:dist:aa:bb:cc')).toMatchObject({ overrideTarget: 2, targetCount: 2, satisfied: true, deficit: 0 });
+    expect(byKey(nodes, 'US:a1:aa')).toMatchObject({ overrideTarget: 100, targetCount: 100, excess: 1_100 });
+    await deleteNodeTarget(database, 'US:a1:aa');
     nodes = await listCountryNodeTargets(database, 'US');
-    expect(byKey(nodes, 'US:a1:AA')).toMatchObject({ overrideTarget: null, targetCount: 1_000 });
+    expect(byKey(nodes, 'US:a1:aa')).toMatchObject({ overrideTarget: null, targetCount: 1_000 });
 
     const beijingKey = nodeKeyFor('北京市');
     expect(await database.prepare('SELECT min_count FROM sync_node_overrides WHERE node_key=?')

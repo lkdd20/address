@@ -13,6 +13,7 @@ export interface ApiParameter {
   enum?: readonly string[];
   minimum?: number;
   maximum?: number;
+  maxLength?: number;
   schema?: Record<string, unknown>;
   description: string;
   descriptionZh: string;
@@ -72,17 +73,17 @@ export const publicApiEndpoints: readonly PublicApiEndpoint[] = [
       'Liste les pays, capacites, volumes et raccourcis.', 'Enumera paises, capacidades, cantidades y accesos directos.',
       'Lista paises, recursos, contagens e atalhos.'
     ),
-    successExample: { data: [{ code: 'US', residentialAvailable: true, residentialCount: 50000, generationMode: 'synchronized-pool' }] }
+    successExample: { data: [{ code: 'US', addressCount: 60000, residentialAvailable: true, residentialCount: 50000, generationMode: 'synchronized-pool' }] }
   },
   {
     id: 'availability', method: 'GET', path: '/api/v1/availability', scope: 'read', parameters: [],
     summary: localized(
-      'Return the lightweight residential availability list.', '返回轻量级住宅地址可用性列表。', '傳回輕量級住宅地址可用性清單。',
-      '住宅住所の利用可能国を軽量な一覧で返します。', '주거 주소 가용 국가 목록을 간단히 반환합니다.',
-      'Liefert die kompakte Liste verfuegbarer Wohnadressen.', 'Renvoie la liste legere de disponibilite residentielle.',
-      'Devuelve la lista ligera de disponibilidad residencial.', 'Retorna a lista leve de disponibilidade residencial.'
+      'Return the lightweight address availability list.', '返回轻量级地址可用性列表。', '傳回輕量級地址可用性清單。',
+      '住所の利用可能国を軽量な一覧で返します。', '주소 가용 국가 목록을 간단히 반환합니다.',
+      'Liefert die kompakte Liste verfuegbarer Adressen.', 'Renvoie la liste legere des adresses disponibles.',
+      'Devuelve la lista ligera de direcciones disponibles.', 'Retorna a lista leve de enderecos disponiveis.'
     ),
-    successExample: { data: [{ code: 'US', residentialAvailable: true }] }
+    successExample: { data: [{ code: 'US', available: true, residentialAvailable: true }] }
   },
   {
     id: 'client-context', method: 'GET', path: '/api/v1/client-context', scope: 'read',
@@ -122,49 +123,49 @@ export const publicApiEndpoints: readonly PublicApiEndpoint[] = [
   {
     id: 'generate', method: 'GET', path: '/api/v1/generate', scope: 'generate',
     summary: localized(
-      'Randomly generate one published residential address and test profile.', '随机生成一个已发布的真实住宅地址和测试资料。',
-      '隨機產生一個已發布的真實住宅地址和測試資料。', '公開済み住宅住所とテストプロフィールをランダム生成します。',
-      '게시된 주거 주소와 테스트 프로필을 무작위로 생성합니다.', 'Erzeugt zufaellig eine veroeffentlichte Wohnadresse mit Testprofil.',
-      'Genere aleatoirement une adresse residentielle publiee et un profil de test.',
-      'Genera aleatoriamente una direccion residencial publicada y un perfil de prueba.',
-      'Gera aleatoriamente um endereco residencial publicado e um perfil de teste.'
+      'Randomly generate one published address and test profile.', '随机生成一个已发布的真实地址和测试资料。',
+      '隨機產生一個已發布的真實地址和測試資料。', '公開済み住所とテストプロフィールをランダム生成します。',
+      '게시된 주소와 테스트 프로필을 무작위로 생성합니다.', 'Erzeugt zufaellig eine veroeffentlichte Adresse mit Testprofil.',
+      'Genere aleatoirement une adresse publiee et un profil de test.',
+      'Genera aleatoriamente una direccion publicada y un perfil de prueba.',
+      'Gera aleatoriamente um endereco publicado e um perfil de teste.'
     ),
     parameters: [
       country,
-      { name: 'region', location: 'query', type: 'string', description: 'Exact first-level region value.', descriptionZh: '精确的一级行政区值。' },
-      { name: 'regionId', location: 'query', type: 'string', description: 'Stable region ID from location search.', descriptionZh: '位置搜索返回的行政区 ID。' },
-      { name: 'city', location: 'query', type: 'string', description: 'Exact city value.', descriptionZh: '精确城市值。' },
-      { name: 'cityId', location: 'query', type: 'string', description: 'Stable city ID from location search.', descriptionZh: '位置搜索返回的城市 ID。' },
-      { name: 'district', location: 'query', type: 'string', description: 'Exact district value where supported.', descriptionZh: '支持国家的精确区县值。' },
-      { name: 'districtId', location: 'query', type: 'string', description: 'Stable district ID from location search.', descriptionZh: '位置搜索返回的稳定区县 ID。' },
-      { name: 'postcode', location: 'query', type: 'string', description: 'Exact postcode value.', descriptionZh: '精确邮编值。' },
-      { name: 'postcodeId', location: 'query', type: 'string', description: 'Stable postcode ID from location search.', descriptionZh: '位置搜索返回的邮编 ID。' },
+      { name: 'region', location: 'query', type: 'string', maxLength: 300, description: 'Exact first-level region value.', descriptionZh: '精确的一级行政区值。' },
+      { name: 'regionId', location: 'query', type: 'string', maxLength: 160, description: 'Stable region ID from location search.', descriptionZh: '位置搜索返回的行政区 ID。' },
+      { name: 'city', location: 'query', type: 'string', maxLength: 300, description: 'Exact city value.', descriptionZh: '精确城市值。' },
+      { name: 'cityId', location: 'query', type: 'string', maxLength: 160, description: 'Stable city ID from location search.', descriptionZh: '位置搜索返回的城市 ID。' },
+      { name: 'district', location: 'query', type: 'string', maxLength: 300, description: 'Exact district value where supported.', descriptionZh: '支持国家的精确区县值。' },
+      { name: 'districtId', location: 'query', type: 'string', maxLength: 160, description: 'Stable district ID from location search.', descriptionZh: '位置搜索返回的稳定区县 ID。' },
+      { name: 'postcode', location: 'query', type: 'string', maxLength: 300, description: 'Exact postcode value.', descriptionZh: '精确邮编值。' },
+      { name: 'postcodeId', location: 'query', type: 'string', maxLength: 160, description: 'Stable postcode ID from location search.', descriptionZh: '位置搜索返回的邮编 ID。' },
       { name: 'mode', location: 'query', type: 'string', enum: ['ip-region'], description: 'Use ip-region to match the request or supplied IP.', descriptionZh: '使用 ip-region 按请求或指定 IP 匹配。' },
-      { name: 'ip', location: 'query', type: 'string', description: 'IPv4 or IPv6 used with ip-region mode.', descriptionZh: 'ip-region 模式使用的 IPv4 或 IPv6。' },
-      { name: 'q', location: 'query', type: 'string', description: 'Text that must occur in the selected address components.', descriptionZh: '必须出现在所选地址字段中的文本。' },
+      { name: 'ip', location: 'query', type: 'string', maxLength: 64, description: 'IPv4 or IPv6 used with ip-region mode.', descriptionZh: 'ip-region 模式使用的 IPv4 或 IPv6。' },
+      { name: 'q', location: 'query', type: 'string', maxLength: 300, description: 'Text that must occur in the selected address components.', descriptionZh: '必须出现在所选地址字段中的文本。' },
       { name: 'strategy', location: 'query', type: 'string', defaultValue: 'random', enum: ['random', 'instant'], description: 'Selection strategy; both modes select from the synchronized database.', descriptionZh: '选择策略；两种模式都从已同步数据库选择。' },
-      { name: 'residential', location: 'query', type: 'boolean', defaultValue: 'true', description: 'Legacy compatibility flag; generation always returns residential records.', descriptionZh: '兼容旧客户端的参数；生成接口始终返回住宅记录。' },
-      { name: 'seed', location: 'query', type: 'string', description: 'Optional reproducible random seed.', descriptionZh: '可选的可复现随机种子。' },
-      { name: 'requestId', location: 'query', type: 'string', description: 'Caller-provided request correlation ID.', descriptionZh: '调用方提供的请求关联 ID。' }
+      { name: 'residential', location: 'query', type: 'boolean', description: 'Default: true for CN, false otherwise. Set true to require residential evidence. Street addresses have matchLevel=street and no invented premises.', descriptionZh: '中国默认为 true，其他国家默认为 false；true 要求住宅证据。街道记录标记 matchLevel=street，不编造门牌。' },
+      { name: 'seed', location: 'query', type: 'string', maxLength: 300, description: 'Optional reproducible random seed.', descriptionZh: '可选的可复现随机种子。' },
+      { name: 'requestId', location: 'query', type: 'string', maxLength: 160, description: 'Caller-provided request correlation ID.', descriptionZh: '调用方提供的请求关联 ID。' }
     ],
     exampleQuery: 'country=US&region=California&requestId=YOUR_REQUEST_ID',
-    successExample: { data: { requestId: 'YOUR_REQUEST_ID', country: 'US', mode: 'residential', sourcesTried: ['address-pool-v2'], result: { address: { id: 'address-id', countryCode: 'US', formattedAddress: 'Example address' } } } }
+    successExample: { data: { requestId: 'YOUR_REQUEST_ID', country: 'US', mode: 'address', sourcesTried: ['address-pool-v2'], result: { address: { id: 'address-id', countryCode: 'US', matchLevel: 'street', propertyType: 'unknown', formattedAddress: 'Example Street, Example City, CA, US' } } } }
   },
   {
     id: 'generate-batch', method: 'POST', path: '/api/v1/generate/batch', scope: 'generate',
     summary: localized(
-      'Generate up to 50 residential addresses with structured filters, exclusions, and uniqueness control.', '使用结构化筛选、排除条件和唯一性控制批量生成最多 50 个住宅地址。',
-      '使用結構化篩選、排除條件和唯一性控制批量產生最多 50 個住宅地址。', '構造化フィルター、除外条件、一意性制御で最大 50 件の住宅住所を生成します。',
-      '구조화 필터, 제외 조건 및 고유성 제어로 최대 50개의 주거 주소를 생성합니다.', 'Erzeugt bis zu 50 Wohnadressen mit strukturierten Filtern, Ausschluessen und Eindeutigkeit.',
-      "Genere jusqu'a 50 adresses residentielles avec filtres structures, exclusions et unicite.", 'Genera hasta 50 direcciones residenciales con filtros, exclusiones y unicidad.',
-      'Gera ate 50 enderecos residenciais com filtros estruturados, exclusoes e unicidade.'
+      'Generate up to 50 addresses with structured filters, exclusions, and uniqueness control.', '使用结构化筛选、排除条件和唯一性控制批量生成最多 50 个地址。',
+      '使用結構化篩選、排除條件和唯一性控制批量產生最多 50 個地址。', '構造化フィルター、除外条件、一意性制御で最大 50 件の住所を生成します。',
+      '구조화 필터, 제외 조건 및 고유성 제어로 최대 50개의 주소를 생성합니다.', 'Erzeugt bis zu 50 Adressen mit strukturierten Filtern, Ausschluessen und Eindeutigkeit.',
+      "Genere jusqu'a 50 adresses avec filtres structures, exclusions et unicite.", 'Genera hasta 50 direcciones con filtros, exclusiones y unicidad.',
+      'Gera ate 50 enderecos com filtros estruturados, exclusoes e unicidade.'
     ),
     parameters: [
       { name: 'count', location: 'body', type: 'integer', required: true, minimum: 1, maximum: 50, description: 'Number of addresses to generate.', descriptionZh: '要生成的地址数量。' },
       { name: 'filters', location: 'body', type: 'object', required: true, schema: {
         type: 'object', required: ['country'], additionalProperties: false,
-        properties: Object.fromEntries(['country', 'region', 'regionId', 'city', 'cityId', 'district', 'districtId', 'postcode', 'postcodeId', 'q']
-          .map((name) => [name, { type: 'string' }]))
+        properties: { ...Object.fromEntries(['country', 'region', 'regionId', 'city', 'cityId', 'district', 'districtId', 'postcode', 'postcodeId', 'q']
+          .map((name) => [name, { type: 'string' }])), residential: { type: 'boolean' } }
       }, description: 'Country and exact administrative, postcode, or text filters.', descriptionZh: '国家以及精确行政区、邮编或文本筛选条件。' },
       { name: 'options', location: 'body', type: 'object', schema: {
         type: 'object', additionalProperties: false, properties: {
@@ -192,7 +193,7 @@ export const publicApiEndpoints: readonly PublicApiEndpoint[] = [
       { name: 'parentType', location: 'query', type: 'string', defaultValue: 'country', enum: ['country', 'region', 'city'], description: 'Type of parent identified by parentId.', descriptionZh: 'parentId 指定的上级类型。' },
       { name: 'parentId', location: 'query', type: 'string', description: 'Stable region or city ID; omit for a country parent.', descriptionZh: '稳定的省州或城市 ID；国家上级时省略。' },
       { name: 'q', location: 'query', type: 'string', description: 'Optional child-name search text.', descriptionZh: '可选的下级名称搜索文本。' },
-      { name: 'residential', location: 'query', type: 'boolean', defaultValue: 'true', description: 'Include residential availability and disable uncovered options.', descriptionZh: '包含住宅可用数量并禁用无覆盖选项。' },
+      { name: 'residential', location: 'query', type: 'boolean', description: 'Default: true for CN, false otherwise. Set true to count only residential coverage.', descriptionZh: '中国默认为 true，其他国家默认为 false；true 仅统计住宅覆盖。' },
       { name: 'cursor', location: 'query', type: 'string', description: 'Opaque cursor returned by the previous page.', descriptionZh: '上一页返回的不透明游标。' },
       { name: 'limit', location: 'query', type: 'integer', defaultValue: '100', minimum: 20, maximum: 200, description: 'Page size from 20 through 200.', descriptionZh: '每页 20 至 200 条。' }
     ],
@@ -280,7 +281,8 @@ const schemaFor = (parameter: ApiParameter) => parameter.schema || ({
   ...(parameter.enum ? { enum: parameter.enum } : {}),
   ...(parameter.defaultValue !== undefined ? { default: parameter.type === 'integer' ? Number(parameter.defaultValue) : parameter.type === 'boolean' ? parameter.defaultValue === 'true' : parameter.defaultValue } : {}),
   ...(parameter.minimum === undefined ? {} : { minimum: parameter.minimum }),
-  ...(parameter.maximum === undefined ? {} : { maximum: parameter.maximum })
+  ...(parameter.maximum === undefined ? {} : { maximum: parameter.maximum }),
+  ...(parameter.maxLength === undefined ? {} : { maxLength: parameter.maxLength })
 });
 
 export const publicOpenApiDocument = {

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import type { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChinaDataService } from '../server/china/service';
+import { ChinaDataService, maxPagesForProvider } from '../server/china/service';
 import { ControlStore } from '../server/control/store';
 import { initializeTestDatabase, openTestDatabase, type PostgresDatabase } from './helpers/postgres-test-database.mjs';
 
@@ -20,6 +20,14 @@ vi.mock('node:worker_threads', async () => {
     async terminate(): Promise<number> { return 0; }
   }
   return { Worker: FakeWorker };
+});
+
+describe('China provider page windows', () => {
+  it('uses each provider maximum result window without exceeding it', () => {
+    expect(maxPagesForProvider('amap')).toBe(8);
+    expect(maxPagesForProvider('baidu')).toBe(10);
+    expect(maxPagesForProvider('tencent')).toBe(10);
+  });
 });
 
 type FakeWorker = EventEmitter & { url: URL; options: Record<string, unknown>; posted: unknown[] };
@@ -45,7 +53,9 @@ describe('China sync worker controller', () => {
   });
 
   afterEach(async () => {
-    await service.close();
+    const closing = service.close();
+    for (const worker of workers) worker.emit('exit', 0);
+    await closing;
     addressDb.close();
     controlDb.close();
   });
@@ -86,6 +96,36 @@ describe('China sync worker controller', () => {
     await vi.waitFor(async () => expect(await service.status()).toMatchObject({
       running: false, nextAttemptAt: expect.any(String)
     }));
+    const status = await service.status();
+    expect(status.syncState).toBe('cooldown_wait');
+    expect(Date.parse(String(status.nextAttemptAt)) - Date.now()).toBeGreaterThan(4 * 60_000);
+    await expect(service.start()).rejects.toThrow('CHINA_SYNC_RETRY_WAIT');
+    expect(workers).toHaveLength(1);
+  });
+
+  it('suspends repeated identical failures across restarts and resumes after credentials change', async () => {
+    await service.start();
+    const first = (await control.runs(10))[0];
+    await control.updateRun(String(first.id), 'failed', { accepted: 0, requests: 0 }, { code: '42703', message: 'missing column' });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const id = await control.createRun('china-communities', first.target as Record<string, unknown>);
+      await control.updateRun(id, 'failed', { accepted: 0, requests: 0 }, { code: '42703', message: 'missing column' });
+    }
+    workers[0].emit('message', { type: 'done', syncState: 'below_target', waitReason: '' });
+    workers[0].emit('exit', 0);
+    await vi.waitFor(async () => expect(await service.status()).toMatchObject({
+      running: false, syncState: 'blocked', nextAttemptAt: null, waitReason: 'retry_suspended:42703'
+    }));
+    await service.close();
+    service = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://test', masterKey: Buffer.alloc(32, 7)
+    });
+    await service.wake();
+    expect(await service.status()).toMatchObject({ syncState: 'blocked', nextAttemptAt: null });
+    await control.addCredential({ provider: 'amap', label: 'replacement', secret: 'replacement-fixture' });
+    await service.start();
+    expect(workers).toHaveLength(2);
+    workers[1].emit('exit', 0);
   });
 
   it('asks the active worker to stop on close', async () => {
@@ -142,5 +182,5 @@ describe('China sync worker controller', () => {
     } finally {
       await standby.close();
     }
-  });
+  }, 15_000);
 });

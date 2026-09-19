@@ -11,6 +11,7 @@ import { pickAddressPoolAddress } from '../server/api/repositories/address-pool'
 import { fetchWithTimeout } from '../server/api/services/fetch-timeout';
 import { fetchOverpassCandidates } from '../server/api/services/overpass-provider';
 import { eligibleAddresses } from './fixtures/catalog';
+import { openTestDatabase } from './helpers/postgres-test-database.mjs';
 
 const current = new Date('2026-07-20T00:00:00Z');
 type Database = Parameters<typeof resolveCatalogTarget>[0];
@@ -71,6 +72,41 @@ const withComponents = (
 afterEach(() => vi.useRealTimers());
 
 describe('seeded catalog targets and strict matching', () => {
+  it('prefers one exact city name over a City of alias collision', async () => {
+    const db = openTestDatabase(':memory:');
+    try {
+      await db.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,path)
+        VALUES (1,'GB','LND','Greater London','Greater London','大伦敦','region','GB/LND')`).run();
+      await db.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type)
+        VALUES (10,'GB',1,'London','London','伦敦','city'),
+          (11,'GB',1,'City of London','City of London','伦敦金融城','city')`).run();
+
+      await expect(resolveCatalogTarget(db, 'GB', { city: 'London' }, 'london-exact'))
+        .resolves.toMatchObject({ cityId: 10, city: 'London' });
+      await expect(resolveCatalogTarget(db, 'GB', { city: 'City of London' }, 'city-of-london-exact'))
+        .resolves.toMatchObject({ cityId: 11, city: 'City of London' });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('chooses the largest exact city when the same name exists in several regions', async () => {
+    const db = openTestDatabase(':memory:');
+    try {
+      await db.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,path)
+        VALUES (1,'US','TX','Texas','Texas','得克萨斯州','region','US/TX'),
+          (2,'US','PA','Pennsylvania','Pennsylvania','宾夕法尼亚州','region','US/PA')`).run();
+      await db.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (10,'US',1,'Houston','Houston','休斯顿','city',2304580),
+          (11,'US',2,'Houston','Houston','休斯顿','city',1000)`).run();
+
+      await expect(resolveCatalogTarget(db, 'US', { city: 'Houston' }, 'houston-exact'))
+        .resolves.toMatchObject({ cityId: 10, regionId: 1, city: 'Houston' });
+    } finally {
+      await db.close();
+    }
+  });
+
   it('selects the same nationwide target and cache bucket for the same seed', async () => {
     const db = randomTargetDb();
     const first = await resolveCatalogTarget(db, 'US', {}, 'same-seed');
@@ -114,6 +150,7 @@ describe('seeded catalog targets and strict matching', () => {
     expect(orderedCandidate(candidates, 'stable', 0)).toEqual(orderedCandidate(candidates, 'stable', 0));
     expect(new Set(Array.from({ length: 20 }, (_, index) => orderedCandidate(candidates, `seed-${index}`, 0).id)).size).toBeGreaterThan(1);
   });
+
 });
 
 describe('provider integrity and timeout behavior', () => {

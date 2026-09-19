@@ -65,16 +65,25 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean; generationMode: string }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
-      addressCount: 8, residentialCount: 8, residentialAvailable: true, generationMode: 'synchronized-pool'
+      addressCount: 10, residentialCount: 8, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
     expect(payload.data.find(({ code }) => code === 'CN')).toMatchObject({
       addressCount: 12, residentialCount: 12, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
-    expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM sync_country_state');
-    expect(statements[0]).not.toContain('address_pool_runtime');
-    expect(statements[1]).toContain('cn_communities_v2');
+    expect(statements.some((sql) => sql.includes('FROM sync_country_state'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('FROM address_generation_index'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('cn_communities_v2'))).toBe(true);
+    expect(statements.every((sql) => !sql.includes('address_pool_runtime'))).toBe(true);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('returns a database failure instead of an empty country list', async () => {
+    const failure = Object.assign(new Error('database connection lost'), { code: 'ECONNRESET' });
+    const response = await app.request('/api/v1/countries', {}, {
+      ALLOWED_ORIGIN: '*', ADDRESS_DB: { prepare: () => { throw failure; } }
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'DATABASE_UNAVAILABLE' } });
   });
 
   it('marks residential mode available when the evidence-backed pool is non-empty', async () => {
@@ -107,10 +116,10 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number }> };
 
-    expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 3, residentialCount: 3 });
-    expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM sync_country_state');
-    expect(statements[1]).toContain('cn_communities_v2');
+    expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 7, residentialCount: 3 });
+    expect(statements.some((sql) => sql.includes('FROM sync_country_state'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('FROM address_generation_index'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('cn_communities_v2'))).toBe(true);
   });
 
   it('serves lightweight availability from precomputed state', async () => {
@@ -118,19 +127,22 @@ describe('synchronized address registry', () => {
     const addressDb = {
       prepare: (sql: string) => {
         statements.push(sql);
-        return { all: async () => ({ results: [{ code: 'US', count: 8 }, { code: 'CN', count: 2 }] }) };
+        return {
+          first: async () => 2,
+          all: async () => ({ results: [
+            { country_code: 'US', total: 8, residential: 8 }, { country_code: 'SA', total: 0, residential: 0 }
+          ] })
+        };
       }
     };
     const response = await app.request('/api/v1/availability', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     expect(await response.json()).toEqual({ data: [
-      { code: 'US', residentialAvailable: true }, { code: 'CN', residentialAvailable: true }
+      { code: 'CN', available: true, residentialAvailable: true }, { code: 'US', available: true, residentialAvailable: true }
     ] });
-    expect(statements[0]).toContain('sync_country_state');
-    expect(statements[0]).toContain('residential_coverage');
-    expect(statements[0]).toContain('address_datasets');
-    expect(statements[0]).toContain('cn_communities_v2');
-    expect(statements[0]).toContain('HAVING MAX(count)>0');
-    expect(statements[0]).not.toContain('address_pool_runtime');
+    expect(statements.some((sql) => sql.includes('sync_country_state'))).toBe(true);
+    expect(statements.join(' ')).not.toContain('address_datasets');
+    expect(statements.some((sql) => sql.includes('cn_communities_v2'))).toBe(true);
+    expect(statements.every((sql) => !sql.includes('address_pool_runtime'))).toBe(true);
     expect(response.headers.get('Cache-Control')).toContain('max-age=30');
   });
 
@@ -151,6 +163,11 @@ describe('synchronized address registry', () => {
           node_key,parent_key,country_code,level,region_code,region_name,residential_count,total_count,child_count,updated_at
         ) VALUES ('US:1:CA','US','US',1,'CA','California',1,1,0,?)`).bind(now)
       ]);
+      await database.exec(`INSERT INTO address_pool(id,country_code,street,latitude,longitude,native_language,
+        component_variants_json,address_variants_json,quality_score,generation,coverage,random_key,first_seen_at,last_seen_at)
+        VALUES ('hierarchy-fixture','US','Fixture Road',37,-122,'en','{}','{}',.95,'fixture','fixture',1,'2026-01-01','2026-01-01');
+        INSERT INTO address_generation_index(address_id,country_code,admin1_key,admin1_code_key,residential_ready,random_key,updated_at)
+        VALUES ('hierarchy-fixture','US','california','ca',1,1,'2026-01-01');`);
       const hierarchy = await app.request('/api/v1/locations/hierarchy?country=US&parentType=country&childType=region', {}, {
         ALLOWED_ORIGIN: '*', LOCATION_DB: database
       });
@@ -174,6 +191,15 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/addresses/pool-v2-missing', {}, { ALLOWED_ORIGIN: '*' });
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ error: { code: 'ADDRESS_NOT_FOUND' } });
+  });
+
+  it('returns a typed database error when a China address lookup fails', async () => {
+    const failure = Object.assign(new Error('database connection lost'), { code: 'ECONNRESET' });
+    const response = await app.request('/api/v1/addresses/cn-community-1', {}, {
+      ALLOWED_ORIGIN: '*', ADDRESS_DB: { prepare: () => { throw failure; } }
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'DATABASE_UNAVAILABLE' } });
   });
 
   it('counts each publishable residential runtime address once and rejects stale or invalid records', async () => {
@@ -270,8 +296,28 @@ describe('synchronized address registry', () => {
     });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
-      addressCount: 0, residentialCount: 0, residentialAvailable: false
+      addressCount: 10, residentialCount: 0, residentialAvailable: false, available: true
     });
+  });
+
+  it('falls back to the published generation index when the count projection is missing', async () => {
+    const database = openTestDatabase(':memory:');
+    try {
+      await database.prepare(`INSERT INTO address_pool(
+        id,country_code,street,latitude,longitude,native_language,component_variants_json,address_variants_json,
+        quality_score,generation,coverage,random_key,first_seen_at,last_seen_at
+      ) VALUES ('indexed-only','GB','High Street',51.5,-0.1,'en','{}','{}',.95,'fixture','fixture',1,?,?)`)
+        .bind('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z').run();
+      await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,random_key,updated_at)
+        VALUES ('indexed-only','GB',1,?)`).bind('2026-01-01T00:00:00Z').run();
+      const availability = await app.request('/api/v1/availability', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: database });
+      expect(await availability.json()).toEqual({ data: [{ code: 'GB', available: true, residentialAvailable: false }] });
+      const countries = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: database });
+      const payload = await countries.json() as { data: Array<{ code: string; addressCount: number }> };
+      expect(payload.data.find(({ code }) => code === 'GB')).toMatchObject({ addressCount: 1 });
+    } finally {
+      await database.close();
+    }
   });
 
   it('returns configured region and city discovery options without reading address snapshots', async () => {
@@ -288,6 +334,32 @@ describe('synchronized address registry', () => {
 });
 
 describe('pool-only and IP address generation', () => {
+  it.each([
+    ['mode', 'nearby'], ['strategy', 'fast'], ['q', 'x'.repeat(301)],
+    ['region', 'x'.repeat(301)], ['cityId', 'x'.repeat(161)],
+    ['seed', 'x'.repeat(301)], ['requestId', 'x'.repeat(161)]
+  ])('rejects invalid or oversized GET generation input: %s', async (name, value) => {
+    const response = await app.request(`/api/v1/generate?country=US&${name}=${encodeURIComponent(value)}`, {}, mockBindings);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_GENERATION_REQUEST' } });
+  });
+
+  it('generates a filtered GB London address instead of returning a generic failure', async () => {
+    const address = eligibleAddresses('GB', false, new Date('2026-01-01T00:00:00Z'))[0];
+    const pick = vi.fn(async ({ countryCode, filters }: { countryCode: string; filters: { city?: string } }) => {
+      expect(countryCode).toBe('GB');
+      expect(filters.city).toBe('London');
+      return { ready: true as const, result: { address, source: 'address-pool-v2' as const, eligibleCount: 1 } };
+    });
+    const response = await app.request('/api/v1/generate?country=GB&city=London&seed=gb-london-api&requestId=gb-london-api', {}, {
+      ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick }
+    });
+    const payload = await response.json() as { data?: { result?: GeneratedBundle }; error?: { code?: string } };
+    expect(response.status, JSON.stringify(payload)).toBe(200);
+    expect(payload.data?.result?.address.countryCode).toBe('GB');
+    expect(payload.data?.result?.address.components.locality).toBe('London');
+  });
+
   it('uses the unified database selector before legacy country-specific queries', async () => {
     const address = eligibleAddresses('US', true, new Date('2026-01-01T00:00:00Z'))[0];
     const pick = vi.fn(async () => ({
@@ -335,6 +407,104 @@ describe('pool-only and IP address generation', () => {
     }));
   });
 
+  it('gives batch generation its own concurrency budget', async () => {
+    const base = eligibleAddresses('US', true, new Date('2026-07-16T00:00:00Z'))[0];
+    const pick = vi.fn(async ({ seed }: { seed: string }) => ({
+      ready: true as const,
+      result: { address: { ...base, id: `pool-v2-${seed}` }, source: 'address-pool-v2' as const, eligibleCount: 10_000 }
+    }));
+    let interactiveHeld = 0;
+    let batchHeld = 0;
+    const interactive = {
+      tryAcquire: () => { interactiveHeld += 1; return true; },
+      release: () => { interactiveHeld = Math.max(0, interactiveHeld - 1); }
+    };
+    const batch = {
+      tryAcquire: () => { batchHeld += 1; return batchHeld <= 6; },
+      release: () => { batchHeld = Math.max(0, batchHeld - 1); }
+    };
+    const response = await app.request('/api/v1/generate/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: 5, filters: { country: 'US' }, options: { unique: true, seed: 'slot-fairness' } })
+    }, {
+      ...mockBindings,
+      GENERATION_SLOT: interactive,
+      BATCH_GENERATION_SLOT: batch,
+      RANDOM_ADDRESS_SERVICE: { pick }
+    });
+    const payload = await response.json() as { data?: { returnedCount?: number }; error?: { code?: string } };
+    expect(response.status, JSON.stringify(payload)).toBe(200);
+    expect(payload.data?.returnedCount).toBe(5);
+    expect(interactiveHeld).toBe(0);
+    expect(batchHeld).toBe(0);
+  });
+
+  it('does not return a partial success when a later batch generation fails', async () => {
+    const base = eligibleAddresses('US', true, new Date('2026-01-01T00:00:00Z'))[0];
+    let calls = 0;
+    const pick = vi.fn(async ({ seed }: { seed: string }) => {
+      calls += 1;
+      if (calls > 4) throw Object.assign(new Error('database connection lost'), { code: 'ECONNRESET' });
+      return {
+        ready: true as const,
+        result: { address: { ...base, id: `pool-v2-${seed}` }, source: 'address-pool-v2' as const, eligibleCount: 10_000 }
+      };
+    });
+    const response = await app.request('/api/v1/generate/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: 5, filters: { country: 'US' }, options: { unique: true, seed: 'partial-failure-seed' } })
+    }, { ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick } });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'DATABASE_UNAVAILABLE' } });
+  });
+
+  it('stops a batch request when the client aborts while generations are in flight', async () => {
+    const base = eligibleAddresses('US', false, new Date('2026-01-01T00:00:00Z'))[0];
+    const controller = new AbortController();
+    const waiters: Array<() => void> = [];
+    let started = 0;
+    let releaseStarted!: () => void;
+    const allStarted = new Promise<void>((resolve) => { releaseStarted = resolve; });
+    const pick = vi.fn(async () => {
+      started += 1;
+      if (started === 4) releaseStarted();
+      await new Promise<void>((resolve) => waiters.push(resolve));
+      return { ready: true as const, result: { address: base, source: 'address-pool-v2' as const, eligibleCount: 1 } };
+    });
+    const request = app.request('/api/v1/generate/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+      body: JSON.stringify({ count: 3, filters: { country: 'US' }, options: { seed: 'abort-seed' } })
+    }, { ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick } });
+    await allStarted;
+    controller.abort();
+    const response = await request;
+    expect(response.status).toBe(499);
+    expect(started).toBe(4);
+    waiters.forEach((resolve) => resolve());
+  });
+
+  it.each(['57P01', '53300', '57014'] as const)('maps transient database error %s to service unavailable', async (code) => {
+    const pick = vi.fn(async () => { throw Object.assign(new Error('database unavailable'), { code }); });
+    const response = await app.request('/api/v1/generate?country=US', {}, {
+      ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick }
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'DATABASE_UNAVAILABLE' } });
+  });
+
+  it('returns a typed busy response when batch generation has no global slot', async () => {
+    const response = await app.request('/api/v1/generate/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: 1, filters: { country: 'US' } })
+    }, {
+      ...mockBindings,
+      GENERATION_SLOT: { tryAcquire: () => false, release: vi.fn() }
+    });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ error: { code: 'GENERATION_BUSY' } });
+  });
+
   it('rejects batch sizes above the public limit', async () => {
     const response = await app.request('/api/v1/generate/batch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -351,6 +521,55 @@ describe('pool-only and IP address generation', () => {
     const payload = await response.json() as { error: { code: string } };
     expect(response.status).toBe(404);
     expect(payload.error.code).toBe('NO_POOL_COVERAGE');
+  });
+
+  it('serves catalog alternate-name shortcuts through the published pool', async () => {
+    const base = eligibleAddresses('ES', false, new Date('2026-01-01T00:00:00Z'))[0];
+    const pick = vi.fn(async ({ filters }: { filters: { city?: string } }) => ({
+      ready: true as const,
+      result: {
+        address: { ...base, id: `pool-v2-${filters.city}`, components: { ...base.components, locality: filters.city } },
+        source: 'address-pool-v2' as const,
+        eligibleCount: 1
+      }
+    }));
+    const response = await app.request('/api/v1/generate?country=ES&residential=false&city=Val%C3%A8ncia&requestId=alias-city', {}, {
+      ...mockBindings,
+      ADDRESS_DB: { prepare: () => ({ bind() { return this; }, all: async () => ({ results: [] }), first: async () => null }) },
+      RANDOM_ADDRESS_SERVICE: { pick }
+    });
+    const payload = await response.json() as { data?: { result?: GeneratedBundle }; error?: { code?: string } };
+    expect(response.status, JSON.stringify(payload)).toBe(200);
+    expect(payload.data?.result?.address.components.locality).toBe('València');
+  });
+
+  it('relaxes a catalog region that blocks an otherwise published city', async () => {
+    const base = eligibleAddresses('US', true, new Date('2026-07-16T00:00:00Z'))[0];
+    const pick = vi.fn(async ({ filters }: { filters: { region?: string; city?: string } }) => {
+      if (filters.region) return { ready: true as const };
+      return {
+        ready: true as const,
+        result: {
+          address: { ...base, id: 'pool-v2-region-fallback', components: { ...base.components, locality: filters.city || '', admin1: 'Texas' } },
+          source: 'address-pool-v2' as const,
+          eligibleCount: 1
+        }
+      };
+    });
+    const response = await app.request('/api/v1/generate?country=US&residential=false&region=Rh%C3%B4ne&city=Dallas&requestId=region-fallback', {}, {
+      ...mockBindings,
+      ADDRESS_DB: { prepare: () => ({ bind() { return this; }, all: async () => ({ results: [] }), first: async () => null }) },
+      RANDOM_ADDRESS_SERVICE: { pick }
+    });
+    expect(pick).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ region: 'Rhône', city: 'Dallas' })
+    }));
+    const payload = await response.json() as {
+      data?: { filterMatchLevel?: string; filters?: { region?: string; city?: string }; result?: GeneratedBundle };
+      error?: { code?: string };
+    };
+    expect(response.status, JSON.stringify(payload)).toBe(404);
+    expect(payload.error?.code).toBe('NO_POOL_COVERAGE');
   });
 
   it('does not query a live address provider for an explicit IP-region request', async () => {

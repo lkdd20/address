@@ -338,13 +338,94 @@ try {
   await providerRow().getByRole('button', { name: '停用', exact: true }).waitFor();
 
   const translationPanel = page.locator('.admin-panel').filter({ has: page.getByRole('heading', { name: '在线翻译', exact: true }) });
+  await translationPanel.getByText(/有道按量收费.*项目限额不代表供应商免费额度/u).waitFor();
+  await translationPanel.getByText(/在线服务按下方配置的优先级执行.*可能限流或不可用/u).waitFor();
   assert.equal(await translationPanel.getByRole('switch', { name: '启用谷歌翻译', exact: true }).count(), 1);
   assert.equal(await translationPanel.locator('input[name=googleTranslationEnabled]').count(), 0);
-  await translationPanel.getByText('未配置', { exact: true }).waitFor();
+  await translationPanel.getByText('未配置', { exact: true }).first().waitFor();
   assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 0);
+  const originalViewport = page.viewportSize();
+  const translationConsoleErrors = [];
+  const onTranslationConsole = (message) => { if (message.type() === 'error') translationConsoleErrors.push(message.text()); };
+  page.on('console', onTranslationConsole);
+  for (const [, label, fee] of [
+    ['zh-CN', '简体中文', /有道按量收费.*项目限额不代表供应商免费额度/u],
+    ['en', 'English', /Youdao is usage-based.*not free-credit guarantees/u],
+    ['zh-TW', '繁體中文', /有道按量收費.*專案限額不代表供應商免費額度/u]
+  ]) {
+    await selectLocale(page, label);
+    for (const viewport of [{ width: 1440, height: 960 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      const settings = page.locator('.translation-settings');
+      await settings.getByText(fee).waitFor();
+      await settings.getByText(/Cloud Translation/u).waitFor();
+      const addButton = settings.locator('.translation-provider:not(.deepl-provider):not(.openai-provider) .translation-provider-header button');
+      await addButton.click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByText(fee).waitFor();
+      assert.equal(await dialog.locator('input[name=youdaoAppKey]').inputValue(), '');
+      assert.equal(await dialog.locator('input[name=youdaoAppSecret]').getAttribute('type'), 'password');
+      const layout = await dialog.evaluate((element) => ({
+        overflowBeyondLayoutFloor: document.documentElement.scrollWidth > Math.max(window.innerWidth,
+          parseFloat(getComputedStyle(document.body).minWidth) || 0),
+        dialogOverflow: element.scrollWidth > element.clientWidth,
+        dialogOutsideViewport: element.getBoundingClientRect().left < 0 || element.getBoundingClientRect().right > window.innerWidth,
+        noteFontSize: parseFloat(getComputedStyle(element.querySelector('.translation-notice')).fontSize)
+      }));
+      assert.equal(layout.overflowBeyondLayoutFloor, false, JSON.stringify({ viewport, layout }));
+      assert.equal(layout.dialogOverflow, false);
+      assert.equal(layout.dialogOutsideViewport, false);
+      assert.ok(layout.noteFontSize >= 12);
+      await dialog.getByRole('button').last().focus();
+      await page.keyboard.press('Tab');
+      assert.equal(await dialog.getByRole('button').first().evaluate((element) => element === document.activeElement), true);
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      assert.equal(await addButton.evaluate((element) => element === document.activeElement), true);
+      const addDeepL = settings.locator('.deepl-provider .translation-provider-header button');
+      await addDeepL.click();
+      const deeplDialog = page.getByRole('dialog');
+      await deeplDialog.getByText(/DeepL API Free/u).waitFor();
+      assert.equal(await deeplDialog.locator('input[name=secret]').inputValue(), '');
+      assert.equal(await deeplDialog.locator('input[name=secret]').getAttribute('type'), 'password');
+      assert.equal(await deeplDialog.locator('input[name=quotaLimit]').inputValue(), '500000');
+      await deeplDialog.locator('input[name=quotaLimit]').fill('1000000');
+      assert.equal(await deeplDialog.locator('select[name=quotaPeriod]').count(), 0);
+      assert.equal(await deeplDialog.evaluate((element) => element.scrollWidth > element.clientWidth), false);
+      await page.keyboard.press('Escape');
+      await deeplDialog.waitFor({ state: 'detached' });
+      assert.equal(await addDeepL.evaluate((element) => element === document.activeElement), true);
+      const addOpenAI = settings.locator('.openai-provider .translation-provider-header button');
+      await addOpenAI.click();
+      const openAIDialog = page.getByRole('dialog');
+      await openAIDialog.getByText(/OpenAI.*Chat Completions/u).waitFor();
+      assert.equal(await openAIDialog.locator('input[name=apiKey]').getAttribute('type'), 'password');
+      assert.equal(await openAIDialog.locator('input[name=baseUrl]').inputValue(), '');
+      assert.equal(await openAIDialog.locator('input[name=model]').inputValue(), '');
+      assert.equal(await openAIDialog.locator('input[name=reasoningEffort]').inputValue(), 'low');
+      assert.equal(await openAIDialog.locator('input[name=maxTokens]').inputValue(), '8192');
+      assert.equal(await openAIDialog.locator('input[name=translationPriority]').inputValue(), '10');
+      assert.equal(await openAIDialog.locator('textarea[name=translationPrompt]').count(), 1);
+      const openAILayout = await openAIDialog.evaluate((element) => ({
+        dialogOverflow: element.scrollWidth > element.clientWidth,
+        dialogOutsideViewport: element.getBoundingClientRect().left < 0 || element.getBoundingClientRect().right > window.innerWidth
+      }));
+      assert.equal(openAILayout.dialogOverflow, false);
+      assert.equal(openAILayout.dialogOutsideViewport, false);
+      await page.keyboard.press('Escape');
+      await openAIDialog.waitFor({ state: 'detached' });
+      assert.equal(await addOpenAI.evaluate((element) => element === document.activeElement), true);
+    }
+  }
+  page.off('console', onTranslationConsole);
+  assert.deepEqual(translationConsoleErrors, []);
+  console.log('translation cost warnings passed: 3 locales, desktop and mobile dialogs, keyboard, console and existing layout floor');
+  await page.setViewportSize(originalViewport);
+  await selectLocale(page, '简体中文');
   const createYoudao = async (label, appKey, appSecret) => {
     await translationPanel.getByRole('button', { name: '添加密钥', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '添加密钥', exact: true });
+    await dialog.getByText(/若不接受费用，请勿添加或启用凭据/u).waitFor();
     await dialog.locator('input[name=label]').fill(label);
     await dialog.locator('input[name=youdaoAppKey]').fill(appKey);
     await dialog.locator('input[name=youdaoAppSecret]').fill(appSecret);

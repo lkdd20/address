@@ -37,6 +37,15 @@ describe('production blue-green deployment', () => {
     }
     expect(deployClient).not.toContain('init-compose.sh');
   });
+
+  it('loads provider authorization settings into the production sync singleton', () => {
+    const start = overlay.indexOf('  sync:');
+    const remainder = overlay.slice(start + 3);
+    const relativeEnd = remainder.search(/\n  [a-z][a-z-]*:/u);
+    const block = overlay.slice(start, relativeEnd < 0 ? undefined : start + 3 + relativeEnd);
+    expect(block).toMatch(/env_file:\s*\n\s+- \.\/config\/address\.env/u);
+  });
+
   it('keeps the isolated verification stack in a separate Compose project', () => {
     expect(isolatedOverlay).toMatch(/^name: address-test$/mu);
   });
@@ -97,6 +106,17 @@ describe('production blue-green deployment', () => {
     expect(compose).toMatch(/sync:[\s\S]*?command: \[node, node_modules\/tsx\/dist\/cli\.mjs, server\/sync\/index\.mjs\]/u);
     expect(deploy).toContain('stop -t 5700');
     expect(deploy).toContain('compose up -d --no-deps --wait --wait-timeout 6000 sync');
+  });
+
+  it('allows bounded production initialization without replacing the real sync readiness check', () => {
+    const sync = overlay.slice(overlay.indexOf('\n  sync:'), overlay.indexOf('\nsecrets:'));
+    expect(sync).toMatch(/healthcheck:\s*\n\s+start_period: 3m/u);
+    expect(sync).not.toMatch(/\b(?:test|disable|retries|interval|timeout):/u);
+    const baseSync = compose.slice(compose.indexOf('\n  sync:'), compose.indexOf('\nsecrets:'));
+    expect(baseSync).toContain("fetch('http://127.0.0.1:8791/healthz')");
+    expect(baseSync).toContain('interval: 15s');
+    expect(baseSync).toContain('timeout: 5s');
+    expect(baseSync).toContain('retries: 8');
   });
 
   it('uses an internal sync alias that cannot collide with the isolated stack on shared egress', () => {

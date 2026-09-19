@@ -59,8 +59,8 @@ describe('China map community providers', () => {
     expect(values.candidates.map((value) => value.providerPoiId)).toEqual(['exact']);
     expect(values.rawCount).toBe(3);
     expect(requested).toContain('types=120302');
-    expect(requested).toContain('city_limit=true');
-    expect(requested).toContain('region=110105');
+    expect(requested).toContain('citylimit=true');
+    expect(requested).toContain('city=110105');
     expect(requested).not.toContain('keywords=');
   });
 
@@ -74,7 +74,7 @@ describe('China map community providers', () => {
     await fetchTencentCommunities('北京市东城区', 1, 'secret', record({ status: 0, data: [] }), undefined, '东华门街道');
     await fetchBaiduCommunities('北京市东城区', 1, 'secret', record({ status: 0, results: [] }), undefined, '东华门街道');
     expect(urls[0]).toContain(`keywords=${encodeURIComponent('东华门街道')}`);
-    expect(urls[0]).toContain('region=110101');
+    expect(urls[0]).toContain('city=110101');
     expect(urls[1]).toContain(`keyword=${encodeURIComponent('东华门街道住宅小区')}`);
     expect(urls[2]).toContain(`query=${encodeURIComponent('东华门街道住宅小区')}`);
   });
@@ -106,6 +106,10 @@ describe('China map community providers', () => {
       .rejects.toMatchObject({ outcome: 'quota', providerCode: '40000', quotaPeriod: 'month' });
     await expect(fetchBaiduCommunities('北京市', 1, 'secret', response({ status: 4, message: 'quota' })))
       .rejects.toMatchObject({ outcome: 'quota' });
+    await expect(fetchBaiduCommunities('北京市', 1, 'secret', response({ status: 401, message: 'concurrency' })))
+      .rejects.toMatchObject({ outcome: 'qps', providerCode: '401' });
+    await expect(fetchBaiduCommunities('北京市', 1, 'secret', response({ status: 210, message: 'IP validation' })))
+      .rejects.toMatchObject({ outcome: 'auth', providerCode: '210' });
     await expect(fetchTencentCommunities('北京市', 1, 'secret', response({ status: 121, message: 'quota' })))
       .rejects.toMatchObject({ outcome: 'quota' });
   });
@@ -162,11 +166,16 @@ describe('China map community providers', () => {
   });
 
   it('treats a non-JSON upstream page as a temporary network failure', async () => {
-    await expect(fetchAmapCommunities('110105', 1, 'secret', async () => new Response('<html>blocked</html>', { status: 200 })))
+    let requests = 0;
+    await expect(fetchAmapCommunities('110105', 1, 'secret', async () => {
+      requests += 1;
+      return new Response('<html>blocked</html>', { status: 200 });
+    }))
       .rejects.toMatchObject({ outcome: 'network', message: 'INVALID_JSON' });
+    expect(requests).toBe(1);
   });
 
-  it('falls back from an Amap v5 HTML response to v3 with the same key', async () => {
+  it('uses one Amap v3 request for a direct page with the maximum page size', async () => {
     const urls: URL[] = [];
     const result = await fetchAmapCommunities('110105', 2, 'same-secret', async (input) => {
       const url = new URL(String(input));
@@ -177,11 +186,13 @@ describe('China map community providers', () => {
         pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105'
       }] });
     });
-    expect(urls.map((url) => url.pathname)).toEqual(['/v5/place/text', '/v3/place/text']);
+    expect(urls.map((url) => url.pathname)).toEqual(['/v3/place/text']);
     expect(urls.every((url) => url.searchParams.get('key') === 'same-secret')).toBe(true);
-    expect(urls[1].searchParams.get('city')).toBe('110105');
-    expect(urls[1].searchParams.get('citylimit')).toBe('true');
-    expect(urls[1].searchParams.get('page')).toBe('2');
+    expect(urls[0].searchParams.get('city')).toBe('110105');
+    expect(urls[0].searchParams.get('citylimit')).toBe('true');
+    expect(urls[0].searchParams.get('page')).toBe('2');
+    expect(urls[0].searchParams.get('offset')).toBe('25');
+    expect(urls[0].searchParams.get('extensions')).toBe('all');
     expect(result.candidates).toEqual([expect.objectContaining({ providerPoiId: 'fallback-poi' })]);
   });
 

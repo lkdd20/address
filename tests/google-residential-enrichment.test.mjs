@@ -2,9 +2,10 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  evaluateGoogleResidentialResult, reconcileGoogleProgressOutput, requestGoogleReverse, selectGoogleResidentialResult
+  evaluateGoogleAddressResults, evaluateGoogleResidentialResult, reconcileGoogleProgressOutput, requestGoogleReverse, selectGoogleResidentialResult
 } from '../server/sync/google-residential-enrichment.mjs';
 import { executeOperation, operationDefinitions } from '../server/credential-broker/operations.mjs';
+import { evaluateMapplsAddressResults } from '../server/sync/mappls-residential-enrichment.mjs';
 
 const seed = {
   building_id: 'way/123',
@@ -38,6 +39,73 @@ const response = (overrides = {}) => ({
 });
 
 describe('Google residential enrichment', () => {
+  it('rejects generic Google results outside the seed geometry or conflicting with sourced administration', () => {
+    const road = { ...seed, building_id: undefined, building_class: undefined, match_level: 'street',
+      admin1: 'กรุงเทพมหานคร', locality: 'กรุงเทพมหานคร' };
+    expect(evaluateGoogleAddressResults(response({ location: { latitude: 13.8, longitude: 100.6 } }), road, 'TH').records).toEqual([]);
+    const conflicting = response();
+    conflicting.results[0].addressComponents = conflicting.results[0].addressComponents.map((entry) =>
+      entry.types.includes('locality') ? { ...entry, longText: 'เชียงใหม่' } : entry);
+    expect(evaluateGoogleAddressResults(conflicting, road, 'TH').records).toEqual([]);
+  });
+
+  it('does not turn a Mappls premise without a residential seed into a residential claim', () => {
+    const result = { area: 'India', state: 'Delhi', city: 'New Delhi', district: 'Central Delhi',
+      lat: 28.632, lng: 77.219, pincode: '110001' };
+    const source = { id: 'node/fixture', number: '12', street: 'MG Road', latitude: 28.632, longitude: 77.219 };
+    expect(evaluateMapplsAddressResults({ responseCode: 200, results: [result] }, source).records)
+      .toEqual([expect.objectContaining({ number: '12', property_type: 'unknown' })]);
+  });
+  it('keeps Mappls street results only when they match the source road and administrative facts', () => {
+    const road = { id: 'way/road', match_level: 'street', street: 'MG Road', latitude: 28.632, longitude: 77.219,
+      admin1: 'Delhi' };
+    const result = { area: 'India', state: 'Delhi', city: 'New Delhi', district: 'Central Delhi',
+      street: 'MG Road', lat: 28.632, lng: 77.219, pincode: '110001' };
+    expect(evaluateMapplsAddressResults({ responseCode: 200, results: [result,
+      { ...result, street: 'Other Road' }, { ...result, state: 'Maharashtra' }, { ...result, area: 'Nepal' }
+    ] }, road).records).toEqual([expect.objectContaining({ match_level: 'street', street: 'MG Road',
+      number: '', postcode: '', property_type: 'unknown' })]);
+  });
+
+  it('keeps all usable route results without borrowing residential evidence or postcodes', () => {
+    const route = response({ types: ['route'], granularity: 'GEOMETRIC_CENTER',
+      addressComponents: response().results[0].addressComponents.filter(({ types }) =>
+        !types.includes('street_number') && !types.includes('postal_code')),
+      postalAddress: { regionCode: 'TH' }
+    }).results[0];
+    const records = evaluateGoogleAddressResults({ results: [route,
+      { ...route, placeId: 'another-route', addressComponents: route.addressComponents.map((entry) =>
+        entry.types.includes('route') ? { ...entry, longText: 'ถนนตัวอย่าง' } : entry) },
+      { ...route, placeId: 'partial-route', partialMatch: true },
+      { ...route, placeId: 'foreign-route', postalAddress: { regionCode: 'VN' } }
+    ] }, seed, 'TH').records;
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ match_level: 'street', number: '', postcode: '', property_type: 'unknown' });
+    expect(records.every((record) => !record.residential_building_id && !record.residential_evidence)).toBe(true);
+    expect(evaluateGoogleAddressResults({ results: [route] }, seed, 'CN').records).toEqual([]);
+  });
+
+  it('preserves real premises without assuming a missing postcode or residential use', () => {
+    const payload = response({ postalAddress: { regionCode: 'TH' },
+      addressComponents: response().results[0].addressComponents.filter(({ types }) => !types.includes('postal_code')) });
+    const records = evaluateGoogleAddressResults(payload, { ...seed, building_id: undefined,
+      building_class: undefined, id: 'way/road', match_level: 'street' }, 'TH').records;
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ match_level: 'premise', number: '99', postcode: '', property_type: 'unknown' });
+  });
+
+  it('retains a valid residential result with unambiguous same-response administrative supplementation', () => {
+    const original = response().results[0];
+    const incomplete = { ...original, addressComponents: original.addressComponents
+      .filter(({ types }) => !types.includes('sublocality_level_1')) };
+    const political = { ...original, placeId: 'district-result', types: ['political'] };
+    const payload = { results: [incomplete, political] };
+    expect(evaluateGoogleResidentialResult(payload, seed, 'TH').record).not.toBeNull();
+    expect(evaluateGoogleAddressResults(payload, seed, 'TH').records).toEqual([
+      expect.objectContaining({ number: '99', district: 'ปทุมวัน', property_type: 'apartment' })
+    ]);
+  });
+
   it('accepts only a complete rooftop address aligned to the residential building', () => {
     expect(selectGoogleResidentialResult(response(), seed, 'TH')).toMatchObject({
       number: '99', postcode: '10330', property_type: 'apartment',
@@ -86,6 +154,23 @@ describe('Google residential enrichment', () => {
       postalAddress: { regionCode: 'TH' }
     }), seed, 'TH');
     expect(evaluation).toEqual({ record: null, reason: 'missing_postcode' });
+  });
+
+  it('does not borrow a missing postcode from a conflicting city in the same response', () => {
+    const detailed = response().results[0];
+    const incomplete = { ...detailed, postalAddress: { regionCode: 'TH' },
+      addressComponents: detailed.addressComponents.filter(({ types }) => !types.includes('postal_code')) };
+    const otherCity = { ...detailed, placeId: 'other-city', types: ['postal_code'],
+      addressComponents: detailed.addressComponents.map((entry) => entry.types.includes('locality')
+        ? { ...entry, longText: 'เมืองเชียงใหม่' } : entry) };
+    expect(evaluateGoogleResidentialResult({ results: [incomplete, otherCity] }, seed, 'TH').record).toBeNull();
+  });
+
+  it('rejects conflicting valid postcodes and unsupported countries', () => {
+    expect(evaluateGoogleResidentialResult(response({
+      postalAddress: { regionCode: 'TH', postalCode: '10110' }
+    }), seed, 'TH').record).toBeNull();
+    expect(evaluateGoogleResidentialResult(response(), seed, 'ZZ').record).toBeNull();
   });
 
   it('maps Turkey administrative level four to the required district field', () => {
@@ -140,7 +225,7 @@ describe('Google residential enrichment', () => {
       placeId: 'google-postal-area-1',
       types: ['postal_code'],
       addressComponents: detailed.addressComponents.filter(({ types }) =>
-        types.some((type) => ['sublocality_level_1', 'postal_code', 'country'].includes(type))),
+        types.some((type) => ['administrative_area_level_1', 'locality', 'sublocality_level_1', 'postal_code', 'country'].includes(type))),
       postalAddress: { regionCode: 'TH', postalCode: '10330' },
       granularity: 'APPROXIMATE',
       location: { latitude: 13.75, longitude: 100.5 }
@@ -258,6 +343,18 @@ describe('Google residential enrichment', () => {
     try {
       await expect(reconcileGoogleProgressOutput(output, { nextIndex: 1, accepted: 1 })).resolves.toBe(true);
       expect((await readFile(output, 'utf8')).trim().split('\n')).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a checkpoint whose accepted output is missing', async () => {
+    const directory = resolve('.data-cache', `google-progress-invalid-${process.pid}-${Date.now()}`);
+    const output = resolve(directory, 'records.jsonl');
+    await mkdir(directory, { recursive: true });
+    try {
+      await expect(reconcileGoogleProgressOutput(output, { nextIndex: 1, accepted: 1 }))
+        .rejects.toMatchObject({ code: 'SOURCE_STATE_INVALID' });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
