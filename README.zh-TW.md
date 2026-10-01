@@ -1,179 +1,198 @@
-<p align="center"><img src="public/favicon.svg" width="88" height="88" alt="Address Logo" /></p>
-<h1 align="center">Address</h1>
-<p align="center"><strong>基於 PostgreSQL 的自託管真實位址產生器</strong></p>
+<div align="center">
 
-<p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
-</p>
+<img src="public/favicon.svg" width="96" height="96" alt="Address" />
 
-<p align="center">
-  <a href="https://github.com/daimon3332/address/actions/workflows/ci.yml"><img src="https://github.com/daimon3332/address/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&amp;logoColor=white" alt="Node.js 24" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/Code-MIT-blue.svg" alt="MIT License" /></a>
-  <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/線上展示-address.333186.xyz-1769e0" alt="線上展示" /></a>
-</p>
+# Address
 
-**Address 從官方登記和地圖資料產生真實位址。** 中國使用住宅小區位址；其他國家也支援真實街道級位址，已有的真實門牌保留，不編造缺失的樓棟或室號。來源座標可用於 Google Maps 或高德地圖定位。
+**自託管的真實地址生成服務：資料來自官方登記與開放地圖，覆蓋 27 個國家和地區**
 
-## 核心功能
+[English](README.md) · [简体中文](README.zh-CN.md) · 繁體中文
 
-- 設定 27 個國家和地區，依實際行政結構提供州省、城市、區縣及郵遞區號篩選。
-- 嚴格篩選：所選範圍沒有合格記錄時回傳錯誤，不會偷偷切換到其他地區。
-- 從目前篩選範圍的全部合格位址快速隨機選擇，不會重複讀取資料庫前幾筆。
-- 支援原文、英文、簡體中文、繁體中文、日語、韓語、德語、法語、西班牙語及葡萄牙語展示路徑。
-- 位址語言和資料語言分別記憶；瀏覽器首次開啟預設 English，產生和切換國家不會重設選擇。
-- 位址收藏保存在瀏覽器中，支援依大洲或國家分組與篩選、拖曳或序號排序、複製、刪除，以及跳轉 Google Maps 或高德地圖。
-- 每個國家可設定熱門行政區、熱門城市與特殊區域；美國包含無州級銷售稅州。
-- 提供公開覆蓋監控，以及管理員儀表板、位址資料規則、同步佇列與同步歷史、快捷區域、平台憑據、存取控制、黑名單與 API Token 頁面。
-- JSON API 提供健康檢查、國家、可用性、地區選項、搜尋、位址/資料產生、批次產生與監控介面，並包含 Python、cURL 與 JavaScript 範例。
-- 執行階段完全使用 PostgreSQL，包含連線池、交易發布、地區索引與預先建立的隨機位址索引。
+[![CI](https://github.com/daimon3332/address/actions/workflows/ci.yml/badge.svg)](https://github.com/daimon3332/address/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/Docker-daimon23%2Faddress-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/daimon23/address)
+[![Node.js](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Demo](https://img.shields.io/badge/線上演示-address.333186.xyz-2d6cec)](https://address.333186.xyz)
 
-## 支援範圍
+</div>
+
+<img src="image/webui-cn-overview.png" alt="Address 生成介面" />
+
+## 簡介
+
+Address 返回的是真實存在的地址，而不是隨機拼接的字串。每一條地址都來自官方地址登記、開放地圖資料或經過校驗的地理編碼結果，並帶有來源、精度和座標。缺失的欄位保持為空，不會被編造。
+
+適合用於表單與物流流程測試、地址格式校驗、地理資料演示等需要「看起來真實、也確實真實」的地址場景。
+
+## 特性
+
+- **27 個國家和地區**：按各國真實的行政層級提供州省、城市、區縣和郵遞區號篩選；所選範圍沒有資料時直接報錯，不會悄悄換成別的地區。
+- **來源可追溯**：中國使用住宅小區地址；其他國家同時提供門牌級和街道級地址，並明確標註精度與住宅證據。
+- **十種顯示語言**：原文、英文、簡體中文、繁體中文、日語、韓語、德語、法語、西班牙語、葡萄牙語。
+- **全自動同步**：後臺持續從各資料來源增量同步，自帶有限重試、指數退避、額度等待和來源耗盡判定，不會無休止地重複失敗任務。
+- **管理後臺**：儀表盤、國家工作臺、同步歷史、快捷區域、平臺憑據、翻譯路由、訪問控制和 API 令牌。
+- **開放 API**：Bearer 鑑權的 JSON API，支援單條與批次生成、地區搜尋、覆蓋查詢和地址翻譯，並提供 OpenAPI 3.1 描述。
+- **一個檔案部署**：Docker Compose 一次拉起應用、PostgreSQL、遷移與同步服務，內部金鑰自動生成並持久化。
+
+## 快速開始
+
+### 前置條件
+
+- Linux（AMD64 或 ARM64）
+- Docker Engine 24+ 與 Docker Compose v2
+- 4 GB 記憶體（首次同步大型國家建議 8 GB 以上）
+
+### 使用 Docker Compose 部署
+
+```bash
+# 1. 建立部署目錄並下載 Compose 檔案
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
+
+# 2. 啟動全部服務
+docker compose up -d
+
+# 3. 確認服務就緒
+docker compose ps
+curl -fsS http://127.0.0.1:8787/api/v1/ready
+```
+
+啟動時會自動完成：
+
+- 在當前目錄下建立 `data/`、`runtime/` 等持久化目錄；
+- 生成資料庫密碼、配置加密金鑰和服務間令牌，儲存在 `data/secrets/`；
+- 執行資料庫遷移，然後啟動 API 與自動同步服務。
+
+### 首次登入
+
+1. 瀏覽器開啟 `http://127.0.0.1:8787/admin/`，使用初始密碼 `admin` 登入；
+2. 按提示立即修改管理員密碼；
+3. 在「訪問與安全」中決定是否開啟前端訪問密碼；
+4. 在「介面令牌」中建立 API 令牌，供外部程式呼叫。
+
+> 想在首次啟動前就使用自定義密碼，可以在 `docker compose up -d` 之前設定 `ADMIN_INITIAL_PASSWORD`。
+
+### 對外提供服務
+
+API 預設只監聽本機 `127.0.0.1:8787`。正式環境請放在 HTTPS 反向代理之後，並在 Compose 目錄建立 `.env`：
+
+```dotenv
+ALLOWED_ORIGINS=https://address.example.com
+TRUST_PROXY=true
+COOKIE_SECURE=true
+```
+
+Nginx / Caddy 配置示例、升級、備份與恢復見[部署文件](docs/DEPLOYMENT.zh-TW.md)。
+
+## 使用
+
+### 網頁
+
+開啟 `http://127.0.0.1:8787/`，選擇國家、地區和顯示語言即可生成地址。結果可複製、匯出、收藏，或直接在 Google 地圖 / 高德地圖中定位。
+
+### API
+
+```bash
+curl -fsS "http://127.0.0.1:8787/api/v1/generate?country=US&city=Seattle" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+```json
+{
+  "data": {
+    "country": "US",
+    "filters": { "city": "Seattle" },
+    "filterMatchLevel": "exact",
+    "result": {
+      "address": {
+        "formattedAddress": "4019 Aikins Avenue Southwest, Seattle, WA, 98116",
+        "matchLevel": "premise",
+        "propertyType": "residential",
+        "coordinates": { "latitude": 47.567944, "longitude": -122.40706 }
+      }
+    }
+  }
+}
+```
+
+響應已省略部分欄位。`matchLevel` 表示地址精度（`street` / `premise` / `subpremise`），`propertyType` 只有在存在獨立住宅證據時才為 `residential`。
+
+全部端點、參數和錯誤碼見 [API 文件](docs/API.zh-TW.md)。
+
+### 平臺金鑰（可選）
+
+沒有任何第三方金鑰也能執行，專案會使用無需授權的開放資料來源。中國地圖平臺、Google Geocoding、翻譯服務等金鑰只用於擴充特定國家的資料或啟用線上翻譯，在後臺「地圖金鑰」中新增即可。申請方式見 [API Key 配置](docs/API_KEYS.zh-TW.md)。
+
+## 截圖
+
+<table>
+  <tr><th>管理後臺 · 儀表盤</th><th>管理後臺 · 國家工作臺</th></tr>
+  <tr>
+    <td><img src="image/admin-dashboard.png" alt="管理後臺儀表盤" /></td>
+    <td><img src="image/admin-countries.png" alt="國家工作臺" /></td>
+  </tr>
+  <tr><th>國家詳情</th><th>翻譯憑據測試</th></tr>
+  <tr>
+    <td><img src="image/admin-country-detail.png" alt="國家詳情頁" /></td>
+    <td><img src="image/admin-translation-test.png" alt="OpenAI 相容介面測試" /></td>
+  </tr>
+  <tr><th>公開資料監控</th><th>中國地址生成</th></tr>
+  <tr>
+    <td><img src="image/webui-monitor.png" alt="公開資料監控" /></td>
+    <td><img src="image/webui-cn-address.png" alt="中國地址生成" /></td>
+  </tr>
+</table>
+
+## 支援的國家和地區
 
 | 區域 | 國家和地區 |
 |---|---|
-| 北美 | US、CA、MX |
-| 歐洲 | GB、DE、FR、IT、ES、NL、RU |
-| 東亞 | CN、HK、TW、JP、KR |
-| 東南亞 | SG、MY、TH、PH、VN |
-| 南亞 | IN |
-| 大洋洲 | AU |
-| 中東 | TR、SA |
-| 南美 | BR |
-| 非洲 | NG、ZA |
+| 北美 | 美國 US、加拿大 CA、墨西哥 MX |
+| 歐洲 | 英國 GB、德國 DE、法國 FR、義大利 IT、西班牙 ES、荷蘭 NL、俄羅斯 RU |
+| 東亞 | 中國 CN、中國香港 HK、中國臺灣 TW、日本 JP、韓國 KR |
+| 東南亞 | 新加坡 SG、馬來西亞 MY、泰國 TH、菲律賓 PH、越南 VN |
+| 南亞 | 印度 IN |
+| 大洋洲 | 澳大利亞 AU |
+| 中東 | 土耳其 TR、沙烏地阿拉伯 SA |
+| 南美 | 巴西 BR |
+| 非洲 | 奈及利亞 NG、南非 ZA |
 
-## 真實位址來源與欄位
+各國使用的資料來源、欄位來源與住宅證據見[資料來源說明](docs/data-sources.md)。
 
-下表列出既有來源提供的欄位和住宅證據。非中國街道級記錄不要求門牌或住宅證據，缺失的樓棟、室號留空；郵遞區號僅在已驗證且唯一時保留。所有記錄仍須通過來源、行政歸屬、語言和座標檢查，住宅證據僅用於住宅子集。
-
-| 國家/地區 | 目前位址資料來源 | 位址組成 | 真實/來源欄位 | 合成或補全欄位 | 住宅真實性依據 |
-|---|---|---|---|---|---|
-| 美國（US） | Overture Maps、Geofabrik OSM 州級分片 | 門牌、道路、城市、州、ZIP、座標 | 全部位址欄位及座標 | 無；僅規範格式 | OSM/Overture 明確住宅建築或用途 |
-| 加拿大（CA） | Statistics Canada 全國地址登記、Overture Maps、Geofabrik OSM | 門牌、道路、城市、省、郵遞區號、座標 | NAR 或地圖來源的位址欄位及座標 | 無；僅規範郵遞區號格式 | NAR 住宅建築用途或地圖來源明確住宅用途 |
-| 墨西哥（MX） | INEGI 全國位址框架；Geofabrik/Overture；同源歸檔補充名稱 | 門牌、道路、住區、市鎮、州、郵遞區號、座標 | INEGI 原始門牌、道路、住區、行政區、郵遞區號及座標 | 州/城市名稱可由同源記錄確定性映射；不產生位址 | INEGI `TIPODOM=VIVIENDA` |
-| 英國（GB） | Geofabrik OSM；Postcodes.io/ONS 僅核驗 | 單位/樓宇、門牌、道路、城鎮、郵遞區號、座標 | OSM 中存在的全部位址欄位及座標 | 無；僅規範格式 | OSM/建築資料明確住宅用途 |
-| 德國（DE） | Overture Maps、Geofabrik 16 州分片；OpenPLZ 輔助 | 門牌、道路、城市、郵遞區號、座標 | 全部位址欄位及座標 | 無；不補 Wohnung/Etage | 明確住宅建築或用途 |
-| 法國（FR） | CSTB BDNB 與 BAN 關聯資料、Overture Maps、Geofabrik 27 區域分片 | 門牌、道路、補充號、市鎮、郵遞區號、座標 | BDNB/BAN 或地圖來源的位址欄位及座標 | 無；僅規範格式 | BDNB 住宅用途及可靠 BAN 關聯，或地圖來源明確住宅用途 |
-| 義大利（IT） | Overture Maps、Geofabrik OSM | 門牌、道路、城市、省/大區、CAP、座標 | 全部位址欄位及座標 | 無；不補內部號 | 明確住宅建築或用途 |
-| 西班牙（ES） | Catastro INSPIRE 位址/建築資料、Overture Maps、Geofabrik OSM | 門牌、道路、市鎮、省、郵遞區號、座標 | Catastro 或地圖來源的位址欄位及座標 | 無；只保留來源樓梯/門號 | Catastro 住宅用途和住宅單元數，或地圖來源明確住宅用途 |
-| 荷蘭（NL） | Kadaster BAG（PDOK）及 Overture Maps | 門牌/字母/附加號、道路、城市、省、郵遞區號、座標 | BAG/來源全部位址欄位及座標 | 無；僅可逆組合門牌格式 | BAG 在用 `woonfunctie` 或 Overture 明確住宅用途 |
-| 俄羅斯（RU） | Geofabrik OSM | 門牌、道路、城市、聯邦主體、郵遞區號、座標 | 全部位址欄位及座標 | 無；不補 корпус/квартира | OSM 明確住宅建築 |
-| 中國（CN） | AreaCity/StatsGov；高德、百度、騰訊住宅社區 POI | 省、市、區縣、街道/道路門牌、社區、棟/單元/樓層/室、座標 | 行政區、社區名、道路門牌與平台座標 | 僅棟、單元、樓層、室號為合成欄位並標記 `synthetic`；不產生郵遞區號 | 嚴格住宅分類、行政區一致、數字門牌與機構黑名單門禁 |
-| 中國香港（HK） | 房委會公屋單位、屋宇署樓宇紀錄、ALS、Geofabrik/Overture | 單位/樓層、樓宇、門牌、街道、地點、18 區、地域、座標 | 公屋單位欄位或私人住宅樓宇欄位及座標；無通用郵遞區號 | 無 | 房委會住宅庫存，或屋宇署 `Residential/Composite` Tower |
-| 中國臺灣（TW） | 內政部實價登錄、中華郵政 3+3、地方政府門牌點、Geofabrik/Overture | 門牌、路街段巷弄、區鄉鎮市、縣市、郵遞區號、座標 | 住宅成交門牌、行政區、唯一精確匹配郵遞區號及座標 | 無；不以鄰近點補全 | 實價登錄住宅主要用途及住宅建築型態 |
-| 日本（JP） | 數位廳 ABR/Geolonia、日本郵便、PLATEAU/MLIT、Geofabrik OSM | 都道府縣、市區町村、町域/丁目、街區與住居號或地番、郵遞區號、座標 | ABR 位址欄位、唯一匹配的日本郵便郵遞區號及來源座標 | 無；建築名和室號缺失時留空 | 位址點精確落入 PLATEAU/OSM 住宅建築面 |
-| 韓國（KR） | K-apt、Geoapify、Juso/OpenAddresses 歸檔、Geofabrik/Overture | 市/道、市/郡/區、邑面洞、道路、建築號、郵遞區號、座標 | K-apt 地番、Juso 欄位及嚴格匹配的 Geoapify 道路/門牌 | 無；未知郵遞區號留空，不產生棟、單元或室號 | K-apt 官方共同住宅，或 Juso 點與住宅建築相交；Geoapify 本身不是住宅證據 |
-| 新加坡（SG） | HDB Property Information、Existing Building、OneMap、Geofabrik OSM | 樓棟號、道路、規劃城鎮、6 位郵遞區號、座標 | HDB 樓棟、道路、城鎮；OneMap 匹配的真實道路、門牌及座標 | 只保留來源欄位，未知郵遞區號留空，不產生門牌 | HDB `residential=Y` 且住宅單位數大於零，或 OSM 住宅建築；OneMap 本身不是住宅證據 |
-| 馬來西亞（MY） | Geofabrik OSM 馬來西亞分片 | 單位/地塊、樓宇、道路、縣區、城市、州、郵遞區號、座標 | OSM 中存在的全部位址欄位及座標 | 無；不補單位 | OSM 明確住宅建築並排除商業 POI |
-| 泰國（TH） | DPT 官方建築圖層、Geofabrik OSM、Google Geocoding 補全 | 門牌、村、道路、分區、縣區、府、郵遞區號、座標 | DPT 或 OSM 的位址、行政區、郵遞區號及幾何欄位 | 無；僅將建築面轉換為內部點並規範格式 | DPT 住宅建築分類或 OSM 明確住宅建築 |
-| 菲律賓（PH） | Geofabrik OSM、Google Geocoding、PHLPost；PSA PSGC 用於行政核驗 | 門牌、道路、Barangay、城市/市鎮、省、郵遞區號、座標 | OSM 位址欄位及座標 | 缺郵遞區號時僅依 PHLPost 省+城市/市鎮唯一匹配補全 | OSM 明確住宅建築 |
-| 越南（VN） | Geofabrik OSM；Google Geocoding 補全 | 門牌、道路、坊/社、省級城市/省、郵遞區號、座標 | 來源欄位及座標 | 無；僅接受來源五位郵遞區號 | OSM 明確住宅建築 |
-| 土耳其（TR） | Geofabrik OSM、Google Geocoding、既有伊茲密爾 Building Identity 資料 | 門牌、道路、區、省、郵遞區號、座標 | 全部來源位址欄位及座標 | 無；僅規範格式 | OSM 住宅標籤或官方 `Konut` 用途 |
-| 沙烏地阿拉伯（SA） | Geofabrik OSM、Google Geocoding；可選 OpenAddresses 全國位址點 | 樓宇/門牌、道路、區、城市、郵遞區號、座標 | 全國位址點的位址欄位及座標 | 無；僅規範格式 | 位址點與明確住宅建築面精確關聯 |
-| 印度（IN） | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 補全 | 門牌、道路/地點、縣區、城市、邦、PIN、座標 | OSM 道路與來源門牌；嚴格匹配的地理編碼位址、行政欄位與已知 PIN | 無；不補公寓或樓層 | OSM 明確住宅建築 |
-| 澳洲（AU） | Overture Maps、Geofabrik OSM | 單位、門牌、道路、郊區、州、郵遞區號、座標 | 全部來源位址欄位及座標 | 無；不補單位 | 明確住宅建築或用途；位址存在本身不作為住宅證據 |
-| 巴西（BR） | Geofabrik OSM | 門牌、道路、街區、城市、州、CEP、座標 | OSM 中存在的全部位址欄位及座標 | 無；不補 complemento | OSM 明確住宅建築 |
-| 奈及利亞（NG） | Geofabrik OSM；Google Geocoding 補全 | 門牌、道路、地區、城市、州、郵遞區號、座標 | 來源欄位及座標 | 無；不推算缺失欄位 | OSM 明確住宅建築 |
-| 南非（ZA） | eThekwini 官方位址與分區、Cape Town 官方地塊、Geofabrik OSM、SAPO | 單位、門牌、道路、郊區、城市、郵遞區號、座標 | 官方位址/地塊欄位、OSM 補充欄位、SAPO 唯一匹配郵遞區號及座標 | 無；不補單位 | 官方住宅 zoning 精確關聯，或 OSM 明確住宅建築 |
-
-更詳細的資料源版本、座標系、去重與發布門禁見[資料源文件](docs/data-sources.md)及[各國家/地區策略](docs/strategies/)。
-
-## 介面截圖
-
-<table>
-  <tr><th>美國產生介面</th><th>中國產生介面</th></tr>
-  <tr>
-    <td><img src="image/webui-us-overview.png" alt="美國產生介面" /></td>
-    <td><img src="image/webui-cn-overview.png" alt="中國產生介面" /></td>
-  </tr>
-</table>
-
-### 資料監控
-
-<img src="image/webui-monitor.png" alt="公開位址數量與行政區覆蓋監控" />
-
-### 管理員介面
-
-<table>
-  <tr><th>儀表板</th><th>位址資料</th></tr>
-  <tr>
-    <td><img src="image/admin-dashboard.png" alt="管理員儀表板" /></td>
-    <td><img src="image/admin-address-data.png" alt="位址資料管理" /></td>
-  </tr>
-  <tr><th>同步佇列</th><th>快捷區域</th></tr>
-  <tr>
-    <td><img src="image/admin-sync-queue.png" alt="同步佇列與完成規則" /></td>
-    <td><img src="image/admin-quick-locations.png" alt="附可用位址數量的快捷區域搜尋" /></td>
-  </tr>
-</table>
-
-<img src="image/admin-map-keys.png" alt="已完整遮罩的地圖金鑰與額度管理" />
-
-## 架構
+## 工作原理
 
 ```text
-Astro 靜態頁面 + React 介面
-             │
-             ▼
-       Hono Node.js API
-        ├─ PostgreSQL 位址與控制資料
-        ├─ 從 PostgreSQL 建立的隨機/篩選記憶體索引
-        └─ 本地格式化、資料產生與選用翻譯
+瀏覽器 ──► Astro + React 頁面
+              │
+              ▼
+          Hono API ──► PostgreSQL（地址池、行政目錄、控制資料）
+              │
+              └─ 預構建的隨機/篩選索引、本地格式化與翻譯
 
-同步監督程序
-        ├─ 可續跑的批次/API 適配器
-        ├─ 依國家及位址精度驗證欄位、語言和證據
-        ├─ PostgreSQL 交易發布
-        └─ 覆蓋統計與有界同步佇列
+同步服務 ──► 官方登記 / OpenStreetMap / Overture / 地圖平臺
+              │  校驗來源、行政歸屬、語言與座標
+              ▼
+          以國家為單位的事務釋出 ──► PostgreSQL
 ```
 
-## 全自動同步規則
-
-一個國家只有在所有已啟用規則都符合時才算完成：
-
-1. 合格位址總量達到目標；
-2. 最低行政層覆蓋率和每節點最低數量達標；
-3. 已設定的一級、二級行政區最低數量達標；
-4. 所有單節點覆蓋目標達標。
-
-只達到國家總量不能標記完成。若資料源已被證明耗盡，該國家仍顯示未完成，但不會重複進入執行佇列；只有來源或版本指紋變更後才重新評估。
-
-佇列包含有限重試、指數退避、額度/冷卻恢復時間、可續跑 checkpoint、無增長鎖存及連續失敗暫停，因此不會對同一個沒有變化的資料源無限循環。同步歷史記錄每個來源、耗時、結果與位址增量，過期同步產物由系統自動清理。中國在仍具備同步條件時擁有最高自動優先權。
-
-## 部署
-
-```bash
-mkdir address && cd address
-curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
-docker compose up -d
-```
-
-管理員初始密碼為 `admin`，前端密碼預設關閉。首次啟動前可直接在 `docker-compose.yml` 修改兩項初始值；使用預設管理員密碼登入後必須先修改密碼。
-
-完整說明見[部署文件](docs/DEPLOYMENT.zh-TW.md)。
-
-## 設定與 API Key
-
-- 前端密碼、管理員密碼、API Token、平台金鑰、額度與快捷區域均在管理員後台設定。
-- 平台金鑰預設為選用；只有選定同步策略需要時才必須設定。
-- 多個 Key 獨立輪換。目前 Key 失敗時先冷卻並嘗試其他 Key；全部不可用時等待最早恢復時間。
-- 各平台用途、官方申請入口和後台設定名稱見獨立的 [API Key 設定文件](docs/API_KEYS.zh-TW.md)。
+一個國家要同時滿足三條規則才算同步完成：有效地址總量達標、最低一級行政區覆蓋率達標、各級行政區的最低數量達標。來源已被證明沒有新資料時，該國家會顯示「來源已達上限」，不再反覆進入執行佇列。
 
 ## 文件
 
 | 文件 | 內容 |
 |---|---|
-| [API 文件](docs/API.zh-TW.md) | Bearer 驗證、產生、篩選、錯誤與監控 |
-| [API Key](docs/API_KEYS.zh-TW.md) | 平台用途、申請入口、所需產品和後台設定 |
-| [部署文件](docs/DEPLOYMENT.zh-TW.md) | PostgreSQL、VPS 目錄、程序、Nginx、備份、還原與升級 |
-| [開發文件](docs/DEVELOPMENT.zh-TW.md) | 架構、本地檢查、擴充點與發布門禁 |
-| [位址格式](docs/address-formats.md) | 各國格式與欄位行為 |
-| [國家策略](docs/strategies/) | 資料源、證據、座標、去重、驗證與更新策略 |
+| [部署](docs/DEPLOYMENT.zh-TW.md) | Docker Compose、反向代理、升級、備份恢復、常見問題 |
+| [API](docs/API.zh-TW.md) | 鑑權、端點、參數、批次生成、錯誤碼 |
+| [API Key](docs/API_KEYS.zh-TW.md) | 各平臺用途、申請步驟與後臺配置 |
+| [開發](docs/DEVELOPMENT.zh-TW.md) | 本地開發、專案結構、測試與釋出檢查 |
+| [資料來源](docs/data-sources.md) | 各國資料來源、釋出規則與同步流程 |
+| [國家策略](docs/strategies/) | 每個國家的欄位、座標系、去重與驗證細節 |
+
+## 許可證
+
+原始碼以 [MIT](LICENSE) 許可釋出。各上游資料集保留其原有許可與署名要求，詳見[資料來源說明](docs/data-sources.md)。
 
 ## 社群
 
-- [linux.do](https://linux.do): **Learn AI at L-Site!!!**
-
-## 授權
-
-專案原始碼使用 [MIT](LICENSE)。上游資料集保留各自的授權與署名要求。
+- [linux.do](https://linux.do)

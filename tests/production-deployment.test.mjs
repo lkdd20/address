@@ -110,7 +110,7 @@ describe('production blue-green deployment', () => {
 
   it('allows bounded production initialization without replacing the real sync readiness check', () => {
     const sync = overlay.slice(overlay.indexOf('\n  sync:'), overlay.indexOf('\nsecrets:'));
-    expect(sync).toMatch(/healthcheck:\s*\n\s+start_period: 3m/u);
+    expect(sync).toMatch(/healthcheck:\s*\n\s+start_period: 10m/u);
     expect(sync).not.toMatch(/\b(?:test|disable|retries|interval|timeout):/u);
     const baseSync = compose.slice(compose.indexOf('\n  sync:'), compose.indexOf('\nsecrets:'));
     expect(baseSync).toContain("fetch('http://127.0.0.1:8791/healthz')");

@@ -56,9 +56,10 @@ const adminData = {
   '/providers': [credential], '/settings/maps': maps, '/settings/translation': { googleTranslationEnabled: true },
   '/settings/country-shortcuts': [shortcut], '/settings/access': { frontendPasswordEnabled: false }, '/tokens': [],
   '/address-data': [], '/settings/blacklist': { keywords: [], builtIn: [] },
-  '/sync/queue': { entries: [], job: null }, '/sync/history': { items: [], total: 0, hasMore: false, limit: 100 },
+  '/sync/queue': { available: true, generatedAt: null, entries: [], job: null }, '/sync/history': { items: [], total: 0, hasMore: false, limit: 100 },
+  '/system/status': { todayGrowth: 0, apiRequestsToday: 0, databaseBytes: 0, lastUpdatedAt: null, schedulerHeartbeatAt: null, databaseHealthy: true, schedulerHealthy: true, serviceHealthy: true },
   '/dashboard/overview': { nodes: [], countries: [], metrics: { countryCount: 0, residentialTotal: 0, coveredLowest: 0,
-    totalLowest: 0, coverageRate: 0, todayUpdates: 0, apiRequestsToday: 0, databaseBytes: 0, serviceHealthy: true, lastUpdatedAt: null } }
+    totalLowest: 0, coverageRate: 0, addressTotal: 0, todayGrowth: 0, apiRequestsToday: 0, databaseBytes: 0, serviceHealthy: true, databaseHealthy: true, schedulerHealthy: true, schedulerHeartbeatAt: null, lastUpdatedAt: null } }
 };
 const fulfill = (route, data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ data }) });
 const mount = async (page, overrides = {}) => {
@@ -173,7 +174,7 @@ try {
         const button = row.querySelector('.model-fetch-button').getBoundingClientRect();
         return { inputHeight: input.height, buttonHeight: button.height, buttonWidth: button.width };
       });
-      assert.deepEqual(sizes, { inputHeight: 42, buttonHeight: 42, buttonWidth: 42 });
+      assert.deepEqual(sizes, { inputHeight: 40, buttonHeight: 40, buttonWidth: 40 });
       await dialog.locator('input[name=model]').focus();
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('ArrowDown');
@@ -385,8 +386,9 @@ try {
     } });
     await page.goto(`${baseUrl}/en/admin/?view=providers`); await hydrated(page);
     const row = page.locator('.provider-key-row').filter({ hasText: credential.label });
-    await row.waitFor(); page.once('dialog', (dialog) => dialog.accept());
+    await row.waitFor();
     await row.getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Confirm action', exact: true }).getByRole('button', { name: 'Confirm', exact: true }).click();
     await row.waitFor({ state: 'detached' });
     await page.locator('.admin-error').waitFor();
     assert.equal(deletes, 1);

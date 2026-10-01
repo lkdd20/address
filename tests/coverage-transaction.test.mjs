@@ -25,3 +25,19 @@ it('does not overwrite a concurrently committed publication with pre-transaction
   await refreshResidentialCoverage(database, 'CA', '2026-09-13T00:00:00Z', undefined, { useGenerationIndex: true });
   expect(storedCount).toBe(sourceCount);
 });
+
+it('retries a lock timeout with backoff instead of failing the refresh', async () => {
+  let attempts = 0;
+  const lockTimeout = Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+  const database = { transaction: async () => { attempts += 1; if (attempts < 3) throw lockTimeout; return 'refreshed'; } };
+  await expect(refreshResidentialCoverage(database, 'CA')).resolves.toBe('refreshed');
+  expect(attempts).toBe(3);
+});
+
+it('gives up after bounded lock retries and leaves other errors untouched', async () => {
+  const fail = (code) => ({ transaction: async () => { throw Object.assign(new Error(code), { code }); } });
+  await expect(refreshResidentialCoverage(fail('23505'), 'CA')).rejects.toMatchObject({ code: '23505' });
+  const controller = new AbortController();
+  controller.abort();
+  await expect(refreshResidentialCoverage(fail('55P03'), 'CA', undefined, controller.signal)).rejects.toThrow();
+});

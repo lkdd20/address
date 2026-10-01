@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
+import { OPENAI_COMPATIBLE_TIMEOUT_MS } from '../credential-broker/openai-compatible.mjs';
 import { googleTranslate } from './address-etl.mjs';
 import { ensureTranslationRoutes, TranslationRouteScheduler, translationRouteRevision, translationRouteStatus } from '../translation/routing.mjs';
 
@@ -159,7 +160,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
       if (!reserveRequest(2)) return null;
       record(dispatched, values, target);
       try {
-        const result = await broker.request('openai-compatible.translate', { values, target }, { signal, maxDispatches: 2,
+        const result = await broker.request('openai-compatible.translate', { values, target }, { signal, maxDispatches: 2, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000,
           onDispatch: (count) => { requests += count - 2; } });
         return result.translations.map((item) => String(item).trim());
       } catch (error) {
@@ -230,7 +231,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
           const result = await broker.request('openai-compatible.translate', {
             values, target, credentialId: route.credentialId,
             ...(route.prompt ? { prompt: route.prompt } : {})
-          }, { signal, maxDispatches: 1, onDispatch: (count) => { requests += count - 1; } });
+          }, { signal, maxDispatches: 1, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000, onDispatch: (count) => { requests += count - 1; } });
           return result.translations.map((item) => String(item).trim());
         } catch (error) {
           if (error.retryAt || ['SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED', 'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CREDENTIAL_EXPIRED'].includes(error.code)) {

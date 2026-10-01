@@ -188,6 +188,14 @@ export class SyncHistoryStore {
       updated_at=excluded.updated_at`).bind(at, at, at).run();
   }
 
+  async publishQueueSnapshot(json, at = this.now().toISOString()) {
+    await this.database.prepare(`INSERT INTO sync_scheduler_state(
+      scheduler_id,heartbeat_at,queue_snapshot_json,queue_snapshot_at,updated_at
+    ) VALUES ('address-sync',?,?,?,?) ON CONFLICT(scheduler_id) DO UPDATE SET
+      queue_snapshot_json=excluded.queue_snapshot_json,queue_snapshot_at=excluded.queue_snapshot_at,
+      updated_at=excluded.updated_at`).bind(at, json, at, at).run();
+  }
+
   async repairInterruptedRuns() {
     const current = this.now();
     const now = current.toISOString();

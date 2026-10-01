@@ -236,7 +236,7 @@ services:
       gateway:
         condition: service_healthy
     healthcheck:
-      start_period: 3m
+      start_period: 10m
     stop_grace_period: 95m
 
 secrets:

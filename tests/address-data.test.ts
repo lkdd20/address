@@ -94,6 +94,19 @@ describe('address data aggregation', () => {
     });
   });
 
+  it('explains a queued wait with the queue reason instead of an older shard failure', async () => {
+    const countries = await listAddressData(database, undefined, new Map([['JP', {
+      state: 'quota_wait',
+      reason: 'google-geocoding',
+      nextAttemptAt: '2026-10-01T08:00:00.000Z'
+    }]]));
+    expect(countries.find((country) => country.countryCode === 'JP')).toMatchObject({
+      status: 'quota_wait',
+      lastError: 'google-geocoding',
+      nextAttemptAt: '2026-10-01T08:00:00.000Z'
+    });
+  });
+
   it('names the required China map keys when no provider is configured', async () => {
     const countries = await listAddressData(database, {
       syncState: 'blocked',

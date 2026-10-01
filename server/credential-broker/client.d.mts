@@ -15,7 +15,7 @@ export class CredentialBrokerClient {
   request(
     operation: string,
     parameters: Record<string, unknown>,
-    options?: { requestId?: string; signal?: AbortSignal; maxDispatches?: number; onDispatch?: (count: number) => void }
+    options?: { requestId?: string; signal?: AbortSignal; maxDispatches?: number; onDispatch?: (count: number) => void; timeoutMs?: number }
   ): Promise<unknown>;
   availability(
     providers: string[],

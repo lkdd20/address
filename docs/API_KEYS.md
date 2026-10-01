@@ -1,105 +1,142 @@
-# API key configuration
+# API keys
 
-[English](API_KEYS.md) · [简体中文](API_KEYS.zh-CN.md) · [繁體中文](API_KEYS.zh-TW.md)
+English · [简体中文](API_KEYS.zh-CN.md) · [繁體中文](API_KEYS.zh-TW.md)
 
-Add credentials in **Admin → Service credentials**. Multiple credentials under the same provider are rotated automatically.
+**Every third-party key is optional.** Without any key, Address uses only official registers, open map data, and other sources that need no authorization. The keys below add data for specific countries, enable online translation, or show AMap on the web UI.
 
-| Provider | Country or feature | Administrator entry |
+Add keys in the admin console under **Integrations → Map keys**. They are stored encrypted in the database and only masked values are shown.
+
+## Overview
+
+| Provider | Purpose | Location in the admin console |
 |---|---|---|
-| AMap WebService | China address synchronization | AMap |
-| Baidu Maps | China address synchronization | Baidu Maps |
-| Tencent Location Service | China address synchronization | Tencent Maps |
-| Mappls Reverse Geocoding | India address enrichment | Mappls |
-| OneMap | Singapore address synchronization | OneMap |
-| Geoapify Reverse Geocoding | South Korea address and postcode enrichment | Geoapify |
-| Google Geocoding | Real street and premise enrichment for supported low-volume countries | Google Geocoding |
-| Youdao Text Translation | Address translation | Youdao Translate |
-| DeepL API Free | Address translation with configurable route priority | DeepL Free |
-| OpenAI-compatible Chat Completions | Address translation with a configurable model | OpenAI-compatible |
-| AMap JavaScript API | China browser map | AMap browser map |
+| [AMap WebService](#amap-webservice) | China address sync | Map keys → AMap |
+| [Baidu Maps](#baidu-maps) | China address sync | Map keys → Baidu Maps |
+| [Tencent Location Service](#tencent-location-service) | China address sync | Map keys → Tencent Maps |
+| [Google Geocoding](#google-geocoding) | Street and house-number enrichment for sparse countries | Map keys → Google Geocoding |
+| [Geoapify](#geoapify) | South Korea addresses and postcodes | Map keys → Geoapify |
+| [Mappls](#mappls) | India address enrichment | Map keys → Mappls |
+| [OneMap](#onemap) | Singapore address sync | Map keys → OneMap |
+| [DeepL API Free](#deepl-api-free) | Address translation | Online translation → DeepL |
+| [Youdao Text Translation](#youdao-text-translation) | Address translation (paid) | Online translation → Youdao |
+| [OpenAI-compatible API](#openai-compatible-api) | Translate addresses with any Chat Completions model | Online translation → OpenAI-compatible |
+| [AMap JavaScript API](#amap-javascript-api) | Show AMap on the web UI | AMap frontend map credential |
 
-## AMap WebService
+**Multiple keys rotate automatically.** Add several keys for the same provider: a failing key cools down while the others take over, and when none is available the system waits for the earliest to recover. Each key can have its own quota limit.
 
-1. Open the [AMap developer console](https://console.amap.com/dev/index).
-2. Create an application and a **WebService** key using the [official guide](https://lbs.amap.com/api/webservice/create-project-and-key).
-3. Apply the server IP restriction and add the key under **AMap**.
+## Maps and geocoding
 
-## Baidu Maps
+### AMap WebService
 
-1. Open the [Baidu Maps API console](https://lbsyun.baidu.com/apiconsole/key).
-2. Create a **Server** application and enable the Place Web API.
-3. Apply the server IP restriction and add the AK under **Baidu Maps**.
+1. In the [AMap console](https://console.amap.com/dev/index), create an application and a **Web Service** key following the [official guide](https://lbs.amap.com/api/webservice/create-project-and-key).
+2. Restrict it to your server IP.
+3. Add it under “AMap”.
 
-## Tencent Location Service
+### Baidu Maps
 
-1. Open the [Tencent Location Service console](https://lbs.qq.com/dev/console/application/mine).
-2. Create an application and enable **WebService API**.
-3. Apply the server IP or signature restriction and add the key under **Tencent Maps**.
+1. In the [Baidu Maps API console](https://lbsyun.baidu.com/apiconsole/key), create a **server-side** application with Place Search enabled.
+2. Restrict it to your server IP.
+3. Add the AK under “Baidu Maps”.
 
-## Mappls Reverse Geocoding
+### Tencent Location Service
 
-1. Create an application in the [Mappls Console](https://auth.mappls.com/console/).
-2. Enable **Reverse Geocoding API** and copy the static key from the credentials section.
-3. Apply the server IP restriction and add the key under **Mappls**.
+1. In the [Tencent Location Service console](https://lbs.qq.com/dev/console/application/mine), create an application with **WebServiceAPI** enabled.
+2. Configure a server IP allowlist or signature verification.
+3. Add it under “Tencent Maps”.
 
-The integration follows the [Mappls Reverse Geocoding API](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-reverse-geocoding-rest-api-example/Readme/).
+### Google Geocoding
 
-## OneMap
+1. Create a Google Cloud project with a billing account.
+2. Enable the **Geocoding API** and create a key restricted to the Geocoding API and your server IP ([official guide](https://developers.google.com/maps/documentation/geocoding/get-api-key)).
+3. Add it under “Google Geocoding”.
 
-1. Register for [OneMap API access](https://www.onemap.gov.sg/apidocs/register).
-2. Generate an access token through the [authentication API](https://www.onemap.gov.sg/apidocs/authentication).
-3. Add the token under **OneMap**. Replace it before its three-day expiry.
+Address uses Geocoding API v4 and does not need the Places API. Google includes 10,000 free calls per billing account per month; Address uses at most 9,000 by default. If the same billing account is used elsewhere, enter that usage as “Usage already this month” in the key settings.
 
-## Geoapify
+### Geoapify
 
-1. Create a project in [Geoapify MyProjects](https://myprojects.geoapify.com/).
-2. Copy the project API key.
-3. Add the key under **Geoapify**.
+Create a project in [Geoapify MyProjects](https://myprojects.geoapify.com/), copy the API key, and add it under “Geoapify”. See the [reverse geocoding docs](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/).
 
-See the [Reverse Geocoding API documentation](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/).
+### Mappls
 
-## Google Geocoding
+Create an application in the [Mappls console](https://auth.mappls.com/console/), enable the **Reverse Geocoding API**, copy the static key, restrict it to your server IP, and add it under “Mappls”.
 
-1. Create or select a Google Cloud project and attach a billing account.
-2. Enable **Geocoding API** using the [official setup guide](https://developers.google.com/maps/documentation/geocoding/get-api-key).
-3. Create a server API key, restrict it to Geocoding API and the deployment server IP, then add it under **Google Geocoding**.
+### OneMap
 
-The project uses Geocoding API v4. Places API is not required.
+Register at [OneMap](https://www.onemap.gov.sg/apidocs/register), generate an access token with the [authentication API](https://www.onemap.gov.sg/apidocs/authentication), and add it under “OneMap”. Tokens expire after 3 days and must be replaced before then.
 
-## DeepL API Free
+### AMap JavaScript API
 
-Add a Free key ending in `:fx` under **Online translation → DeepL Free**, set a project character cap, then use **Test** to retrieve usage without translating. The default cap is 500,000; it is configurable, but the verified account limit always applies. Only `https://api-free.deepl.com` is allowed; Pro keys and paid endpoints are rejected.
+Shows AMap on the web result page. It **cannot share** a key with AMap WebService:
 
-All API and synchronization calls share an encrypted credential broker and a persistent Unicode-character ledger. Effective allowance is the lowest account/configured cap across enabled DeepL keys. Characters are reserved before translation; lost responses retain the reservation. Restarts, key replacement and local calendar changes do not reset usage. Usage plus translation count as two upstream requests and both obey QPS limits.
+1. Create a separate **Web (JS API)** key and security secret in the AMap console.
+2. Restrict the key to your public domain.
+3. Enter the key and secret under “AMap frontend map credential”.
 
-[Provider usage](https://developers.deepl.com/docs/admin/retrieving-usage-data) can lag several minutes; [Free usage responses](https://developers.deepl.com/api-reference/usage-and-quota/check-usage-and-limits) may omit billing-period dates. Without a verified new period, the local ledger is not automatically reset, so fallback may occur early. Other applications using the same account are outside this project's control; the Free endpoint's official limit remains the final safeguard. Never clear the ledger to bypass a wait.
+The secret stays on the server and is used through the same-origin proxy `/_AMapService`; it never reaches the browser. Turn the map on or off under “Frontend map display” on the same page.
 
-## Youdao Text Translation
+## Online translation
 
-**Paid service:** Youdao bills by usage. Trial credits may be limited; tests and automatic translation can charge your balance after those credits run out. Project quotas and the backfill character budget are internal limits, not a guarantee of free vendor usage. Check [Youdao pricing](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html) and your account before enabling it. Leave credentials unconfigured or disabled if you do not accept charges.
+Translation runs in this order:
 
-1. Register at [Youdao Zhiyun](https://ai.youdao.com/).
-2. Create an application and enable Text Translation.
-3. Add the application ID and application secret under **Online translation**.
+1. Existing valid translations and the cache.
+2. Enabled online providers, **lowest priority number first**; providers with the same priority take turns.
+3. Providers that are unavailable, cooling down, or out of quota are skipped.
 
-Each entry stores one ID/secret pair; multiple pairs are supported.
+Each translation key has its own priority in its edit dialog. Google web translation needs no key and has its priority next to its toggle; it is not the paid Cloud Translation API, may be rate-limited, and is not guaranteed to be available.
 
-Translation checks valid stored variants/cache first, then tries enabled online routes by ascending priority. Equal-priority routes use round-robin; unavailable, cooling-down, quota-exhausted, or failed routes are skipped. New OpenAI-compatible routes default ahead of DeepL, Youdao, and enabled keyless Google web translation, but administrators set priority in each API key’s editor. DeepL and Youdao keys are independent, just like OpenAI-compatible keys; Google web translation has no API key and keeps its priority beside its enable switch. The separate routing panel is removed. Existing provider priorities seed new per-key routes once. Google is not the billed Cloud Translation API and may rate-limit or be unavailable; unlimited or permanent free access is not guaranteed. Leave paid providers unconfigured or disabled if you do not accept their fees.
+Translations must keep house numbers, unit numbers, and postcodes unchanged and pass language checks before they are cached or displayed.
 
-## OpenAI-compatible Chat Completions
+### DeepL API Free
 
-Under **Online translation**, enter the endpoint and API key, fetch the live model list, then select a Chat Completions-compatible model. There is no hardcoded default model. A full `/chat/completions` or `/models` URL is accepted; custom API path prefixes are preserved. Base URLs include the provider API prefix (such as `/v1`); successful model discovery fills in the resolved prefix. Use the fetch button beside the model input to populate suggestions, or type a model ID directly. Advertised endpoint restrictions and reasoning levels are retained; all returned models remain visible in the full dropdown, with incompatible models marked and disabled. Opening the dropdown shows every model regardless of the saved value; typing filters the list. When reasoning metadata is absent, the interface says so and accepts a provider-documented value. The project explicitly sends `low` by default; legacy `default` settings are normalized to `low`. Other explicit values are sent unchanged. On model selection, advertised levels take precedence if they exclude `low`. This does not imply that the provider defaults to `low` when the parameter is omitted. The fixed prompt enforces JSON cardinality and preserves address identifiers; optional prompts add style only. The default project limit is 1,000 requests per day with one request per second; deployment settings can adjust these limits.
+Add a free key ending in `:fx` under “DeepL” and set the project character limit (default 500,000). “Test” only checks the quota and uses no characters.
 
-The service sends a non-streaming Chat Completions request with a translation-only system prompt and strict JSON cardinality. Values are treated as untrusted address data, not instructions. The returned values must preserve digits and identifiers and pass the existing language and publication gates before caching or publishing. The API key is encrypted in the control database and is never returned by ordinary provider listings. Use **Test** for a small synthetic request; it reports only success and result count.
+- Only `https://api-free.deepl.com` is allowed; Pro keys and endpoints are rejected.
+- All DeepL keys share one character ledger; the usable amount is the smaller of the account quota and the project limit.
+- DeepL usage may lag by a few minutes, and the Free API reports no billing period, so the local ledger never resets automatically.
 
-Only HTTPS endpoints are accepted for remote services; plain HTTP is limited to localhost. Confirm the endpoint provider's terms, data handling, and model billing before enabling it.
+### Youdao Text Translation
 
-## AMap JavaScript API
+> **Paid service.** Youdao bills by usage. Once the trial credit is used up, both tests and automatic translation are charged. The quota set in Address is only an internal limit and does not mean you stay within any free tier. Do not add or enable it if you do not accept the cost.
 
-1. Create a separate **JavaScript API** key and security code in the AMap console.
-2. Restrict the key to the production domain.
-3. Add both values under **AMap browser map**.
+Create an application with text translation enabled at [Youdao AI](https://ai.youdao.com/), then enter the app ID and app secret under “Youdao”. See the [official pricing](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html).
 
-Do not reuse the AMap WebService key for browser maps.
+### OpenAI-compatible API
 
-Initial online imports use the same per-key priority rules and broker accounting as recovery. Cached display translations are invalidated when source components change. Model discovery respects Retry-After in seconds or HTTP-date format. Do not assume trial or new-user credits renew; one-time DeepL rewards are not replenished locally.
+Connect any service that speaks the OpenAI **Chat Completions** format, such as DeepSeek, a Gemini proxy, or OpenRouter.
+
+**Add a provider**
+
+1. Click Add under “OpenAI-compatible” and enter the base URL and API key.
+2. Click the button next to the model field to load the model list and pick one, or type the model name.
+3. Save, then click “Test” to confirm it works.
+
+Quota defaults to “Unlimited”; uncheck it and enter a daily request limit if you need one.
+
+**Base URL**: a prefix or the full URL both work; the actual request URL is previewed below the field.
+
+| You enter | Requests go to |
+|---|---|
+| `https://api.example.com/v1` | `https://api.example.com/v1/chat/completions` |
+| `https://api.example.com/v1/chat/completions` | Used as-is |
+| `https://api.example.com` (no version) | Detected on save, usually `…/v1/chat/completions` |
+
+Remote URLs must use HTTPS; HTTP is allowed only for `localhost`.
+
+**Prompt**: new providers are prefilled with the built-in default prompt; leaving it empty also uses the default, and edits can be reset in one click. The prompt only adjusts translation style; the rules for JSON-only output, matching item count, and preserved numbers are always appended and cannot be overridden.
+
+**Reasoning effort**: `low` is sent by default. Reasoning models are slow, so each translation request (including queueing) may take up to 120 seconds. When the model list reports supported levels, a suitable one is chosen automatically; otherwise enter a value from the provider's docs.
+
+**Test**: “Test” opens a log window that shows, step by step:
+
+- The request URL, model, and parameters
+- HTTP status and latency
+- Finish reason, token usage, and the model's reply
+- On failure, the provider's error message (with the API key masked)
+
+There are two modes: a connectivity test that sends `"hi"`, and an address translation sample. Credentials marked “Needs review” can still be tested and return to service when a test passes; a malformed model reply never marks a credential for review.
+
+## Security
+
+- Restrict server-side keys to your server IP and web map keys to your domain.
+- Never put keys in the repository, screenshots, or logs.
+- Back up `data/secrets/config_master_key` together with the database; stored keys cannot be decrypted without it.

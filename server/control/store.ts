@@ -399,6 +399,10 @@ const translationRouteFromRow = (row: Record<string, unknown>, masterKey: Buffer
   };
 };
 
+const loginFailureLimit = 8;
+const loginWindowMs = 15 * 60_000;
+const windowStart = (windowMs: number): string => new Date(Math.floor(Date.now() / windowMs) * windowMs).toISOString();
+
 export class ControlStore {
   private youdaoUpsertTail: Promise<void> = Promise.resolve();
 
@@ -406,17 +410,6 @@ export class ControlStore {
 
   async initialize(bootstrapPassword?: string, environment: Record<string, string | undefined> = {}): Promise<void> {
     await this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').bind(nowIso()).run();
-    await this.database.prepare(`UPDATE provider_quota_windows SET limit_count=100000000,updated_at=?
-      WHERE limit_count=100 AND credential_id IN (SELECT id FROM provider_credentials WHERE provider='onemap')`)
-      .bind(nowIso()).run();
-    await this.database.prepare(`UPDATE provider_credentials SET daily_limit=100000000,quota_limit=100000000,updated_at=?
-      WHERE provider='onemap' AND quota_limit=100`).bind(nowIso()).run();
-    await this.database.prepare(`DELETE FROM provider_quota_windows
-      WHERE credential_id IN (SELECT id FROM provider_credentials WHERE provider='google-geocoding')
-        AND service='geocode-v4' AND period='day' AND limit_count=1000`).run();
-    await this.database.prepare(`UPDATE provider_credentials SET qps_limit=5,daily_limit=?,quota_period='month',quota_limit=?,
-      quota_timezone_offset=-480,updated_at=? WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000`)
-      .bind(GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, nowIso()).run();
     const admin = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='admin'").first<{ id: string }>();
     const frontend = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='frontend'").first<{ id: string }>();
     const frontendBootstrapPassword = environment.FRONTEND_BOOTSTRAP_PASSWORD?.trim();
@@ -919,7 +912,8 @@ export class ControlStore {
     const scopes = json<string[]>(row.scopes_json, []);
     if (!scopes.includes('*') && !scopes.includes(scope)) return { status: 'unauthorized' };
     if (!await this.consumeRateLimit(`api:${row.id}`, row.rate_limit_per_minute)) return { status: 'rate_limited' };
-    await this.database.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=?').bind(nowIso(), row.id).run();
+    await this.database.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at<?)')
+      .bind(nowIso(), row.id, new Date(Date.now() - 60_000).toISOString()).run();
     return { status: 'authorized', id: row.id, name: row.name };
   }
 
@@ -927,8 +921,25 @@ export class ControlStore {
     await this.database.prepare('UPDATE api_tokens SET revoked_at=? WHERE id=?').bind(nowIso(), id).run();
   }
 
-  private async consumeRateLimit(key: string, limit: number): Promise<boolean> {
-    const start = new Date(Math.floor(Date.now() / 60000) * 60000).toISOString();
+  async loginBlocked(address: string): Promise<boolean> {
+    const count = await this.database.prepare(`SELECT request_count FROM rate_limit_buckets
+      WHERE bucket_key=? AND window_started_at=?`).bind(`login:${address}`, windowStart(loginWindowMs))
+      .first<number>('request_count');
+    return Number(count || 0) >= loginFailureLimit;
+  }
+
+  async recordLoginFailure(address: string): Promise<void> {
+    await this.consumeRateLimit(`login:${address}`, loginFailureLimit, loginWindowMs);
+    await this.database.prepare(`DELETE FROM rate_limit_buckets WHERE bucket_key LIKE 'login:%' AND window_started_at<?`)
+      .bind(new Date(Date.now() - 24 * 60 * 60_000).toISOString()).run();
+  }
+
+  async clearLoginFailures(address: string): Promise<void> {
+    await this.database.prepare('DELETE FROM rate_limit_buckets WHERE bucket_key=?').bind(`login:${address}`).run();
+  }
+
+  private async consumeRateLimit(key: string, limit: number, windowMs = 60_000): Promise<boolean> {
+    const start = windowStart(windowMs);
     const result = await this.database.prepare(`INSERT INTO rate_limit_buckets(bucket_key,window_started_at,request_count)
       VALUES (?,?,1) ON CONFLICT(bucket_key) DO UPDATE SET window_started_at=excluded.window_started_at,
       request_count=CASE WHEN rate_limit_buckets.window_started_at=excluded.window_started_at
@@ -1291,6 +1302,15 @@ export class ControlStore {
   async hasCredential(provider: ServiceProviderName): Promise<boolean> {
     return Boolean(await this.database.prepare('SELECT id FROM provider_credentials WHERE provider=? LIMIT 1')
       .bind(provider).first<{ id: string }>());
+  }
+
+  async credentialForDiagnostics(id: string): Promise<{ id: string; provider: CredentialProviderName; secret: string; status: string; enabled: boolean } | null> {
+    const row = await this.database.prepare('SELECT * FROM provider_credentials WHERE id=?').bind(id).first<CredentialRow>();
+    if (!row) return null;
+    return {
+      id: row.id, provider: row.provider, status: row.status, enabled: Boolean(row.enabled),
+      secret: decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, this.masterKey)
+    };
   }
 
   async acquireCredentialById(id: string): Promise<{ id: string; provider: CredentialProviderName; secret: string } | null> {

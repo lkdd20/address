@@ -134,6 +134,18 @@ describe('credential broker', () => {
     expect(definition.validate({ values: ['Road'], target: 'fr' })).toBeNull();
   });
 
+  it('gives slow reasoning models a longer queue-inclusive deadline than other providers', async () => {
+    expect(operationDefinitions['openai-compatible.translate'].timeoutMs).toBe(120_000);
+    expect(operationDefinitions['youdao.translate'].timeoutMs).toBeUndefined();
+    let signal;
+    const client = new CredentialBrokerClient({ url: 'http://broker.internal', token: 'x'.repeat(24), fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    } });
+    await client.request('openai-compatible.translate', { values: ['Road'], target: 'en' }, { timeoutMs: 125_000 });
+    expect(signal.aborted).toBe(false);
+  });
+
   it('counts every HTTP dispatch and respects a caller budget across credential rotation', async () => {
     await addGeoapify('First', 'first-secret');
     await addGeoapify('Second', 'second-secret');
@@ -754,4 +766,14 @@ describe('credential broker', () => {
     expect(configuration.tokens).toEqual(tokens);
     expect(configuration.testPolicies).toEqual({ geoapify: { cap: 2, reserve: 3 } });
   });
+});
+
+it('passes the extended deadline from every OpenAI-compatible broker caller', async () => {
+  const files = ['server/api/server.ts', 'server/sync/translation-providers.mjs', 'server/sync/address-etl.mjs'];
+  for (const file of files) {
+    const source = await readFile(file, 'utf8');
+    const calls = source.split("request('openai-compatible.translate'").slice(1);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) expect(call.slice(0, 400)).toContain('timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS');
+  }
 });

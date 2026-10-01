@@ -209,6 +209,9 @@ CREATE TABLE IF NOT EXISTS sync_scheduler_state (
   updated_at TEXT NOT NULL
 );
 
+ALTER TABLE sync_scheduler_state ADD COLUMN IF NOT EXISTS queue_snapshot_json TEXT;
+ALTER TABLE sync_scheduler_state ADD COLUMN IF NOT EXISTS queue_snapshot_at TEXT;
+
 CREATE TABLE IF NOT EXISTS audit_events (
   id BIGSERIAL PRIMARY KEY,
   actor TEXT NOT NULL,
@@ -321,6 +324,24 @@ UPDATE provider_credentials SET status='healthy',failure_count=0,cooldown_until=
 WHERE provider='mappls' AND status='needs_review'
   AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=19);
 
+UPDATE provider_quota_windows SET limit_count=100000000
+WHERE limit_count=100 AND credential_id IN (SELECT id FROM provider_credentials WHERE provider='onemap')
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
+
+UPDATE provider_credentials SET daily_limit=100000000,quota_limit=100000000
+WHERE provider='onemap' AND quota_limit=100
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
+
+DELETE FROM provider_quota_windows
+WHERE credential_id IN (SELECT id FROM provider_credentials WHERE provider='google-geocoding')
+  AND service='geocode-v4' AND period='day' AND limit_count=1000
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
+
+UPDATE provider_credentials SET qps_limit=5,daily_limit=10000,quota_period='month',quota_limit=10000,
+  quota_timezone_offset=-480
+WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
+
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 24) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 25) AS version
 ON CONFLICT (version) DO NOTHING;

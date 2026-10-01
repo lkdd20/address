@@ -1,158 +1,101 @@
-# Address Development Guide
+# Development
 
-[English](DEVELOPMENT.md) · [简体中文](DEVELOPMENT.zh-CN.md) · [繁體中文](DEVELOPMENT.zh-TW.md)
+English · [简体中文](DEVELOPMENT.zh-CN.md) · [繁體中文](DEVELOPMENT.zh-TW.md)
+
+This guide is for developers who change the source code. To deploy and use Address, see the [deployment guide](DEPLOYMENT.md).
 
 ## Architecture
 
 ```text
 Browser
-  -> Astro static pages + React WebUI
-  -> Hono Node.js API
-       -> PostgreSQL transactional address pool
-       -> PostgreSQL coordinate coordinate index
-       -> local formatting and localization
-       -> synchronized residential pool only
-  -> synchronization supervisor
-       -> DuckDB reads Overture GeoParquet
-       -> pyosmium reads Geofabrik/OSM PBF
-       -> validation and atomic country snapshot publication
+  └─ Astro static pages + React (WebUI, admin console)
+       └─ Hono API (/api/v1, /admin/api)
+            ├─ PostgreSQL: address pool, administrative catalog, control data
+            ├─ credential-broker: provider-key encryption, rotation, and quotas
+            └─ sync: scheduling, ETL (DuckDB / pyosmium), validation, atomic publishing
 ```
 
-Map rendering is isolated from address verification. Google uses a coordinate preview; AMap uses a dedicated JS API key plus the same-origin `/_AMapService` proxy. The AMap JS security code remains encrypted in the control database and never enters the browser bundle or map-configuration response.
+- Country snapshots are validated in a staging area and swap in within a transaction only when they pass; a failed candidate never affects live data.
+- The sync process writes its queue snapshot to the database, so the admin console stays responsive while sync is busy.
+- Map display is independent of address validation; the AMap JS security secret is used only server-side through the `/_AMapService` proxy.
 
-## Repository layout
+## Layout
 
-| Path | Responsibility |
+| Path | Contents |
 |---|---|
-| `src/components/` | React WebUI and synchronization administration UI |
-| `src/domain/` | Country metadata, generation, formatting, localization, profile, and export rules |
-| `src/pages/` | Astro routes for localized WebUI and API documentation |
-| `server/api/` | Hono application, repositories, and external-provider adapters |
-| `server/database/` | PostgreSQL schema and migration entry point |
-| `server/sync/` | Source adapters, ETL, scheduler, snapshot publication, and sync-control API |
-| `scripts/` | Catalog generation, validation, live probes, and release audits |
-| `ops/` | Linux VPS installation, process, backup, restore, and deployment scripts |
-| `tests/` | Vitest unit, integration, data-quality, and UI-structure tests |
+| `src/pages/` | Astro routes (localized WebUI, API docs, admin console) |
+| `src/components/` | React components; `SyncAdmin.tsx` is the admin shell |
+| `src/components/admin/` | Admin views: `dashboard`, `sync` (address data workspace), `providers`, `security`, `shortcuts`, plus shared `ui`, `text`, `locale-text`, and `types` |
+| `src/domain/` | Country metadata, generation, formatting, localization, translation prompt |
+| `src/styles/` | `global.css` (WebUI) and `admin.css` (admin design tokens and components) |
+| `server/api/` | Public API, repositories, external service adapters |
+| `server/control/` | Admin API, authentication, tokens, credential storage, schema |
+| `server/credential-broker/` | Key broker and provider adapters |
+| `server/sync/` | Source adapters, ETL, queue, publishing |
+| `server/database/` | PostgreSQL connection and migrations |
+| `scripts/` | Catalog generation, data validation, live acceptance scripts |
+| `ops/` | Compose deployment, blue/green switch, backup and restore scripts |
+| `tests/` | Vitest unit/integration tests and Playwright end-to-end tests |
+| `docs/strategies/` | Per-country address generation strategies |
 
-## Local setup
+## Run locally
 
-Node.js 24 or newer is required. Python 3.10 or newer (3.12 tested) and `venv` are required only for source synchronization; install its dependencies with `pip install -r server/sync/requirements.txt` and point `PYTHON_BIN` at that interpreter.
+Requires Node.js 24+. Python 3.10+ is needed only to run data sync (`pip install -r server/sync/requirements.txt`, then point `PYTHON_BIN` at that interpreter).
 
 ```bash
 git clone https://github.com/daimon3332/address.git
 cd address
-cp .env.example .env
+cp .env.example .env      # set at least POSTGRES_URL
 npm ci
 npm run db:migrate
-npm run dev
+npm run dev               # http://127.0.0.1:8787
 ```
 
-`npm run dev` builds the WebUI once and serves it through the Hono API on `127.0.0.1:8787`. For live UI editing, run `npm run dev:api` plus `npm run dev:web`: the Astro development server on `127.0.0.1:4321` proxies `/api` to Hono and `/sync-control` to the local synchronization service on `127.0.0.1:8791`.
+For hot reload, run `npm run dev:api` and `npm run dev:web` side by side (the Astro dev server on `4321` proxies `/api` to Hono).
 
-A freshly migrated database has schema only and does not contain an address pool. Local development and the test suite run against this empty schema plus the small fixtures in `scripts/fixtures/` and `tests/fixtures/`; the production PostgreSQL data never leaves the server (`data/` is gitignored and deployments preserve the server database). To exercise real data locally, seed the catalog (`npm run data:catalog` then `npm run data:catalog:import`) and import one small country, for example `npm run data:address-pool:etl -- --manual --shard SG`.
+A new database contains only the schema. To generate addresses locally, import the administrative catalog and then a small country:
 
-Useful commands:
+```bash
+npm run data:catalog && npm run data:catalog:import
+npm run data:address-pool:etl -- --manual --shard SG
+```
+
+Day-to-day development needs no third-party API keys.
+
+## Commands
 
 | Command | Purpose |
 |---|---|
-| `npm run dev` | Build the WebUI once, then run the Hono API in watch mode |
-| `npm run dev:web` | Run only Astro (port 4321, proxies `/api`) |
-| `npm run dev:api` | Run only Hono |
-| `npm test` | Run the Vitest suite |
-| `npm run db:migrate` | Create or migrate the local PostgreSQL schema |
-| `npm run data:regions` | Refresh bundled region metadata |
-| `npm run data:catalog` | Download and build the location-catalog seed |
-| `npm run data:catalog:import` | Import the catalog seed into the local database (required before any address import) |
-| `npm run data:address-pool:estimate` | Estimate a synchronization plan |
-| `npm run data:address-pool:sync:dry-run` | Validate ETL planning without publication |
-| `npm run data:address-pool:bootstrap` | Run the resumable all-country initial import |
-| `npm run sync:serve` | Run the local scheduler and sync-control API |
+| `npm run dev` | Build the WebUI and run the API in watch mode |
+| `npm test` | Vitest suite (uses pg-mem and small fixtures; no real database needed) |
+| `npm run check` | Astro diagnostics and TypeScript |
+| `npm run build` | Production build |
+| `npm run check:public` | Ignore rules, required files, and secret patterns |
+| `npm run test:admin-e2e` | Admin console end-to-end tests (Playwright) |
+| `npm run test:ui-e2e` | WebUI reliability and layout tests |
+| `npm run db:migrate` | Create or migrate the database |
+| `npm run sync:serve` | Run the sync scheduler locally |
 
-## Configuration model
+## Making changes
 
-Copy `.env.example` to the ignored `.env` file. Keep secrets server-side. Only variables explicitly prefixed for Astro's public environment are eligible for browser bundling; third-party provider keys and `SYNC_ADMIN_TOKEN` must remain in the API/sync process environment. `AMAP_API_KEY` is a server-side WebService credential. `AMAP_JS_API_KEY` is a separate domain-restricted browser loading key, while `AMAP_JS_SECURITY_CODE` remains server-side and is applied only by `/_AMapService`.
+**Public API**: routes and validation live in `server/api/index.ts`, database access in `server/api/repositories/`, and outbound requests in `server/api/services/` with explicit timeouts. Responses are always `{ data }` or `{ error: { code, message } }`. Update the OpenAPI description in `src/domain/api-contract.ts` and the [API docs](API.md) in all three languages.
 
-Regular development needs no third-party API key. Optional synchronization integrations are documented in the [API key guide](API_KEYS.md).
+**Admin console**: views go in `src/components/admin/`, strings in `text.ts` or `locale-text.ts` (all 9 languages), and styles use only the tokens in `admin.css`. Use `useConfirm` for confirmations, `Dialog` for dialogs, and `usePolling` for polling.
 
-## Database and synchronization
+**Database**: add a versioned migration for control schema changes in `server/database/postgres.mjs`; never edit a released migration.
 
-PostgreSQL uses transactions and connection pooling and stores address records, localization, source evidence, country state, and indexed coordinates. Country publication is transactional: a candidate snapshot is validated before it replaces the active country dataset, and a failed candidate leaves the previous snapshot available.
+**Countries and sources**: update country metadata, address format, postcode rules, source shards, tests, and the country's strategy in `docs/strategies/` together. Address fields must come from a source and stay empty when missing; synthetic test data must stay clearly separate from source data.
 
-Synchronization sources:
-
-- Overture Maps: DuckDB remotely filters and reads GeoParquet.
-- OpenStreetMap via Geofabrik: pyosmium streams prefiltered PBF nodes and ways.
-- Local region and location catalogs: constrain selectors and validate administrative consistency.
-
-The pipeline filters institutional/non-address features, deduplicates records, checks residential evidence, validates localized components, and enforces storage budgets. Do not edit the production database manually while the API or synchronization job is active.
-
-Manual examples:
-
-```bash
-node server/sync/address-etl.mjs --initial --all
-node server/sync/address-etl.mjs --manual --shard US
-```
-
-Production uses the synchronization supervisor rather than a cron-driven full reimport. Scheduler wake-ups resume eligible checkpoints and newly available source capabilities; completed or exhausted source fingerprints are not reimported merely because time has passed.
-
-## Extending the public API
-
-1. Define request validation and the route in `server/api/index.ts`.
-2. Keep database access behind `server/api/repositories/`.
-3. Put provider/network logic in `server/api/services/` with explicit timeouts.
-4. Return the existing `{ data: ... }` or `{ error: { code, message } }` envelope.
-5. Add API tests and update all three API documents.
-
-Public errors should use stable machine-readable codes. Do not make callers branch on localized UI strings.
-
-## Extending countries or address rules
-
-Country behavior spans metadata, formatting, location options, localization, postal rules, source shard planning, and test expectations. Before adding a country:
-
-1. Define its metadata and supported filters in `src/domain/`.
-2. Add formatting and postcode behavior.
-3. Add a source shard and verify licensing/attribution metadata.
-4. Validate address-existence evidence and independent residential-use evidence for the same address/building relation.
-5. Add localization, deterministic selection, exact-or-empty filtering, IP coordinate/city matching, and postal-format tests.
-6. Regenerate catalogs only through the existing scripts.
-
-All address and indoor fields must stay source-backed; missing values remain empty. Synthetic profile data must remain explicitly separate from address provenance.
-
-## WebUI development
-
-Localized pages enter through `src/pages/[locale].astro` and mount `src/components/App.tsx`. Shared presentation rules live in `src/styles/global.css`; the synchronization surface uses `SyncAdmin.tsx` and `admin.css`.
-
-When changing result fields, update the domain type first, then generation, API serialization, UI rendering, exports, translations, and tests as one contract. Preserve stable result-section dimensions and verify both English and Chinese values.
-
-Map display has four independent booleans: Google/AMap for China and Google/AMap for overseas addresses. Defaults are Google on and AMap off. China coordinates are converted from WGS-84 to GCJ-02 for AMap; overseas AMap uses the source coordinate with `showOversea` and therefore requires World Map permission. Provider components must fail independently so one unavailable map does not blank the result page.
-
-## Validation and release gate
-
-Run before every commit:
+## Before you commit
 
 ```bash
 npm test
 npm run check
 npm run build
 npm run check:public
+git diff --check
 ```
 
-These commands cover Vitest, Astro diagnostics, TypeScript, production bundling, ignored-file policy, required public files, and common secret shapes. On Linux, CI also validates shell syntax and compiles Python files.
+CI also checks shell syntax and compiles the Python files. For admin UI changes, also run `npm run test:admin-e2e` and `npm run test:ui-e2e`.
 
-After a full database is synchronized, run:
-
-```bash
-npm run check:production
-```
-
-This checks database integrity, required tables, country readiness, and storage ceilings. Live-environment probes are separate commands because they require a running deployment.
-
-## Contribution checklist
-
-- Keep changes scoped and avoid unrelated dependency or formatting churn.
-- Add tests proportional to the behavioral change.
-- For map changes, cover all four regional/provider switches, persisted administrator settings, masked credentials, proxy host allowlisting, and the absence of the AMap security code from browser responses and logs.
-- Update English, Simplified Chinese, and Traditional Chinese documentation together.
-- Keep real credentials, databases, logs, screenshots with private data, and runtime state out of Git.
-- Run `git diff --check` in addition to the project commands.
-- Preserve source attribution and licenses when changing the data pipeline.
+Never commit real credentials, databases, logs, runtime state, or screenshots with private data, and keep the English, Simplified Chinese, and Traditional Chinese docs in sync.

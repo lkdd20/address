@@ -71,13 +71,23 @@ export const refreshResidentialCoverage = async (
 ) => {
   const checkpoint = () => signal?.throwIfAborted();
   checkpoint();
-  if (!inTransaction) return database.transaction(async (transaction) => {
-    await transaction.exec("SET LOCAL lock_timeout TO '250ms'");
-    await transaction.exec(`LOCK TABLE address_pool,address_pool_evidence,address_datasets,address_sources,
-      address_generation_index,admin_coverage_stats,residential_coverage,sync_country_state
-      IN SHARE ROW EXCLUSIVE MODE`);
-    return refreshResidentialCoverage(transaction, countryCode, now, signal, { useGenerationIndex, inTransaction: true });
-  });
+  if (!inTransaction) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await database.transaction(async (transaction) => {
+          await transaction.exec("SET LOCAL lock_timeout TO '250ms'");
+          await transaction.exec(`LOCK TABLE address_pool,address_pool_evidence,address_datasets,address_sources,
+            address_generation_index,admin_coverage_stats,residential_coverage,sync_country_state
+            IN SHARE ROW EXCLUSIVE MODE`);
+          return refreshResidentialCoverage(transaction, countryCode, now, signal, { useGenerationIndex, inTransaction: true });
+        });
+      } catch (error) {
+        if (error?.code !== '55P03' || attempt >= 5) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+        checkpoint();
+      }
+    }
+  }
   const country = String(countryCode || '').trim().toUpperCase();
   const cityColumn = (alias) => {
     const locality = alias === 'address' ? administrativeValueSql('locality', alias) : `${alias}.locality`;

@@ -1,107 +1,142 @@
 # API Key 配置
 
-[English](API_KEYS.md) · [简体中文](API_KEYS.zh-CN.md) · [繁體中文](API_KEYS.zh-TW.md)
+[English](API_KEYS.md) · 简体中文 · [繁體中文](API_KEYS.zh-TW.md)
 
-在“后台 → 服务凭据”添加凭据。同一平台可以添加多组凭据，系统会自动轮换。
+**所有第三方密钥都是可选的。** 不配置任何密钥时，Address 只使用官方登记和开放地图等无需授权的数据源。下列密钥用于扩充特定国家的数据、启用在线翻译或在网页上显示高德地图。
 
-| 平台 | 对应国家或功能 | 后台配置名称 |
+所有密钥都在管理后台 **集成 → 地图密钥** 页面中添加，加密保存在数据库里，列表中只显示掩码。
+
+## 一览
+
+| 平台 | 用途 | 后台位置 |
 |---|---|---|
-| 高德 WebService | 中国地址同步 | 高德地图 |
-| 百度地图 | 中国地址同步 | 百度地图 |
-| 腾讯位置服务 | 中国地址同步 | 腾讯地图 |
-| Mappls Reverse Geocoding | 印度地址补全 | Mappls |
-| OneMap | 新加坡地址同步 | OneMap |
-| Geoapify Reverse Geocoding | 韩国地址与邮编补全 | Geoapify |
-| Google Geocoding | 支持的低数量国家真实街道与门牌补全 | Google Geocoding |
-| 有道文本翻译 | 地址翻译 | 有道翻译 |
-| DeepL API Free | 支持自定义路由优先级的地址翻译 | DeepL Free |
-| OpenAI 兼容 Chat Completions | 使用可配置模型翻译地址 | OpenAI 兼容接口 |
-| 高德 JavaScript API | 中国前端地图 | 高德前端地图 |
+| [高德 WebService](#高德-webservice) | 中国地址同步 | 地图密钥 → 高德地图 |
+| [百度地图](#百度地图) | 中国地址同步 | 地图密钥 → 百度地图 |
+| [腾讯位置服务](#腾讯位置服务) | 中国地址同步 | 地图密钥 → 腾讯地图 |
+| [Google Geocoding](#google-geocoding) | 为数据较少的国家补全街道与门牌 | 地图密钥 → Google Geocoding |
+| [Geoapify](#geoapify) | 韩国地址与邮编补全 | 地图密钥 → Geoapify |
+| [Mappls](#mappls) | 印度地址补全 | 地图密钥 → Mappls |
+| [OneMap](#onemap) | 新加坡地址同步 | 地图密钥 → OneMap |
+| [DeepL API Free](#deepl-api-free) | 地址翻译 | 在线翻译 → DeepL |
+| [有道文本翻译](#有道文本翻译) | 地址翻译（付费） | 在线翻译 → 有道翻译 |
+| [OpenAI 兼容接口](#openai-兼容接口) | 用任意 Chat Completions 模型翻译地址 | 在线翻译 → OpenAI 兼容接口 |
+| [高德 JavaScript API](#高德-javascript-api) | 在网页上显示高德地图 | 高德前端地图凭据 |
 
-## 高德 WebService
+**多个密钥自动轮换。** 同一平台可以添加多个密钥：某个密钥失败时会先冷却，系统改用其他密钥；全部不可用时，等待最早恢复的那个。每个密钥都可以单独设置额度上限。
 
-1. 打开[高德开发者控制台](https://console.amap.com/dev/index)。
-2. 按[官方指南](https://lbs.amap.com/api/webservice/create-project-and-key)创建应用和 **WebService** Key。
-3. 配置服务器 IP 限制，在“高德地图”下添加 Key。
+## 地图与地理编码
 
-## 百度地图
+### 高德 WebService
 
-1. 打开[百度地图 API 控制台](https://lbsyun.baidu.com/apiconsole/key)。
-2. 创建“服务端”应用并开通地点检索 Web API。
-3. 配置服务器 IP 限制，在“百度地图”下添加 AK。
+1. 打开[高德开发者控制台](https://console.amap.com/dev/index)，按[官方指南](https://lbs.amap.com/api/webservice/create-project-and-key)创建应用和 **Web 服务** Key；
+2. 限制为服务器 IP；
+3. 在“高德地图”下添加。
 
-## 腾讯位置服务
+### 百度地图
 
-1. 打开[腾讯位置服务控制台](https://lbs.qq.com/dev/console/application/mine)。
-2. 创建应用并开通 **WebService API**。
-3. 配置服务器 IP 或签名限制，在“腾讯地图”下添加 Key。
+1. 在[百度地图 API 控制台](https://lbsyun.baidu.com/apiconsole/key)创建 **服务端** 应用，开通地点检索；
+2. 限制为服务器 IP；
+3. 在“百度地图”下添加 AK。
 
-## Mappls Reverse Geocoding
+### 腾讯位置服务
 
-1. 在 [Mappls 控制台](https://auth.mappls.com/console/)创建应用。
-2. 开通 **Reverse Geocoding API**，从 credentials 区域复制静态 Key。
-3. 配置服务器 IP 限制，在“Mappls”下添加 Key。
+1. 在[腾讯位置服务控制台](https://lbs.qq.com/dev/console/application/mine)创建应用，开通 **WebServiceAPI**；
+2. 配置服务器 IP 或签名校验；
+3. 在“腾讯地图”下添加。
 
-接口以 [Mappls Reverse Geocoding 官方文档](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-reverse-geocoding-rest-api-example/Readme/)为准。
+### Google Geocoding
 
-## OneMap
+1. 在 Google Cloud 创建项目并绑定结算账户；
+2. 按[官方指南](https://developers.google.com/maps/documentation/geocoding/get-api-key)开通 **Geocoding API**，创建仅限 Geocoding API 和服务器 IP 的 Key；
+3. 在“Google Geocoding”下添加。
 
-1. 注册 [OneMap API](https://www.onemap.gov.sg/apidocs/register)。
-2. 通过[认证接口](https://www.onemap.gov.sg/apidocs/authentication)生成 Access Token。
-3. 在“OneMap”下添加 Token，并在三天有效期结束前替换。
+项目使用 Geocoding API v4，不需要 Places API。Google 为每个结算账户提供每月 10,000 次免费调用，项目默认最多使用 9,000 次；若同一结算账户在本项目之外已有用量，可在密钥设置中填写“本月已有用量”。
 
-## Geoapify
+### Geoapify
 
-1. 在 [Geoapify MyProjects](https://myprojects.geoapify.com/)创建项目。
-2. 复制项目 API Key。
-3. 在“Geoapify”下添加 Key。
+在 [Geoapify MyProjects](https://myprojects.geoapify.com/) 创建项目，复制 API Key，在“Geoapify”下添加。参考[反向地理编码文档](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/)。
 
-参见[反向地理编码官方文档](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/)。
+### Mappls
 
-## Google Geocoding
+在 [Mappls 控制台](https://auth.mappls.com/console/)创建应用，开通 **Reverse Geocoding API**，复制静态 Key，限制服务器 IP 后在“Mappls”下添加。
 
-1. 创建或选择 Google Cloud 项目并关联结算账户。
-2. 按[官方配置指南](https://developers.google.com/maps/documentation/geocoding/get-api-key)开通 **Geocoding API**。
-3. 创建服务端 Key，将它限制到 Geocoding API 和部署服务器 IP，在“Google Geocoding”下添加。
+### OneMap
 
-项目使用 Geocoding API v4，不需要 Places API。
+在 [OneMap](https://www.onemap.gov.sg/apidocs/register) 注册，通过[认证接口](https://www.onemap.gov.sg/apidocs/authentication)生成 Access Token，在“OneMap”下添加。Token 有效期为 3 天，过期前需要替换。
 
-## DeepL API Free
+### 高德 JavaScript API
 
-在“在线翻译 → DeepL Free”添加以 `:fx` 结尾的免费 Key，自定义项目字符上限，再点击“测试”查询额度，不消耗翻译字符。默认上限为 500,000，但最终同时受账户实际额度约束。仅允许 `https://api-free.deepl.com`，拒绝 Pro Key 和付费端点。
+用于在网页结果页上显示高德地图，与上面的 WebService Key **不能共用**：
 
-API 与同步共用加密凭据 Broker 和持久 Unicode 字符账本；账户额度与所有启用 DeepL Key 的配置上限取最低值。翻译前原子预留字符，响应丢失不退回；重启、换 Key 或本地月份变化不会重置累计值。用量查询和翻译合计两次上游请求，均遵守 QPS 限制。
+1. 在高德控制台单独创建 **Web 端（JS API）** Key 和安全密钥；
+2. 将 Key 限制为你的正式域名；
+3. 在“高德前端地图凭据”中填写 Key 和安全密钥。
 
-[官方用量](https://developers.deepl.com/docs/admin/retrieving-usage-data)可能延迟数分钟，[Free 用量响应](https://developers.deepl.com/api-reference/usage-and-quota/check-usage-and-limits)可能不含计费周期日期。没有可信新周期时，本地账本不会自动清零，可能提前降级。相同账户的外部应用不受本项目控制，Free 官方硬上限是最后保障；不能通过清空账本绕过等待。
+安全密钥只保存在服务端，通过同源代理 `/_AMapService` 使用，不会出现在浏览器中。地图的显示开关在同一页面的“前端地图显示”中设置。
 
-## 有道文本翻译
+## 在线翻译
 
-**付费服务：** 有道按用量计费，试用额度可能有限；用完后，测试和自动翻译都可能扣除账户余额。项目配额及补全字符预算只是内部限额，不保证调用处于供应商免费额度内。启用前请核对[有道官方计费说明](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html)和账户状态；不接受费用时，请勿配置或启用凭据。
+翻译的执行顺序是：
 
-1. 注册[有道智云](https://ai.youdao.com/)。
-2. 创建应用并开通文本翻译。
-3. 在“在线翻译”中添加应用 ID 和应用密钥。
+1. 先使用已有的合格译文和缓存；
+2. 再按**优先级数值从小到大**尝试已启用的在线服务，相同优先级轮流使用；
+3. 不可用、冷却中或额度用尽的服务会被自动跳过。
 
-每条配置保存一组 ID/密钥，支持添加多组。
+每个翻译密钥在自己的编辑框中设置优先级。Google 网页翻译不需要密钥，优先级设置在它的开关旁边；它不是付费的 Cloud Translation API，可能被限流，不保证一直可用。
 
-翻译优先检查合格本地变体和缓存，然后按优先级数值从小到大尝试已启用的在线路由；同优先级使用轮询，不可用、冷却中、额度耗尽或失败的路由会被跳过。新建 OpenAI 兼容路由默认排在 DeepL、有道和已启用的免密钥谷歌网页翻译之前，但管理员可以修改每条路由的优先级。谷歌不是 Google Cloud Translation 计费 API，可能限流或不可用，不保证永久、无限免费。不接受付费供应商费用时，请保持未配置或停用。
+译文必须原样保留门牌、单元、邮编等数字标识，并通过语言校验后才会被缓存和展示。
 
-## OpenAI 兼容 Chat Completions
+### DeepL API Free
 
-在“在线翻译”中填写接口地址和 API Key，获取实时模型列表后选择支持 Chat Completions 的模型，不预设固定模型。支持完整的 `/chat/completions` 或 `/models` 地址，保留自定义 API 路径前缀；基础地址须包含供应商 API 前缀（如 `/v1`）。保留接口声明的协议限制和思考强度，完整下拉列表展示接口返回的全部模型，不兼容模型显示原因并禁用选择；展开时不按已保存值过滤，输入时可搜索。接口未提供思考强度时明确提示，并允许填写供应商文档支持的值；项目默认显式发送 `low`，旧配置中的 `default` 也按 `low` 处理，其他显式值原样发送。切换模型时，若接口提供的档位不包含 `low`，则优先采用接口声明的首个档位。这不代表供应商在省略参数时默认使用 `low`。默认项目上限为每天 1,000 次、每秒 1 次，可按部署情况调整。
+在“DeepL”下添加以 `:fx` 结尾的免费版 Key，并设置项目字符上限（默认 500,000）。点击“测试”只查询额度，不消耗字符。
 
-服务端发送非流式 Chat Completions 请求，并使用只翻译地址组件的严格 JSON 提示词。输入值会被当作不可信地址数据，而不是指令。返回结果必须保留数字和标识符，并通过现有语言和发布门禁后才会缓存或发布。API Key 在控制数据库中加密保存，普通凭据列表不会返回；点击“测试”只执行小型合成请求并报告成功状态和结果数量。
+- 只允许 `https://api-free.deepl.com`，付费版 Key 和端点会被拒绝；
+- 所有 DeepL Key 共用一个字符账本，实际可用量取账户额度和项目上限中较小的一个；
+- DeepL 的用量统计可能延迟几分钟，免费版接口不返回计费周期，因此本地账本不会自动清零。
 
-远程服务只接受 HTTPS；明文 HTTP 仅允许 localhost。启用前请确认供应商的数据处理、服务条款和模型计费方式。
+### 有道文本翻译
 
-## 高德 JavaScript API
+> **付费服务。** 有道按用量计费，试用额度用完后，测试和自动翻译都会产生费用。项目中设置的额度只是内部限制，不代表处于免费额度内。不接受费用时请不要添加或启用。
 
-1. 在高德控制台单独创建 **JavaScript API** Key 和安全密钥。
-2. 将 Key 限制到正式域名。
-3. 在“高德前端地图”中添加两个值。
+在[有道智云](https://ai.youdao.com/)创建应用并开通文本翻译，在“有道翻译”下填写应用 ID 和应用密钥。计费说明见[官方价格页](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html)。
 
-不要与高德 WebService Key 共用。
+### OpenAI 兼容接口
 
-翻译优先级在每个 API Key 的编辑框中设置，DeepL、有道、OpenAI 兼容密钥互相独立；旧方式优先级只作为首次迁移默认值。Google 网页翻译没有 Key，优先级放在其开关旁。独立优先级面板已移除。模型输入框旁可获取实时列表，也可直接输入模型名称；获取成功会回填实际 API 前缀。固定提示词以质量优先，要求严格 JSON、一一对应和数字标识符保留。
+可以接入任何兼容 OpenAI **Chat Completions** 格式的服务（如 DeepSeek、Gemini 代理、OpenRouter 等）。
 
-首次导入启用在线翻译时，同样按每个 Key 的优先级调度并通过代理记账。地址字段修正后，旧展示译文缓存自动失效。模型获取支持秒数和 HTTP 日期形式的 Retry-After。试用或新用户奖励不保证周期续期；DeepL 一次性奖励不会被本地自动补充。
+**添加步骤**
+
+1. 在“OpenAI 兼容接口”中点击添加，填写接口地址和 API Key；
+2. 点击模型输入框旁的按钮获取模型列表并选择模型，也可以直接输入模型名称；
+3. 保存后点击“测试”确认可用。
+
+额度默认为“无限额度”；需要限制每日请求数时取消勾选并填写上限。
+
+**接口地址**：填前缀或完整地址都可以，下方会实时显示实际请求地址。
+
+| 填写 | 实际请求 |
+|---|---|
+| `https://api.example.com/v1` | `https://api.example.com/v1/chat/completions` |
+| `https://api.example.com/v1/chat/completions` | 原样使用 |
+| `https://api.example.com`（无版本号） | 保存时自动探测，通常为 `…/v1/chat/completions` |
+
+远程地址必须使用 HTTPS；HTTP 只允许 `localhost`。
+
+**提示词**：新建时会预填内置的默认提示词，留空同样使用默认值，修改后可一键恢复。它只用来调整翻译风格；“只输出 JSON、条数一致、保留数字”等规则由系统固定附加，无法被覆盖。
+
+**思考强度**：默认发送 `low`。推理模型响应较慢，单次翻译请求（含排队）最长等待 120 秒。如果模型列表提供了支持的档位，会自动选择合适的值；否则可以按供应商文档填写。
+
+**测试**：点击“测试”会打开过程窗口，逐步显示：
+
+- 实际请求地址、模型与参数；
+- HTTP 状态和耗时；
+- 结束原因、Token 用量和模型回复；
+- 失败时供应商返回的错误信息（API Key 已遮罩）。
+
+测试分两种模式：发送 `"hi"` 的连通性测试，以及地址翻译样例测试。被标记为“需检查”的凭据仍然可以测试，测试通过后会恢复可用；模型输出格式不对不会让凭据被标记为需检查。
+
+## 安全建议
+
+- 服务端 Key 一律限制为服务器 IP，网页地图 Key 一律限制为域名；
+- 不要把任何 Key 写进仓库、截图或日志；
+- 备份数据库时一并保存 `data/secrets/config_master_key`，否则无法解密已保存的密钥。

@@ -7,6 +7,7 @@ import { pinyin } from 'pinyin-pro';
 import { createSourceAdapters, loadSourceCatalog, sourceCapabilityRevision } from './source-adapters.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
+import { OPENAI_COMPATIBLE_TIMEOUT_MS } from '../credential-broker/openai-compatible.mjs';
 import { loadGoogleCoverageTargets } from './google-coverage-targets.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
 import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
@@ -232,7 +233,7 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
     return result.translations.map((item) => item.text);
   } : null);
   const openAICompatible = providers['openai-compatible'] || (broker ? async (texts) => {
-    const result = await broker.request('openai-compatible.translate', { values: texts, target }, { signal, maxDispatches: 2 });
+    const result = await broker.request('openai-compatible.translate', { values: texts, target }, { signal, maxDispatches: 2, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000 });
     return result.translations;
   } : null);
   for (let offset = 0; offset < missing.length;) {

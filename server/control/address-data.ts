@@ -334,7 +334,7 @@ export const listAddressData = async (
       lastSuccessfulAt: latestIso([row.country_last_success_at, ...shards.map((shard) => shard.last_success_at)]),
       lastError: row.country_code === 'CN'
         ? chinaReason || row.country_last_error || null
-        : status === 'blocked' && queue?.reason ? queue.reason
+        : queue?.state && queue.state !== 'failed' ? queue.reason || null
           : shards.find((shard) => shard.status === 'failed')?.last_error || row.country_last_error || null
     };
   });

@@ -27,3 +27,18 @@ export declare const parseOpenAICompatibleModels: (body: unknown) => OpenAICompa
 export declare const fetchOpenAICompatibleModelCatalog: (value: unknown, fetchImpl?: typeof fetch, signal?: AbortSignal) => Promise<{ models: OpenAICompatibleModel[]; baseUrl: string }>;
 export declare const fetchOpenAICompatibleModels: (value: unknown, fetchImpl?: typeof fetch, signal?: AbortSignal) => Promise<OpenAICompatibleModel[]>;
 export declare const translateOpenAICompatible: (value: unknown, values: string[], target: string, fetchImpl?: typeof fetch, signal?: AbortSignal, options?: { prompt?: string }) => Promise<string[]>;
+export declare const openAICompatibleChatUrl: (baseUrl: string) => string;
+export declare const openAICompatibleResponseContent: (body: unknown) => string;
+export declare const OPENAI_COMPATIBLE_DIAGNOSTIC_VALUES: readonly string[];
+export declare const OPENAI_COMPATIBLE_TIMEOUT_MS: number;
+export interface OpenAICompatibleDiagnosticStep { kind: 'info' | 'success' | 'error' | 'data'; key: string; detail?: string }
+export interface OpenAICompatibleDiagnostic {
+  success: boolean;
+  outcome: 'success' | 'request' | 'qps' | 'quota' | 'auth' | 'network' | 'invalid';
+  code?: string;
+  steps: OpenAICompatibleDiagnosticStep[];
+  translations?: string[];
+}
+export declare const diagnoseOpenAICompatible: (value: unknown, options?: { mode?: 'chat' | 'translate'; prompt?: string }, fetchImpl?: typeof fetch) => Promise<OpenAICompatibleDiagnostic>;
+export declare const openAICompatibleBaseHasVersion: (baseUrl: string) => boolean;
+export declare const resolveOpenAICompatibleBaseUrl: (value: unknown, fetchImpl?: typeof fetch) => Promise<string | null>;

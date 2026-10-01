@@ -128,7 +128,7 @@ export const createCredentialBroker = async ({
     const respond = (status, body, headers = {}) => send(status, body, {
       ...headers, 'X-Address-Upstream-Requests': String(accounting.dispatchCount)
     });
-    const signal = providedSignal || AbortSignal.timeout(30_000);
+    const signal = providedSignal || AbortSignal.timeout(definition.timeoutMs || 30_000);
     if (definition.provider === 'deepl') {
       const result = await executeDeepL({ database, masterKey: store.masterKey, clientId, testPolicies: store.testPolicies,
         requestKey, parameters, usageOnly: definition.usageOnly, fetchImpl, now, signal, maxDispatches,
@@ -274,7 +274,7 @@ export const createCredentialBroker = async ({
             : started.request.status === 'unknown' ? 'BROKER_OUTCOME_UNKNOWN' : 'REQUEST_ALREADY_COMPLETED';
         return send(409, { code });
       }
-      const requestSignal = AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]);
+      const requestSignal = AbortSignal.any([request.signal, AbortSignal.timeout(definition.timeoutMs || 30_000)]);
       return await gate.run(definition.provider, clientId, () => execute({
         clientId, requestKey: started.request.id, definition, parameters,
         maxDispatches: input.maxDispatches ?? 32, accounting, signal: requestSignal

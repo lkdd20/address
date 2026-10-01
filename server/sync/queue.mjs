@@ -1300,15 +1300,31 @@ export const createSyncQueue = ({
     if (migrations.length) result = await build();
     return result;
   };
-  const snapshot = async () => {
-    const result = await queueSnapshot();
-    return {
-      ...result,
-      entries: result.entries.map(({
-        sourceFingerprints, failureFingerprints, failureContexts, sourceExecution, probeShardIds, legacyMigration, ...entry
-      }) => entry)
-    };
+  const publicSnapshot = (result) => ({
+    ...result,
+    entries: result.entries.map(({
+      sourceFingerprints, failureFingerprints, failureContexts, sourceExecution, probeShardIds, legacyMigration, ...entry
+    }) => entry)
+  });
+  let cachedSnapshot = null;
+  let published = { body: '', at: 0 };
+  let chinaLogState = '';
+  const remember = async (result) => {
+    const value = publicSnapshot(result);
+    cachedSnapshot = { value, at: now().getTime() };
+    if (!history?.publishQueueSnapshot) return value;
+    const { generatedAt, ...content } = value;
+    const body = JSON.stringify(content);
+    if (body === published.body && cachedSnapshot.at - published.at < 60_000) return value;
+    try {
+      await history.publishQueueSnapshot(JSON.stringify(value), generatedAt);
+      published = { body, at: cachedSnapshot.at };
+    } catch (error) {
+      log.error?.('[sync-queue] snapshot publish failed', error);
+    }
+    return value;
   };
+  const snapshot = async () => remember(await queueSnapshot());
 
   let stopped = true;
   let loop = null;
@@ -1520,23 +1536,35 @@ export const createSyncQueue = ({
     await ensureRecoveredSourceStates();
     if (!coordinator.currentJob) await history?.repairInterruptedRuns?.();
     await history?.schedulerHeartbeat(coordinator.currentJob?.id || null);
-    const snap = await queueSnapshot();
-    await Promise.all(snap.entries.filter((entry) => entry.state === 'quota_wait' && entry.runnableShardId)
-      .map((entry) => history?.repairQuotaWait?.({
-        countryCode: entry.countryCode,
-        sourceId: entry.runnableShardId
-      })));
+    const refresh = async () => {
+      const value = await queueSnapshot();
+      await remember(value);
+      await Promise.all(value.entries.filter((entry) => entry.state === 'quota_wait' && entry.runnableShardId)
+        .map((entry) => history?.repairQuotaWait?.({
+          countryCode: entry.countryCode,
+          sourceId: entry.runnableShardId
+        })));
+      return value;
+    };
+    const chinaBlocked = async () => {
+      const china = await sources.chinaPriority?.(now());
+      if (!china?.blocksQueue) { chinaLogState = ''; return false; }
+      if (chinaLogState !== china.executionState) log.log?.(`[sync-queue] CN priority state=${china.executionState}`);
+      chinaLogState = china.executionState;
+      return true;
+    };
+    if (!coordinator.currentJob && await chinaBlocked()) {
+      if (!cachedSnapshot || now().getTime() - cachedSnapshot.at >= 60_000) await refresh();
+      return Math.min(rescanMs, 5_000);
+    }
+    const snap = await refresh();
     if (coordinator.currentJob) {
       await coordinator.waitForIdle();
       await onIdle?.();
       return 0;
     }
     const currentTime = now();
-    const china = await sources.chinaPriority?.(currentTime);
-    if (china?.blocksQueue) {
-      log.log?.(`[sync-queue] CN priority state=${china.executionState}`);
-      return Math.min(rescanMs, 5_000);
-    }
+    if (await chinaBlocked()) return Math.min(rescanMs, 5_000);
     const pick = snap.entries.find((entry) => entry.state === 'queued'
       && (!entry.nextAttemptAt || timestamp(entry.nextAttemptAt) <= currentTime.getTime()));
     const probePick = !pick && probeSource

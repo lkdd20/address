@@ -1,122 +1,112 @@
-# Address 部署文档
+# 部署
 
-[English](DEPLOYMENT.md) · [简体中文](DEPLOYMENT.zh-CN.md) · [繁體中文](DEPLOYMENT.zh-TW.md)
+[English](DEPLOYMENT.md) · 简体中文 · [繁體中文](DEPLOYMENT.zh-TW.md)
 
-项目只维护一种生产部署方式：Docker Compose。应用、PostgreSQL、迁移和自动同步均由仓库根目录的 `docker-compose.yml` 管理。
+Address 只支持一种生产部署方式：**Docker Compose**。应用、PostgreSQL、数据库迁移和自动同步全部由仓库根目录的 `docker-compose.yml` 管理。
 
-## Docker Compose 快速部署
+## 环境要求
+
+| 项目 | 要求 |
+|---|---|
+| 系统 | Linux，AMD64 或 ARM64 |
+| 运行时 | Docker Engine 24+、Docker Compose v2 |
+| 内存 | 至少 4 GB；首次导入美国、法国等大型国家建议 8 GB 以上 |
+| 磁盘 | 27 个国家完整同步后数据库约 15 GB，另需同步暂存与备份空间 |
+| 网络 | 能访问 Docker Hub 与各数据源；对外服务需要 HTTPS 反向代理 |
+
+## 安装
 
 ```bash
 mkdir address && cd address
 curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
 docker compose up -d
-docker compose ps
-curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-Compose 的 bootstrap 服务会自动创建相对目录和持久化内部密钥。管理员初始密码为 `admin`，前端密码默认关闭。首次启动前可直接在 `docker-compose.yml` 修改 `ADMIN_INITIAL_PASSWORD` 或 `FRONTEND_INITIAL_PASSWORD`；使用默认管理员密码登录后，必须先修改密码。
+查看状态：
 
 ```bash
-cat data/secrets/admin_bootstrap_password
+docker compose ps                                  # 所有服务应为 running / healthy
+curl -fsS http://127.0.0.1:8787/api/v1/ready       # 返回 {"status":"ready"} 即可使用
 ```
 
-登录 `/admin/` 后可修改前端密码、管理员密码、API 调用令牌、地图平台 Key、额度与其他业务设置。
+浏览器打开 `http://127.0.0.1:8787/admin/`，用初始密码 `admin` 登录并按提示修改密码。
 
-## 运行要求
+## 服务组成
 
-- Linux AMD64 或 ARM64
-- Docker Engine 与 Docker Compose v2
-- 4 GB 内存；执行大型国家首次同步建议 8 GB 或更多
-- 足够容纳 PostgreSQL、地址数据、同步暂存和备份的磁盘空间
-- HTTPS 反向代理
+| 服务 | 作用 | 生命周期 |
+|---|---|---|
+| `bootstrap` | 生成并校验内部密钥 | 完成后退出 |
+| `postgres` | PostgreSQL 16，只在内部网络可见 | 常驻 |
+| `migrate` | 每次启动前执行数据库迁移 | 完成后退出 |
+| `api` | 网页与 API，默认监听 `127.0.0.1:8787` | 常驻 |
+| `sync` | 自动同步服务 | 常驻 |
+| `credential-broker` | 平台密钥加密、轮换与额度协调 | 常驻 |
 
-开发电脑无需安装 Docker。正式镜像由 GitHub Actions 构建并发布到 Docker Hub：`daimon23/address`。
+`sync` 首次启动需要加载行政目录，可能需要几分钟才会变为 healthy，期间不影响网页和 API。
 
 ## 目录结构
 
+所有数据都保存在 Compose 文件所在目录，整体迁移或备份时直接打包该目录即可。
+
 ```text
 address/
-├── docker-compose.yml    # 唯一必需的部署文件
-├── config/secrets/       # 可选的旧版密钥导入位置
-├── data/secrets/         # 自动生成的持久化密钥
-├── data/address/         # 地址池与同步暂存
-├── data/postgres/        # PostgreSQL 数据
-├── runtime/              # 同步运行状态
-├── backups/              # pg_dump 备份
-└── logs/
+├── docker-compose.yml
+├── .env                 # 可选，覆盖默认配置
+├── data/
+│   ├── secrets/         # 自动生成的内部密钥（务必备份）
+│   ├── postgres/        # 数据库文件
+│   └── address/         # 同步暂存
+├── runtime/             # 同步运行状态
+└── backups/             # 建议的备份位置
 ```
 
-所有挂载均为 Compose 文件所在目录的相对路径，不依赖 `/root/address` 或其他固定安装位置。不要让两个 PostgreSQL 容器同时挂载同一个 `data/postgres`。
+不要让两个 PostgreSQL 容器同时挂载同一个 `data/postgres`。
 
-## 可选部署配置
+## 配置
 
-默认配置可以直接启动。可直接编辑 Compose 中的 `environment`；只有需要统一覆盖镜像、端口或反向代理设置时才创建 `.env`：
+默认配置可直接运行。需要调整时，在 Compose 文件旁创建 `.env`：
 
-```bash
-cp ops/compose.env.example .env
-```
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ADDRESS_IMAGE` | `daimon23/address:latest` | 应用镜像，可固定为某个版本标签 |
+| `API_BIND_ADDRESS` | `127.0.0.1` | API 监听地址；直接对外时改为 `0.0.0.0`（不推荐） |
+| `API_PORT` | `8787` | API 端口 |
+| `ALLOWED_ORIGINS` | 空 | 允许跨域访问的来源，多个以逗号分隔 |
+| `TRUST_PROXY` | `false` | 位于反向代理之后时设为 `true`，用于获取真实客户端 IP |
+| `COOKIE_SECURE` | `false` | 使用 HTTPS 时设为 `true` |
+| `ADMIN_INITIAL_PASSWORD` | `admin` | 首次启动时的管理员密码，仅首次生效 |
+| `FRONTEND_INITIAL_PASSWORD` | 空 | 首次启动时的前端访问密码，留空表示不启用 |
+| `TRANSLATION_BACKFILL_ENABLED` | `true` | 是否在后台为已发布地址补全多语言翻译 |
+
+修改后执行 `docker compose up -d` 生效。前端密码、管理员密码、API 令牌、平台密钥和同步目标都在管理后台中设置，不需要写进 `.env`。
+
+## 反向代理
+
+正式环境请只对外开放 80/443 端口，由反向代理转发到 `127.0.0.1:8787`，并在 `.env` 中设置：
 
 ```dotenv
-ADDRESS_IMAGE=daimon23/address:latest
-API_BIND_ADDRESS=127.0.0.1
-API_PORT=8787
-ALLOWED_ORIGINS=*
-TRUST_PROXY=false
-COOKIE_SECURE=false
+ALLOWED_ORIGINS=https://address.example.com
+TRUST_PROXY=true
+COOKIE_SECURE=true
 ```
 
-HTTPS 反向代理生产环境应将 `ALLOWED_ORIGINS` 设置为一个或多个以逗号分隔的 HTTPS 来源，并将 `TRUST_PROXY`、`COOKIE_SECURE` 改为 `true`。第三方 API Key 和常规业务参数统一在管理员后台管理。
+**Caddy**（自动申请证书）：
 
-## 服务与网络
-
-- `postgres`：PostgreSQL 16，只连接内部网络
-- `bootstrap`：创建或校验持久化内部密钥，完成后退出
-- `migrate`：每次启动前执行一次数据库迁移，成功后退出
-- `api`：WebUI 与 API，默认只监听 `127.0.0.1:8787`
-- `sync`：自动同步服务，只连接 Compose 私有网络
-- `credential-broker`：凭据加密轮换与额度协调服务，只连接 Compose 私有网络
-
-自动同步默认启用，队列发现、超时、有限重试、冷却、来源耗尽与临时文件清理由服务自动处理。
-
-## 常用命令
-
-```bash
-docker compose ps
-docker compose logs -f api sync
-docker compose restart api sync
-docker compose down
-docker compose up -d
+```caddyfile
+address.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
 ```
 
-升级镜像：
-
-```bash
-mkdir -p backups
-docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
-docker compose pull
-docker compose up -d
-docker compose ps
-```
-
-## 备份与恢复
-
-```bash
-mkdir -p backups
-docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
-
-docker compose stop api sync credential-broker
-docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' < ./backups/address-YYYYMMDDTHHMMSSZ.dump
-docker compose up -d
-```
-
-备份包含地址表、控制表、加密后的凭据、同步状态和审计数据。`data/secrets/config_master_key` 必须与数据库备份一起安全保存，否则无法解密后台保存的凭据。跨 PostgreSQL 主版本必须使用 `pg_dump` 与 `pg_restore`，不能直接复用数据目录。
-
-## Nginx 示例
+**Nginx**：
 
 ```nginx
 server {
-    listen 80;
-    server_name YOUR_DOMAIN.example;
+    listen 443 ssl http2;
+    server_name address.example.com;
+
+    ssl_certificate     /etc/ssl/address.example.com/fullchain.pem;
+    ssl_certificate_key /etc/ssl/address.example.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:8787;
@@ -129,10 +119,79 @@ server {
 }
 ```
 
-只公开 HTTP/HTTPS，禁止公开 PostgreSQL 和同步服务端口。
+不要对外暴露 PostgreSQL 或同步服务端口。
 
-## Docker Hub 发布
+## 日常运维
 
-`.github/workflows/docker-publish.yml` 在 `main` 更新、版本标签或手动触发时构建 AMD64/ARM64 镜像。GitHub 仓库只需配置 `DOCKERHUB_TOKEN`，内容为具有读写权限的 Docker Hub Access Token；公开用户名 `daimon23` 已固定在工作流中。
+```bash
+docker compose ps                     # 服务状态
+docker compose logs -f api sync       # 查看日志
+docker compose restart api            # 重启单个服务
+docker compose down                   # 停止（数据保留）
+docker compose up -d                  # 启动
+```
 
-Token 只保存在 GitHub Actions Secrets，禁止写入仓库、Compose、截图或日志。
+## 升级
+
+```bash
+# 1. 先备份（见下一节）
+# 2. 拉取新镜像并重建
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+数据库迁移会在 `migrate` 服务中自动完成。若需要固定版本，将 `.env` 中的 `ADDRESS_IMAGE` 设为具体标签。
+
+## 备份与恢复
+
+备份：
+
+```bash
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' \
+  > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
+cp -r data/secrets backups/secrets-$(date -u +%Y%m%d)
+```
+
+恢复：
+
+```bash
+docker compose stop api sync credential-broker
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' \
+  < backups/address-YYYYMMDDTHHMMSSZ.dump
+docker compose up -d
+```
+
+> **`data/secrets/config_master_key` 必须与数据库备份一起保存。** 后台保存的平台密钥都用它加密，丢失后只能重新录入。
+
+跨 PostgreSQL 主版本升级时只能使用 `pg_dump` / `pg_restore`，不能直接复用 `data/postgres`。
+
+## 常见问题
+
+**忘记管理员密码怎么办？**
+重新生成初始密码并清除现有管理员账号，服务启动时会用新的初始密码重建管理员（新密码至少 10 位）：
+
+```bash
+docker compose stop api
+rm data/secrets/admin_bootstrap_password
+ADMIN_INITIAL_PASSWORD='your-new-password' docker compose run --rm bootstrap
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+DELETE FROM control.auth_identities WHERE kind = 'admin';
+DELETE FROM control.auth_sessions WHERE role = 'admin';
+SQL
+docker compose up -d
+```
+
+**`sync` 一直显示 starting？**
+`sync` 启动时要加载行政目录并校验已发布数据，数据量越大耗时越长，可能需要几分钟。用 `docker compose logs -f sync` 查看进度，日志持续输出即为正常；网页和 API 不受影响。
+
+**某个国家长期“待补充”？**
+在后台“地址数据”中打开该国家详情页，“概览”会显示当前状态和原因，例如等待额度重置、缺少平台密钥或来源已达上限。大部分国家不需要任何密钥即可同步；需要密钥的平台见 [API Key 配置](API_KEYS.zh-CN.md)。
+
+**能否不用 Docker？**
+生产环境只维护 Docker Compose 这一种方式。本地开发请参考[开发文档](DEVELOPMENT.zh-CN.md)。
+
+## 镜像发布
+
+推送到 `main` 或打版本标签时，GitHub Actions 会构建 AMD64/ARM64 镜像并发布到 Docker Hub：`daimon23/address`。仓库需要配置 `DOCKERHUB_TOKEN` 机密（具有读写权限的 Docker Hub Access Token）。

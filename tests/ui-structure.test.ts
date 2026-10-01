@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import App, {
   createRequestId,
   fetchWithTimeout,
@@ -16,7 +16,8 @@ import { messages } from '../src/domain/i18n';
 const appSource = App.toString();
 const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
 const adminPageSource = readFileSync('src/pages/admin.astro', 'utf8');
-const adminSource = readFileSync('src/components/SyncAdmin.tsx', 'utf8');
+const adminSource = ['src/components/SyncAdmin.tsx', ...readdirSync('src/components/admin').map((file) => `src/components/admin/${file}`)]
+  .map((file) => readFileSync(file, 'utf8')).join('\n');
 const adminStyles = readFileSync('src/styles/admin.css', 'utf8');
 const worldMapSource = readFileSync('src/components/WorldCoverageMap.tsx', 'utf8');
 const monitorSource = readFileSync('src/components/PublicMonitor.tsx', 'utf8');
@@ -43,7 +44,8 @@ describe('strict residential generator page structure', () => {
     expect(worldMapSource).toContain('world-distribution-map');
     expect(worldMapSource).toContain('map-zoom-controls');
     expect(adminSource).toContain('CountryCoverageTable');
-    expect(adminSource).toContain('https://flagcdn.com/24x18/');
+    expect(adminSource).not.toContain('flagcdn.com');
+    expect(adminSource).toContain('/flags/${countryCode.toLowerCase()}.svg');
     expect(adminSource).toContain('country-flag');
     expect(adminSource).toContain('map-dialog-backdrop');
     expect(worldMapSource).toContain('cooperativeGestures: true');
@@ -74,7 +76,9 @@ describe('strict residential generator page structure', () => {
     expect(adminSource).toContain('admin-sidebar-status');
     expect(adminSource).toContain('node.level === 0 ? [node] : [...trail, node]');
     expect(adminSource).toContain('loadControllers.current[selected]?.abort()');
-    expect(adminSource).toContain("!authenticated || view !== 'addressData' || !addressDataRunning");
+    expect(adminSource).toContain('usePolling(async (signal) =>');
+    expect(adminSource).toContain("document.addEventListener('visibilitychange', resume)");
+    expect(adminSource).not.toContain('window.confirm(t.');
     expect(adminStyles).toContain('.nav-icon');
     expect(adminStyles).toContain('.dashboard-loading');
     expect(adminStyles).toContain('.dashboard-map-row');
@@ -200,7 +204,7 @@ describe('strict residential generator page structure', () => {
     expect(adminSource).toContain('role="listbox"');
     expect(adminSource).not.toContain('const LocaleSelect');
     expect(adminSource).not.toContain('<small>{t.administratorRole}</small>');
-    expect(adminSource).toContain("{ id: 'data', views: ['addressData', 'syncQueue', 'syncHistory', 'shortcuts', 'blacklist'] }");
+    expect(adminSource).toContain("{ id: 'data', views: ['addressData', 'syncHistory', 'shortcuts', 'blacklist'] }");
     expect(adminSource).toContain('sidebarStorageKey');
     expect(adminStyles).toContain('.admin-shell.is-collapsed');
     expect(adminStyles).toContain('prefers-reduced-transparency');
@@ -352,5 +356,17 @@ describe('strict residential generator page structure', () => {
     expect(messages.en.copyFailed).toBeTruthy();
     expect(messages['zh-CN'].copySuccess).toBeTruthy();
     expect(messages['zh-CN'].copyFailed).toBeTruthy();
+  });
+
+  it('offers an unlimited quota switch for OpenAI-compatible credentials', () => {
+    expect(adminSource).toContain('name="unlimitedQuota"');
+    expect(adminSource).toContain('quotaLimit: unlimited ? UNLIMITED_QUOTA : Number(quotaLimit)');
+    expect(adminSource).toContain('window.limit >= UNLIMITED_QUOTA');
+  });
+
+  it('shows administrative coverage separately from the per-node minimum ratio', () => {
+    expect(adminSource).toContain('country.lowestCoverage.covered / country.lowestCoverage.total');
+    expect(adminSource).toContain('interpolate(ui.minimumNodes');
+    expect(adminSource).not.toContain('Math.round(country.coverageActual * 100)');
   });
 });

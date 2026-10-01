@@ -12,7 +12,7 @@ const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
 const ADDRESS_SCHEMA_VERSION = 30;
-const CONTROL_SCHEMA_VERSION = 24;
+const CONTROL_SCHEMA_VERSION = 25;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -40,6 +40,9 @@ export const postgresPoolOptions = (environment = process.env) => ({
 export const createPostgresPool = (options = {}) => {
   const { environment, ...overrides } = options;
   const pool = new Pool({ ...postgresPoolOptions(environment), ...overrides });
+  pool.on('error', (error) => console.error(JSON.stringify({
+    event: 'postgres_idle_client_error', code: error.code || null, message: error.message
+  })));
   return pool;
 };
 
@@ -246,6 +249,21 @@ const upgradeCanonicalAddressIdentity = async (client) => {
   }
 };
 
+const controlQueueSnapshotMigration = `
+  ALTER TABLE sync_scheduler_state ADD COLUMN IF NOT EXISTS queue_snapshot_json TEXT;
+  ALTER TABLE sync_scheduler_state ADD COLUMN IF NOT EXISTS queue_snapshot_at TEXT;
+  UPDATE provider_quota_windows SET limit_count=100000000,updated_at=CURRENT_TIMESTAMP::text
+  WHERE limit_count=100 AND credential_id IN (SELECT id FROM provider_credentials WHERE provider='onemap');
+  UPDATE provider_credentials SET daily_limit=100000000,quota_limit=100000000,updated_at=CURRENT_TIMESTAMP::text
+  WHERE provider='onemap' AND quota_limit=100;
+  DELETE FROM provider_quota_windows
+  WHERE credential_id IN (SELECT id FROM provider_credentials WHERE provider='google-geocoding')
+    AND service='geocode-v4' AND period='day' AND limit_count=1000;
+  UPDATE provider_credentials SET qps_limit=5,daily_limit=10000,quota_period='month',quota_limit=10000,
+    quota_timezone_offset=-480,updated_at=CURRENT_TIMESTAMP::text
+  WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000;
+`;
+
 export const initializePostgres = async (pool, {
   addressSchema = addressSchemaUrl,
   controlSchema = controlSchemaUrl
@@ -367,6 +385,16 @@ export const initializePostgres = async (pool, {
             FROM provider_credentials WHERE provider='openai-compatible'
             ON CONFLICT (id) DO NOTHING`);
           await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (24,CURRENT_TIMESTAMP::text)
+            ON CONFLICT (version) DO NOTHING`);
+          await client.query('COMMIT');
+        }
+        if (Number(versions.control_version) < 25) {
+          await client.query('BEGIN');
+          await client.query('SET LOCAL search_path TO control, public');
+          await client.query("SET LOCAL lock_timeout TO '2s'");
+          await client.query("SET LOCAL statement_timeout TO '30s'");
+          await client.query(controlQueueSnapshotMigration);
+          await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (25,CURRENT_TIMESTAMP::text)
             ON CONFLICT (version) DO NOTHING`);
           await client.query('COMMIT');
         }

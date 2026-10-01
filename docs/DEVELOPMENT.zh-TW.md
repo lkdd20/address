@@ -1,158 +1,101 @@
-# Address 二次開發文檔
+# 開發指南
 
-[English](DEVELOPMENT.md) · [簡體中文](DEVELOPMENT.zh-CN.md) · [繁體中文](DEVELOPMENT.zh-TW.md)
+[English](DEVELOPMENT.md) · [简体中文](DEVELOPMENT.zh-CN.md) · 繁體中文
+
+本文面向需要修改原始碼或貢獻程式碼的開發者。只想部署使用，請看[部署文件](DEPLOYMENT.zh-TW.md)。
 
 ## 架構
 
 ```text
 瀏覽器
-  -> Astro 靜態頁面 + React WebUI
-  -> Hono Node.js API
-       -> PostgreSQL transactional 地址池
-       -> PostgreSQL coordinate 座標索引
-       -> 本地格式化與本地化
-       -> 僅已同步住宅地址池
-  -> 同步 supervisor
-       -> DuckDB 讀取 Overture GeoParquet
-       -> pyosmium 讀取 Geofabrik/OSM PBF
-       -> 驗證並原子發佈國家快照
+  └─ Astro 靜態頁面 + React（WebUI、管理後臺）
+       └─ Hono API（/api/v1、/admin/api）
+            ├─ PostgreSQL：地址池、行政目錄、控制資料
+            ├─ credential-broker：服務商金鑰加密、輪換與額度
+            └─ sync：排程、ETL（DuckDB / pyosmium）、校驗與原子釋出
 ```
 
-地圖渲染與地址真實性驗證相互隔離。Google 使用座標預覽；高德使用專用 JS API Key 和同源 `/_AMapService` 代理。高德 JS 安全密鑰只以密文保存在控制數據庫，不進入瀏覽器構建產物或地圖配置響應。
+- 國家快照先在候選區校驗，通過後才在事務中替換線上資料；失敗不影響舊資料。
+- 同步程序把佇列快照寫入資料庫，管理後臺直接讀取，同步程序繁忙時後臺也能正常顯示。
+- 地圖顯示與地址校驗相互獨立；高德 JS 安全金鑰只在服務端通過 `/_AMapService` 代理使用。
 
-## 目錄職責
+## 目錄
 
-| 路徑 | 職責 |
+| 路徑 | 內容 |
 |---|---|
-| `src/components/` | React WebUI 與同步管理界面 |
-| `src/domain/` | 國家元數據、生成、格式化、本地化、資料與導出規則 |
-| `src/pages/` | 本地化 WebUI 與 API 文檔的 Astro 路由 |
-| `server/api/` | Hono 應用、數據倉庫與外部服務適配器 |
-| `server/database/` | PostgreSQL Schema 與遷移入口 |
-| `server/sync/` | 數據源適配、ETL、調度、快照發布與同步管理 API |
-| `scripts/` | 目錄生成、驗證、線上探測與發佈審計 |
-| `ops/` | Linux VPS 安裝、進程、備份、恢復與部署腳本 |
-| `tests/` | Vitest 單元、集成、數據質量與 UI 結構測試 |
+| `src/pages/` | Astro 路由（多語言 WebUI、API 文件、管理後臺） |
+| `src/components/` | React 元件；`SyncAdmin.tsx` 是後臺外殼 |
+| `src/components/admin/` | 後臺各頁面：`dashboard`、`sync`（地址資料工作區）、`providers`、`security`、`shortcuts`，以及共享 `ui`、`text`、`locale-text`、`types` |
+| `src/domain/` | 國家後設資料、生成、格式化、本地化、翻譯提示詞 |
+| `src/styles/` | `global.css`（WebUI）、`admin.css`（後臺設計 Token 與元件） |
+| `server/api/` | 公開 API、資料倉儲、外部服務適配 |
+| `server/control/` | 後臺 API、鑑權、令牌、憑據儲存、Schema |
+| `server/credential-broker/` | 金鑰代理與各服務商適配 |
+| `server/sync/` | 資料來源適配、ETL、佇列、釋出 |
+| `server/database/` | PostgreSQL 連線與遷移 |
+| `scripts/` | 目錄生成、資料校驗、線上驗收指令碼 |
+| `ops/` | Compose 部署、藍綠切換、備份恢復指令碼 |
+| `tests/` | Vitest 單元/整合測試與 Playwright 端到端測試 |
+| `docs/strategies/` | 每個國家的地址生成策略 |
 
-## 本地環境
+## 本地執行
 
-要求 Node.js 24 或更新版本。只有源數據同步需要 Python 3.10+（3.12 已驗證）和 `venv`；先執行 `pip install -r server/sync/requirements.txt`，並用 `PYTHON_BIN` 指向該解釋器。
+需要 Node.js 24+。只有執行資料同步時才需要 Python 3.10+（`pip install -r server/sync/requirements.txt`，並用 `PYTHON_BIN` 指向該直譯器）。
 
 ```bash
 git clone https://github.com/daimon3332/address.git
 cd address
-cp .env.example .env
+cp .env.example .env      # 至少填寫 POSTGRES_URL
 npm ci
 npm run db:migrate
-npm run dev
+npm run dev               # http://127.0.0.1:8787
 ```
 
-`npm run dev` 先構建一次 WebUI，再由 `127.0.0.1:8787` 的 Hono API 提供服務。需要實時編輯 UI 時，同時運行 `npm run dev:api` 和 `npm run dev:web`：`127.0.0.1:4321` 的 Astro 開發服務器把 `/api` 代理到 Hono，把 `/sync-control` 代理到 `127.0.0.1:8791` 的本地同步服務。
+需要熱更新前端時，分別執行 `npm run dev:api` 和 `npm run dev:web`（Astro 開發伺服器在 `4321`，並把 `/api` 代理到 Hono）。
 
-新遷移的資料庫只有表結構，不包含地址池。本地開發和測試套件基於空 Schema 加 `scripts/fixtures/`、`tests/fixtures/` 中的小型夾具執行；生產 PostgreSQL 資料不會離開伺服器（`data/` 被 Git 忽略，部署腳本會保留伺服器資料庫）。需要本地真實資料時，先匯入目錄（`npm run data:catalog` 加 `npm run data:catalog:import`），再匯入一個小國家，例如 `npm run data:address-pool:etl -- --manual --shard SG`。
+新建的資料庫只有表結構。要在本地生成地址，先匯入行政目錄，再匯入一個小國家：
 
-常用命令：
+```bash
+npm run data:catalog && npm run data:catalog:import
+npm run data:address-pool:etl -- --manual --shard SG
+```
+
+常規開發不需要任何第三方 API Key。
+
+## 常用命令
 
 | 命令 | 用途 |
 |---|---|
-| `npm run dev` | 構建一次 WebUI，再以監聽模式運行 Hono API |
-| `npm run dev:web` | 只運行 Astro（端口 4321，代理 `/api`） |
-| `npm run dev:api` | 只運行 Hono |
-| `npm test` | 運行 Vitest 測試套件 |
-| `npm run db:migrate` | 創建或遷移本地 PostgreSQL Schema |
-| `npm run data:regions` | 更新內置地區元數據 |
-| `npm run data:catalog` | 下載並生成位置目錄種子 |
-| `npm run data:catalog:import` | 把目錄種子導入本地數據庫（任何地址導入前必需） |
-| `npm run data:address-pool:estimate` | 估算同步計劃 |
-| `npm run data:address-pool:sync:dry-run` | 只驗證 ETL 計劃，不發佈數據 |
-| `npm run data:address-pool:bootstrap` | 執行支持斷點續跑的全部國家首次導入 |
-| `npm run sync:serve` | 運行本地調度器與同步管理 API |
+| `npm run dev` | 構建 WebUI 並以監聽模式執行 API |
+| `npm test` | Vitest 測試（使用 pg-mem 和小型夾具，不需要真實資料庫） |
+| `npm run check` | Astro 診斷與 TypeScript 檢查 |
+| `npm run build` | 生產構建 |
+| `npm run check:public` | 檢查忽略規則、必需檔案和金鑰形態 |
+| `npm run test:admin-e2e` | 管理後臺端到端測試（Playwright） |
+| `npm run test:ui-e2e` | WebUI 穩定性與佈局測試 |
+| `npm run db:migrate` | 建立或遷移資料庫 |
+| `npm run sync:serve` | 本地運行同步排程器 |
 
-## 配置模型
+## 修改指南
 
-把 `.env.example` 複製為被忽略的 `.env`。密鑰始終留在服務端。只有明確用於 Astro 公開環境的變量才應進入瀏覽器構建；第三方服務 Key 和 `SYNC_ADMIN_TOKEN` 必須保留在 API 或同步進程環境中。`AMAP_API_KEY` 是伺服器端 WebService 憑據；`AMAP_JS_API_KEY` 是獨立且受域名限制的瀏覽器加載 Key；`AMAP_JS_SECURITY_CODE` 僅由 `/_AMapService` 在伺服器端使用。
+**公開 API**：路由與校驗寫在 `server/api/index.ts`，資料庫訪問放在 `server/api/repositories/`，外部請求放在 `server/api/services/` 並設定超時。響應統一為 `{ data }` 或 `{ error: { code, message } }`，同時更新 `src/domain/api-contract.ts` 中的 OpenAPI 描述和三語 [API 文件](API.zh-TW.md)。
 
-常規開發不需要第三方 API Key。可選同步平台參見 [API Key 設定文件](API_KEYS.zh-TW.md)。
+**管理後臺**：頁面放在 `src/components/admin/`，文案加到 `text.ts` 或 `locale-text.ts`（9 種語言都要補），樣式只使用 `admin.css` 中的 Token。確認操作使用 `useConfirm`，彈窗使用 `Dialog`，輪詢使用 `usePolling`。
 
-## 數據庫與同步
+**資料庫**：控制庫 Schema 變更在 `server/database/postgres.mjs` 中新增版本化遷移，不要修改已釋出的遷移。
 
-PostgreSQL 使用交易和連線池，保存地址、多語言本地化、來源證據、國家狀態和座標索引。國家發佈是交易性的：候選快照通過驗證後才替換 active 資料，失敗的候選不會影響舊快照。
+**國家或資料來源**：需要同時更新國家後設資料、地址格式、郵遞區號規則、來源分片、測試和 `docs/strategies/` 中對應國家的策略文件。地址欄位只能來自資料來源，缺失值保持為空；合成測試資料必須與地址來源明確分開。
 
-同步來源：
-
-- Overture Maps：DuckDB 遠程篩選並讀取 GeoParquet。
-- Geofabrik 提供的 OpenStreetMap：pyosmium 流式讀取預篩選後的 PBF node 和 way。
-- 本地地區與位置目錄：約束選擇器並驗證行政區一致性。
-
-管線會過濾機構和非地址要素、去重、檢查住宅證據、驗證本地化組件並執行容量門禁。API 或同步任務執行時不要手動修改生產資料庫。
-
-手工執行示例：
-
-```bash
-node server/sync/address-etl.mjs --initial --all
-node server/sync/address-etl.mjs --manual --shard US
-```
-
-生產環境由同步監督程序執行，不使用定時任務反覆全量匯入。排程器喚醒只會續跑具備執行資格的 checkpoint 或新增來源能力；相同指紋已經完成或耗盡的來源不會僅因時間經過而重新匯入。
-
-## 擴展公開 API
-
-1. 在 `server/api/index.ts` 定義請求校驗與路由。
-2. 數據庫訪問統一放在 `server/api/repositories/`。
-3. 服務商或網絡邏輯放在 `server/api/services/`，並顯式設置超時。
-4. 沿用 `{ data: ... }` 或 `{ error: { code, message } }` 響應結構。
-5. 添加 API 測試，並同步更新三語 API 文檔。
-
-公開錯誤使用穩定、機器可讀的錯誤碼，不要讓調用方依賴本地化 UI 文案。
-
-## 擴展國家或地址規則
-
-國家行為涉及元數據、格式、位置選項、本地化、郵編規則、源分片計劃和測試。添加國家前需要：
-
-1. 在 `src/domain/` 定義元數據和支持的篩選項。
-2. 添加地址格式與郵編規則。
-3. 添加源分片並驗證許可和署名元數據。
-4. 為同一地址或精確建築關係分別驗證地址存在證據與獨立住宅用途證據。
-5. 添加本地化、確定性選擇、嚴格篩選、IP 座標或城市匹配和郵編格式測試。
-6. 只使用既有腳本重新生成目錄。
-
-地址與室內字段必須全部來自來源，缺失值保持為空；合成測試資料與地址來源信息保持明確分離。
-
-## WebUI 開發
-
-本地化頁面從 `src/pages/[locale].astro` 進入並掛載 `src/components/App.tsx`。共享樣式位於 `src/styles/global.css`；同步界面使用 `SyncAdmin.tsx` 和 `admin.css`。
-
-修改結果字段時，先更新領域類型，再把生成、API 序列化、UI、導出、翻譯與測試作為同一契約一起更新。保持結果區尺寸穩定，並驗證英文和中文值。
-
-地圖顯示包含四個獨立布爾開關：中國 Google、中國高德、國外 Google、國外高德，默認 Google 開啟、高德關閉。中國高德把 WGS-84 轉為 GCJ-02；國外高德使用來源座標和 `showOversea`，因此需要世界地圖權限。兩個平台組件必須獨立失敗，單個平台異常不能導致整個結果頁白屏。
-
-## 驗證與發佈門禁
-
-每次提交前運行：
+## 提交前檢查
 
 ```bash
 npm test
 npm run check
 npm run build
 npm run check:public
+git diff --check
 ```
 
-這些命令覆蓋 Vitest、Astro 診斷、TypeScript、生產構建、忽略文件策略、必需公開文件和常見密鑰形態。Linux CI 還會檢查 Shell 語法並編譯 Python 文件。
+CI 還會檢查 Shell 語法並編譯 Python 檔案。改動後臺介面時，再執行 `npm run test:admin-e2e` 和 `npm run test:ui-e2e`。
 
-完整數據庫同步後運行：
-
-```bash
-npm run check:production
-```
-
-該命令檢查數據庫完整性、必需表、國家就緒狀態和容量上限。線上環境探測使用獨立命令，因為它們要求已有運行中的部署。
-
-## 貢獻檢查清單
-
-- 保持改動範圍清晰，不引入無關依賴或格式化變更。
-- 按行為影響補充相應測試。
-- 地圖改動需覆蓋四個地區/平台開關、後台設置持久化、憑據掩碼、代理目標白名單，以及瀏覽器響應和日誌中不存在高德安全密鑰。
-- 英文、簡體中文和繁體中文文檔同步更新。
-- 真實憑據、數據庫、日誌、含私密數據的截圖和運行狀態不進入 Git。
-- 除項目命令外執行 `git diff --check`。
-- 修改數據管線時保留來源署名和許可。
+不要提交真實憑據、資料庫、日誌、執行狀態或包含私密資料的截圖；英文、簡體中文、繁體中文文件需同步更新。

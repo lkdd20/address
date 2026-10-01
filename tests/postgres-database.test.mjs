@@ -1,15 +1,42 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
-import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../server/database/postgres.mjs';
+import { createPostgresPool, initializePostgres, PostgresDatabase, postgresPoolOptions } from '../server/database/postgres.mjs';
 
 describe('PostgreSQL database adapter', () => {
+  it('keeps the process alive when an idle pooled connection is terminated by the server', async () => {
+    const pool = createPostgresPool({ connectionString: 'postgres://user:pass@127.0.0.1:1/db' });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(pool.listenerCount('error')).toBeGreaterThan(0);
+      expect(() => pool.emit('error', Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }))).not.toThrow();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"code":"57P01"'));
+    } finally {
+      log.mockRestore();
+      await pool.end();
+    }
+  });
   it('skips repeated schema DDL when both schemas are current', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ address_version: 30, control_version: 25 }], fields: [], rowCount: 1
+    }));
+    const release = vi.fn();
+    await initializePostgres({ connect: async () => ({ query, release }) });
+    expect(query).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('upgrades control version 24 with queue snapshot columns and one-time credential fixes', async () => {
     const query = vi.fn(async () => ({
       rows: [{ address_version: 30, control_version: 24 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
-    expect(query).toHaveBeenCalledOnce();
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const migration = statements.find((sql) => sql.includes('queue_snapshot_json'));
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS queue_snapshot_at TEXT');
+    expect(migration).toContain("WHERE provider='onemap' AND quota_limit=100");
+    expect(statements.some((sql) => sql.includes('VALUES (25,CURRENT_TIMESTAMP::text)'))).toBe(true);
+    expect(statements).not.toContain("SET LOCAL statement_timeout TO '30min'");
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -163,7 +190,7 @@ describe('PostgreSQL database adapter', () => {
     expect(addressSchema).toContain('idx_cn_communities_city_random');
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
     expect(controlSchema).toContain("WHERE provider='mappls' AND status='needs_review'");
-    expect(controlSchema).toContain("generate_series(1, 24)");
+    expect(controlSchema).toContain("generate_series(1, 25)");
   });
 
   it('does not mark version 25 applied when the cursor index cannot be verified', async () => {

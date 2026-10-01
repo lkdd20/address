@@ -19,8 +19,12 @@ const latin = /\p{Script=Latin}/u;
 const forbiddenNativeLatin = new Set(['HK', 'TW', 'JP', 'KR', 'TH', 'SA', 'RU', 'CN']);
 const adminCodes = new Set(['US', 'CA', 'MX', 'IT', 'AU', 'BR']);
 const minimumUniqueRatio = Math.max(0, Math.min(1, Number(process.env.MIN_UNIQUE_RATIO || '0.9')));
+const hongKongTraditional = createTraditionalizer({ from: 'cn', to: 'hk' });
+// 涌 (chung, stream) is the official Hong Kong place-name character, e.g. 葵涌 and 蠔涌; OpenCC rewrites it to 湧.
+const keepHongKongChung = (value) => Array.from(hongKongTraditional(value))
+  .map((character, index) => Array.from(value)[index] === '涌' ? '涌' : character).join('');
 const toTraditional = {
-  HK: createTraditionalizer({ from: 'cn', to: 'hk' }),
+  HK: keepHongKongChung,
   TW: createTraditionalizer({ from: 'cn', to: 'tw' })
 };
 // Script checks apply to human-readable address text only; codes and numeric fields

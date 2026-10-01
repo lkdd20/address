@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { retryAtFromHeader } from '../lib/retry-after.mjs';
 import { characterCount, deeplLanguages } from './deepl.mjs';
-import { OPENAI_COMPATIBLE_TARGETS, openAICompatibleRequest, parseOpenAICompatibleResponse, parseOpenAICompatibleSecret } from './openai-compatible.mjs';
+import { OPENAI_COMPATIBLE_TARGETS, OPENAI_COMPATIBLE_TIMEOUT_MS, openAICompatibleRequest, parseOpenAICompatibleResponse, parseOpenAICompatibleSecret } from './openai-compatible.mjs';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
@@ -167,6 +167,7 @@ export const operationDefinitions = {
   },
   'openai-compatible.translate': {
     provider: 'openai-compatible',
+    timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS,
     validate(value) {
       if (!exactKeys(value, new Set(['values', 'target', 'credentialId', 'prompt'])) || !OPENAI_COMPATIBLE_TARGETS.includes(value.target)
         || !Array.isArray(value.values) || !value.values.length || value.values.length > 30
@@ -366,7 +367,7 @@ export const executeOperation = async ({ definition, parameters, secret, fetchIm
   }
   let response;
   try {
-    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const timeout = AbortSignal.timeout(definition.timeoutMs || REQUEST_TIMEOUT_MS);
     response = await fetchImpl(request, {
       redirect: 'error',
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout

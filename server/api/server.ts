@@ -12,6 +12,7 @@ import {
 } from '../control/admin-api';
 import { ChinaDataService } from '../china/service';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
+import { OPENAI_COMPATIBLE_TIMEOUT_MS } from '../credential-broker/openai-compatible.mjs';
 import { InFlightLimiter, isGenerationPath } from './in-flight-limiter';
 import { parseAllowedOrigins } from '../lib/origin-policy';
 import { TranslationRouteScheduler } from '../translation/routing.mjs';
@@ -148,7 +149,7 @@ const requestEnvironment = async () => {
             const result = await credentialBroker.request('openai-compatible.translate', {
               values, target, credentialId: route.credentialId,
               ...(route.prompt ? { prompt: route.prompt } : {})
-            }, { maxDispatches: 1 }) as { translations?: unknown };
+            }, { maxDispatches: 1, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000 }) as { translations?: unknown };
           return Array.isArray(result.translations) && result.translations.every((item) => typeof item === 'string')
             ? result.translations as string[] : undefined;
         }
@@ -164,7 +165,7 @@ const requestEnvironment = async () => {
       return result.translations.map((item: { text: string }) => item.text);
     } : undefined,
     OPENAI_COMPATIBLE_TRANSLATE: credentialBroker ? async (values: string[], target: string) => {
-      const result = await credentialBroker.request('openai-compatible.translate', { values, target }, { maxDispatches: 2 }) as { translations?: unknown };
+      const result = await credentialBroker.request('openai-compatible.translate', { values, target }, { maxDispatches: 2, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000 }) as { translations?: unknown };
       if (!Array.isArray(result?.translations) || result.translations.some((item) => typeof item !== 'string')) {
         throw new Error('OPENAI_COMPATIBLE_INVALID_RESPONSE');
       }
