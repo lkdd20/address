@@ -2,10 +2,11 @@ import {
   useCallback, useEffect, useId, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Activity, ArrowDown, ArrowUp, Braces, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Database, Download, FlaskConical, Globe2, History, House, KeyRound, Languages,
-  LayoutDashboard, ListOrdered, LogOut, MapPin, Maximize2, Pencil, Plus, Power, RefreshCw, RotateCcw, Save, Search, ShieldBan,
-  ShieldCheck, Target, Trash2, TrendingUp, X
+  LayoutDashboard, ListOrdered, LogOut, MapPin, Maximize2, Menu, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Power, RefreshCw, RotateCcw, Save, Search, ShieldBan,
+  ShieldCheck, SquareArrowOutUpRight, Target, Trash2, X
 } from 'lucide-react';
 import { generatedAdminErrors } from '../domain/admin-errors.generated';
 import { generatedAdminText } from '../domain/admin-i18n.generated';
@@ -247,6 +248,25 @@ const labelsFor = (locale: AdminLocale): Record<View, string> => ({
   access: adminText[locale].labels.access,
   tokens: adminText[locale].labels.tokens
 });
+type NavGroup = 'overview' | 'data' | 'integrations' | 'security';
+const navGroups: Array<{ id: NavGroup; views: View[] }> = [
+  { id: 'overview', views: ['dashboard'] },
+  { id: 'data', views: ['addressData', 'syncQueue', 'syncHistory', 'shortcuts', 'blacklist'] },
+  { id: 'integrations', views: ['providers'] },
+  { id: 'security', views: ['access', 'tokens'] }
+];
+const shellText: Record<AdminLocale, Record<NavGroup | 'collapse' | 'expand' | 'menu' | 'refresh', string>> = {
+  'zh-CN': { overview: '概览', data: '数据', integrations: '集成', security: '安全', collapse: '收起侧栏', expand: '展开侧栏', menu: '打开菜单', refresh: '刷新' },
+  'zh-TW': { overview: '概覽', data: '資料', integrations: '整合', security: '安全', collapse: '收合側欄', expand: '展開側欄', menu: '開啟選單', refresh: '重新整理' },
+  en: { overview: 'Overview', data: 'Data', integrations: 'Integrations', security: 'Security', collapse: 'Collapse sidebar', expand: 'Expand sidebar', menu: 'Open menu', refresh: 'Refresh' },
+  ja: { overview: '概要', data: 'データ', integrations: '連携', security: 'セキュリティ', collapse: 'サイドバーを折りたたむ', expand: 'サイドバーを展開', menu: 'メニューを開く', refresh: '更新' },
+  ko: { overview: '개요', data: '데이터', integrations: '연동', security: '보안', collapse: '사이드바 접기', expand: '사이드바 펼치기', menu: '메뉴 열기', refresh: '새로 고침' },
+  de: { overview: 'Übersicht', data: 'Daten', integrations: 'Integrationen', security: 'Sicherheit', collapse: 'Seitenleiste einklappen', expand: 'Seitenleiste ausklappen', menu: 'Menü öffnen', refresh: 'Aktualisieren' },
+  fr: { overview: 'Vue d’ensemble', data: 'Données', integrations: 'Intégrations', security: 'Sécurité', collapse: 'Réduire la barre latérale', expand: 'Déployer la barre latérale', menu: 'Ouvrir le menu', refresh: 'Actualiser' },
+  es: { overview: 'Resumen', data: 'Datos', integrations: 'Integraciones', security: 'Seguridad', collapse: 'Contraer barra lateral', expand: 'Expandir barra lateral', menu: 'Abrir menú', refresh: 'Actualizar' },
+  pt: { overview: 'Visão geral', data: 'Dados', integrations: 'Integrações', security: 'Segurança', collapse: 'Recolher barra lateral', expand: 'Expandir barra lateral', menu: 'Abrir menu', refresh: 'Atualizar' }
+};
+const sidebarStorageKey = 'address-admin-sidebar-collapsed';
 const viewIcons = { dashboard: LayoutDashboard, blacklist: ShieldBan, providers: KeyRound, addressData: RefreshCw, syncQueue: ListOrdered, syncHistory: History, shortcuts: MapPin, access: ShieldCheck, tokens: Braces } as const;
 const providerLabel = (locale: AdminLocale, provider: string): string => {
   if (provider === 'deepl') return 'DeepL API Free';
@@ -407,6 +427,22 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const loadControllers = useRef<Partial<Record<View, AbortController>>>({});
   const viewRef = useRef<View>('dashboard');
   const coverageParent = useRef('');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+
+  useEffect(() => {
+    try { setSidebarCollapsed(window.localStorage.getItem(sidebarStorageKey) === '1'); } catch { /* storage unavailable */ }
+  }, []);
+  const toggleSidebar = () => setSidebarCollapsed((current) => {
+    try { window.localStorage.setItem(sidebarStorageKey, current ? '0' : '1'); } catch { /* storage unavailable */ }
+    return !current;
+  });
+  useEffect(() => {
+    if (!navOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setNavOpen(false); };
+    document.addEventListener('keydown', close);
+    return () => document.removeEventListener('keydown', close);
+  }, [navOpen]);
 
   const changeLocale = (next: Locale) => {
     const target = pathForLocale(window.location.pathname, next);
@@ -600,8 +636,9 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   if (!sessionReady) return <main className="admin-login"><div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div></main>;
 
   if (!authenticated) return <main className="admin-login">
+    <div className="admin-backdrop" aria-hidden="true"><i /><i /></div>
     <form onSubmit={login}>
-      <div className="admin-login-toolbar"><p>{t.brandName}{locale === 'zh-CN' ? '' : ' '}{t.brand}</p><LocaleMenu locale={pageLocale} change={changeLocale} className="locale-toggle" /></div>
+      <div className="admin-login-toolbar"><p><span className="brand-mark" aria-hidden="true"><MapPin size={16} strokeWidth={2.4} /></span>{t.brandName}{locale === 'zh-CN' ? '' : ' '}{t.brand}</p><LocaleMenu locale={pageLocale} change={changeLocale} className="locale-toggle" /></div>
       <h1>{t.loginTitle}</h1>
       {!initialized && <div className="admin-warning">{t.bootstrap}</div>}
       <label><span>{t.password}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
@@ -634,30 +671,47 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const data = dataByView[view];
   const dashboardSnapshot = dataByView.dashboard as DashboardData | undefined;
 
-  return <div className="admin-shell">
-    <aside className="admin-sidebar">
-      <div className="admin-brand"><span className="brand-mark"><MapPin size={25} strokeWidth={2.5} /></span><b>{t.brandName}</b><span>{t.brand}</span></div>
-      <nav>{(Object.keys(labelsFor(locale)) as View[]).filter((item) => !passwordChangeRequired || item === 'access').map((item) => {
-        const Icon = viewIcons[item];
-        return <button type="button" key={item} className={view === item ? 'active' : ''} onClick={() => selectView(item)}><span className="nav-icon" aria-hidden="true"><Icon size={17} /></span><span>{labelsFor(locale)[item]}</span></button>;
+  const labels = labelsFor(locale);
+  const shell = shellText[locale];
+  const activeGroup = navGroups.find((group) => group.views.includes(view))?.id || 'overview';
+  const openView = (item: View) => { setNavOpen(false); selectView(item); };
+  return <div className={`admin-shell${sidebarCollapsed ? ' is-collapsed' : ''}${navOpen ? ' nav-open' : ''}`}>
+    <div className="admin-backdrop" aria-hidden="true"><i /><i /></div>
+    <aside className="admin-sidebar" id="admin-navigation">
+      <div className="admin-brand"><span className="brand-mark"><MapPin size={20} strokeWidth={2.4} /></span><b>{t.brandName}</b><span>{t.brand}</span></div>
+      <nav aria-label={t.brand}>{navGroups.map((group) => {
+        const items = group.views.filter((item) => !passwordChangeRequired || item === 'access');
+        if (!items.length) return null;
+        return <div className="nav-group" key={group.id}>
+          <p className="nav-group-label">{shell[group.id]}</p>
+          {items.map((item) => {
+            const Icon = viewIcons[item];
+            return <button type="button" key={item} className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} title={sidebarCollapsed ? labels[item] : undefined} onClick={() => openView(item)}><span className="nav-icon" aria-hidden="true"><Icon size={18} /></span><span className="nav-label">{labels[item]}</span></button>;
+          })}
+        </div>;
       })}</nav>
       <SidebarStatus metrics={dashboardSnapshot?.metrics} locale={locale} />
     </aside>
+    {navOpen && <button type="button" className="nav-scrim" aria-label={t.close} onClick={() => setNavOpen(false)} />}
     <main className="admin-content">
       <header className="admin-topbar">
-        <div className="topbar-heading"><h1>{view === 'dashboard' ? t.dashboardTitle : labelsFor(locale)[view]}</h1>{view === 'dashboard' && <p>{t.dashboardDescription}</p>}</div>
+        <button type="button" className="topbar-icon menu-toggle" aria-label={shell.menu} aria-controls="admin-navigation" aria-expanded={navOpen} onClick={() => setNavOpen(true)}><Menu size={19} /></button>
+        <button type="button" className="topbar-icon sidebar-toggle" aria-label={sidebarCollapsed ? shell.expand : shell.collapse} title={sidebarCollapsed ? shell.expand : shell.collapse} aria-controls="admin-navigation" aria-expanded={!sidebarCollapsed} onClick={toggleSidebar}>{sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
+        <div className="topbar-heading"><span className="topbar-crumb">{shell[activeGroup]}</span><h1>{view === 'dashboard' ? t.dashboardTitle : labels[view]}</h1></div>
         <div className="admin-topbar-actions">
+          <button type="button" className="topbar-icon" title={shell.refresh} aria-label={shell.refresh} disabled={mutating || loadingView === view} onClick={() => void load(view)}><RefreshCw size={17} className={loadingView === view ? 'is-spinning' : undefined} /></button>
           <LocaleMenu locale={pageLocale} change={changeLocale} className="language-control" />
-          <a className="topbar-control generator-link" href={`/${pageLocale}/`}>{t.backGenerator}</a>
-          <span className="admin-identity"><b>A</b><strong>{t.administrator}</strong></span>
-          <button className="icon-action danger-control" title={t.logout} aria-label={t.logout} onClick={() => void logout()}><LogOut size={17} /></button>
+          <a className="topbar-control generator-link" href={`/${pageLocale}/`}><SquareArrowOutUpRight size={15} aria-hidden="true" /><span>{t.backGenerator}</span></a>
+          <button type="button" className="topbar-icon danger-control" title={t.logout} aria-label={t.logout} onClick={() => void logout()}><LogOut size={17} /></button>
         </div>
       </header>
-      {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span><button disabled={mutating || loadingView === view} onClick={() => void load(view)}>{t.retry}</button></div>}
-      {notice && <div className="admin-notice">{notice}</div>}
-      {data === undefined ? (view === 'dashboard' ? <DashboardLoading label={t.loading} /> : <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div>) : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
-        coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
-      {data !== undefined && loadingView === view && <div className="admin-refreshing" role="status" aria-label={t.loading}><span className="loading-dot" /></div>}
+      <div className="admin-page">
+        {view === 'dashboard' && <p className="page-intro">{t.dashboardDescription}</p>}
+        {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span><button disabled={mutating || loadingView === view} onClick={() => void load(view)}>{t.retry}</button></div>}
+        {notice && <div className="admin-notice" role="status">{notice}</div>}
+        {data === undefined ? (view === 'dashboard' ? <DashboardLoading label={t.loading} /> : <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div>) : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
+          coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
+      </div>
     </main>
   </div>;
 }
@@ -778,11 +832,11 @@ function ExpandedMapDialog({ countries, selected, locale, open, close }: {
 }) {
   const root = useMapDialogFocus(true, close);
   const title = selected ? coverageRegionName(selected, locale) : adminText[locale].globalDistribution;
-  return <div className="map-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}><section ref={root} tabIndex={-1} className="map-dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X size={18} /></button></header><WorldDistributionMap countries={countries} selected={selected} locale={locale} open={open} expanded /></section></div>;
+  return createPortal(<div className="map-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}><section ref={root} tabIndex={-1} className="map-dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X size={18} /></button></header><WorldDistributionMap countries={countries} selected={selected} locale={locale} open={open} expanded /></section></div>, document.body);
 }
 
 function DashboardMetric({ label, value, icon: Icon, tone }: { label: string; value: string; icon: typeof Globe2; tone: string }) {
-  return <article className="dashboard-kpi"><span className={`dashboard-kpi-icon ${tone}`}><Icon size={20} /></span><div><small>{label}</small><strong>{value}</strong></div><TrendingUp className="dashboard-kpi-trend" size={42} aria-hidden="true" /></article>;
+  return <article className="dashboard-kpi"><span className={`dashboard-kpi-icon ${tone}`}><Icon size={20} /></span><div><small>{label}</small><strong>{value}</strong></div></article>;
 }
 
 type MajorContinent = 'all' | 'asia' | 'europe' | 'north-america' | 'south-america' | 'africa' | 'oceania';
@@ -1552,7 +1606,7 @@ function Dialog({ title, close, locale, children, className = '' }: { title: str
       previous?.focus();
     };
   }, []);
-  return <div className="dialog-backdrop" role="presentation"><section ref={root} className={`admin-dialog ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X aria-hidden="true" /></button></header>{children}</section></div>;
+  return createPortal(<div className="dialog-backdrop" role="presentation"><section ref={root} className={`admin-dialog ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X aria-hidden="true" /></button></header>{children}</section></div>, document.body);
 }
 const scopeLabel = (scope: string, locale: AdminLocale): string => ({ read: locale === 'zh-CN' ? '读取' : 'Read', generate: locale === 'zh-CN' ? '生成' : 'Generate', '*': locale === 'zh-CN' ? '全部' : 'All' } as Record<string, string>)[scope] || scope;
 const continentLabel = (group: string, locale: AdminLocale): string => {

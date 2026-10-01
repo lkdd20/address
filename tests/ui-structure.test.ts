@@ -195,12 +195,15 @@ describe('strict residential generator page structure', () => {
     expect(appSource).not.toContain('items.slice(0, 10)');
   });
 
-  it('uses the custom admin locale menu and a compact administrator identity', () => {
+  it('uses the custom admin locale menu and a grouped collapsible navigation shell', () => {
     expect(adminSource).toContain('function LocaleMenu');
     expect(adminSource).toContain('role="listbox"');
     expect(adminSource).not.toContain('const LocaleSelect');
     expect(adminSource).not.toContain('<small>{t.administratorRole}</small>');
-    expect(adminSource).toContain('<strong>{t.administrator}</strong>');
+    expect(adminSource).toContain("{ id: 'data', views: ['addressData', 'syncQueue', 'syncHistory', 'shortcuts', 'blacklist'] }");
+    expect(adminSource).toContain('sidebarStorageKey');
+    expect(adminStyles).toContain('.admin-shell.is-collapsed');
+    expect(adminStyles).toContain('prefers-reduced-transparency');
     expect(adminSource).toContain("shortcuts: '/settings/country-shortcuts'");
   });
 

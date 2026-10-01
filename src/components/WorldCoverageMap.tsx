@@ -124,7 +124,7 @@ const loadAdmin1Source = (code: string): Promise<GeoJsonCollection | undefined> 
 
 const featureCode = (feature: GeoJsonFeature): string => {
   const properties = feature.properties;
-  const candidates = [properties.ISO_A2, properties.ISO_A2_EH, properties.WB_A2, properties.POSTAL];
+  const candidates = [properties.ISO_A2, properties.ISO_A2_EH, properties.WB_A2];
   return String(candidates.find((value) => typeof value === 'string' && /^[A-Z]{2}$/u.test(value)) || '').toUpperCase();
 };
 

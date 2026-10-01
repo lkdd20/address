@@ -188,7 +188,7 @@ try {
   assert.equal(await page.locator('.dashboard-ranking').count(), 0);
   assert.equal(await page.locator('.country-data-table').count(), 1);
   assert.equal(await page.locator('.admin-sidebar-status').count(), 1);
-  assert.equal(await page.getByText('管理员', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('管理员', { exact: true }).count(), 0);
   assert.equal(await page.getByText('超级管理员', { exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: 'Language', exact: true }).count(), 1);
   assert.equal(await page.getByText('数据与系统管理', { exact: true }).count(), 0);
