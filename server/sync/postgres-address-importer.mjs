@@ -225,6 +225,9 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
     }
     record.admin1Code = components.admin1Code || '';
   }
+  if (applyAdministrativeBoundary(record) && rebuildFormattedAddress) {
+    record.formattedAddress = rebuildFormattedAddress(components, countryCode);
+  }
   const policy = requiredAdminFields[countryCode] || { region: false, city: false };
   if (policy.region && !hasRegion(components)) return false;
   if (policy.city && !hasCity(components)) return false;
@@ -235,6 +238,38 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
     if (/香港|澳門|澳门|hong\s?kong|macau|macao/iu.test(region)) return false;
   }
   return true;
+};
+const boundaryNameKey = (value) => String(value || '').normalize('NFKC').toLocaleLowerCase('und').replace(/[\s\p{P}]/gu, '');
+// Official/open boundary polygons only fill administrative fields the source left empty
+// (or a district that merely repeats the city); source values are never overwritten.
+export const applyAdministrativeBoundary = (record) => {
+  const boundary = record.administrativeBoundary;
+  if (!boundary || typeof boundary !== 'object') return false;
+  const components = record.components;
+  const hints = { ...(record.englishComponentHints || {}) };
+  let changed = false;
+  const city = boundary.locality;
+  if (city?.name && !String(components.locality || '').trim() && !String(components.postalLocality || '').trim()) {
+    components.locality = city.name;
+    components.postalLocality = city.name;
+    record.locality = city.name;
+    record.postalLocality = city.name;
+    if (city.nameEn && city.nameEn !== city.name) hints.locality = city.nameEn;
+    changed = true;
+  }
+  const district = String(components.district || '').trim();
+  const locality = String(components.locality || components.postalLocality || '').trim();
+  const found = boundary.district;
+  const repeatsCity = district && locality && boundaryNameKey(district) === boundaryNameKey(locality);
+  if (found?.name && (!district || repeatsCity) && boundaryNameKey(found.name) !== boundaryNameKey(locality)) {
+    components.district = found.name;
+    record.district = found.name;
+    if (found.nameEn && found.nameEn !== found.name) hints.district = found.nameEn;
+    else delete hints.district;
+    changed = true;
+  }
+  if (changed) record.englishComponentHints = hints;
+  return changed;
 };
 const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
   const hierarchy = validateAdministrativeHierarchy({

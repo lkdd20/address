@@ -131,14 +131,16 @@ const source = {
 describe('address source shard catalog', () => {
   it('expands independently supported country shards with explicit refresh intervals', async () => {
     const catalog = await loadSourceCatalog();
-    expect(catalog.shards).toHaveLength(153);
+    expect(catalog.shards).toHaveLength(156);
     expect(catalog.shards.filter((shard) => shard.id !== 'korea-kapt-residential')
       .every((shard) => shard.intervalDays === 30)).toBe(true);
     expect(catalog.shards.some((shard) => shard.countryCode === 'CN')).toBe(false);
-    expect(catalog.shards.filter((shard) => shard.countryCode === 'NG')).toHaveLength(1);
+    expect(catalog.shards.filter((shard) => shard.countryCode === 'NG').map((shard) => shard.source.adapter).sort())
+      .toEqual(['geofabrik', 'google-residential-enrichment']);
     for (const countryCode of ['AU', 'IT']) {
       expect(catalog.shards.filter((shard) => shard.countryCode === countryCode)).toHaveLength(2);
     }
+    expect(catalog.shards.filter((shard) => shard.source.adapter === 'overture' && ['BR', 'SG'].includes(shard.countryCode))).toHaveLength(2);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'ES')).toHaveLength(5);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'CA')).toHaveLength(3);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'FR')).toHaveLength(32);
@@ -1667,6 +1669,37 @@ describe('Google residential source adapter', () => {
       estimateMethod: 'resumable-checkpoint'
     });
     expect(requests.filter((request) => request.url === dataUrl)).toHaveLength(0);
+  });
+
+  it('resumes a checkpoint keyed by the -latest URL after dated extract resolution', async () => {
+    const cacheDir = resolve('.data-cache', `google-residential-legacy-resume-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const shard = {
+      id: 'google-residential-enrichment-vn', countryCode: 'VN', extractId: 'vietnam',
+      source: { id: 'google-residential-enrichment', adapter: 'google-residential-enrichment' }
+    };
+    const latestUrl = 'https://download.geofabrik.de/asia/vietnam-latest.osm.pbf';
+    const rawVersion = '2026-09-28-upstream-etag';
+    const rawContent = Buffer.from('pbf');
+    const rawIdentity = createHash('sha256').update(`${latestUrl}${rawVersion}`).digest('hex').slice(0, 16);
+    const rawRoot = resolve(cacheDir, 'raw');
+    const stateDirectory = resolve(rawRoot, `${shard.id}-state-fixture`);
+    await mkdir(stateDirectory, { recursive: true });
+    await writeFile(resolve(rawRoot, `${rawIdentity}-vietnam-latest.osm.pbf`), rawContent);
+    await writeFile(resolve(stateDirectory, 'progress.json'), `${JSON.stringify({
+      schemaVersion: 2, version: sourceAdapterRevisions['google-residential-enrichment'], rawVersion,
+      sourceChecksum: createHash('sha256').update(rawContent).digest('hex'), nextIndex: 1, accepted: 1
+    })}
+`, 'utf8');
+    const adapters = createSourceAdapters({
+      resolveGeofabrikUrl: async () => 'https://download.geofabrik.de/asia/vietnam-260929.osm.pbf',
+      fetchImpl: async (input) => String(input).endsWith('index-v1-nogeom.json')
+        ? Response.json({ features: [{ properties: { id: 'vietnam', urls: { pbf: latestUrl } } }] })
+        : new Response('unexpected', { status: 500 })
+    });
+    await expect(adapters.discover(shard, { cacheDir })).resolves.toMatchObject({
+      dataUrl: latestUrl, rawVersion, sourceBytes: rawContent.byteLength, estimateMethod: 'resumable-checkpoint'
+    });
   });
 
   it('fails closed when a valid Google checkpoint has lost its raw source file', async () => {

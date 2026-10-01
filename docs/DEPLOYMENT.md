@@ -194,4 +194,4 @@ Docker Compose is the only maintained production method. For local development, 
 
 ## Image publishing
 
-Pushes to `main` and version tags build AMD64/ARM64 images with GitHub Actions and publish them to Docker Hub as `daimon23/address`. The repository needs a `DOCKERHUB_TOKEN` secret (a Docker Hub access token with read/write scope).
+Pushing a version tag (`v*`) builds AMD64/ARM64 images with GitHub Actions and publishes them to Docker Hub as `daimon23/address` (the version, `major.minor`, and `latest`); pushes to `main` only run verification. The repository needs a `DOCKERHUB_TOKEN` secret (a Docker Hub access token with read/write scope).

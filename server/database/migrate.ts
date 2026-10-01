@@ -15,7 +15,7 @@ try {
     for (const country of ['HK', 'SG']) await refreshAddressGenerationIndex(databases.address, country);
     await reconcilePublishedPool(databases.address, ['HK']);
   }
-  const coverageCountries = await refreshIndexedResidentialCoverage(databases.address);
+  const coverageCountries = await refreshIndexedResidentialCoverage(databases.address, undefined, { skipLocked: true });
   await refreshAddressCoverage(databases.address, { useGenerationIndex: true });
   console.log(JSON.stringify({ event: 'migration_coverage_ready', countries: coverageCountries, at: new Date().toISOString() }));
 } finally {

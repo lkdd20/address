@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addressQualitySqlClause,
   countryAddressPolicies,
+  isPlaceholderStreet,
   normalizeAddressFacts,
   normalizePostcode,
   validateAddressQuality
@@ -65,7 +66,7 @@ describe('country address quality gate', () => {
 
   it.each([
     ['DE', { ...base, locality: '', postcode: '' }, 'missing_locality'],
-    ['IN', { ...base, district: '', postcode: '' }, 'missing_district'],
+    ['MX', { ...base, district: '', postcode: '' }, 'missing_district'],
     ['US', { ...base, admin1: '', postcode: '' }, 'missing_admin1'],
     ['DE', { ...base, admin1: '', district: '', postcode: 'ABCDE' }, 'invalid_postcode'],
     ['IN', { ...base, postcode: '012345' }, 'invalid_postcode'],
@@ -74,9 +75,21 @@ describe('country address quality gate', () => {
     expect(validateAddressQuality({ countryCode, components })).toMatchObject({ valid: false, reasons: expect.arrayContaining([reason]) });
   });
 
+  it('rejects geocoder placeholder street names but keeps real names that contain those words', () => {
+    for (const street of ['Unnamed Road', 'Đường không tên', 'Đường Chưa Đặt Tên', 'ถนนไม่มีชื่อ', 'Calle sin nombre', 'Rua Sem Denominação', 'İsimsiz Sokak', 'طريق بدون اسم']) {
+      expect(isPlaceholderStreet(street)).toBe(true);
+      expect(validateAddressQuality({ countryCode: 'NG', components: { ...base, street, postcode: '' } }).reasons).toContain('placeholder_street');
+    }
+    for (const street of ['Unnamed Valley Road', 'Sin Nombre Avenue', 'İnönü Caddesi', 'Main Road']) expect(isPlaceholderStreet(street)).toBe(false);
+    expect(addressQualitySqlClause()).toContain("'unnamed road'");
+  });
+
   it('accepts complete German, Indian and US records', () => {
     expect(validateAddressQuality({ countryCode: 'DE', components: { ...base, admin1: '', district: '', postcode: '10115' } }).valid).toBe(true);
     expect(validateAddressQuality({ countryCode: 'IN', components: { ...base, postcode: '110001' } }).valid).toBe(true);
+    for (const countryCode of ['IN', 'BR', 'NG', 'ZA', 'PH', 'TR', 'KR', 'TH', 'SA']) {
+      expect(validateAddressQuality({ countryCode, components: { ...base, district: '', postcode: '' } }).reasons).not.toContain('missing_district');
+    }
     expect(validateAddressQuality({ countryCode: 'US', components: { ...base, district: '', postcode: '19103' } }).valid).toBe(true);
   });
 

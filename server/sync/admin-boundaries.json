@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "countries": {
+    "PH": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "phl-cod-ab", "kind": "zip-shapefile",
+          "url": "https://data.humdata.org/dataset/caf116df-f984-4deb-85ca-41b349d3f313/resource/4e4067d6-3fc8-4d2c-91ea-330c3d4f8e8e/download/phl_admin_boundaries.shp.zip",
+          "license": "CC BY-IGO", "attribution": "NAMRIA and PSA via OCHA HDX COD-AB",
+          "layers": [
+            { "member": "phl_admin4", "role": "district", "name": "adm4_name", "nameEn": "adm4_name", "code": "adm4_pcode" },
+            { "member": "phl_admin3", "role": "locality", "name": "adm3_name", "nameEn": "adm3_name", "code": "adm3_pcode" }
+          ]
+        }
+      ]
+    },
+    "TH": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "tha-cod-ab", "kind": "zip-shapefile",
+          "url": "https://data.humdata.org/dataset/d24bdc45-eb4c-4e3d-8b16-44db02667c27/resource/10dde461-b781-4904-9559-7deb3e960913/download/tha_admin_boundaries.shp.zip",
+          "license": "CC BY-IGO", "attribution": "Royal Thai Survey Department via OCHA HDX COD-AB",
+          "layers": [
+            { "member": "tha_admin3", "role": "district", "name": "adm3_name1", "nameEn": "adm3_name", "code": "adm3_pcode" },
+            { "member": "tha_admin2", "role": "locality", "name": "adm2_name1", "nameEn": "adm2_name", "code": "adm2_pcode" }
+          ]
+        }
+      ]
+    },
+    "TR": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "overture-divisions", "kind": "overture-divisions",
+          "license": "ODbL", "attribution": "Overture Maps Foundation divisions, © OpenStreetMap contributors",
+          "layers": [
+            { "role": "district", "subtypes": ["county"] }
+          ]
+        }
+      ]
+    },
+    "NG": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "nga-cod-ab", "kind": "zip-shapefile",
+          "url": "https://data.humdata.org/dataset/81ac1d38-f603-4a98-804d-325c658599a3/resource/01c65fd9-bd0c-4608-aa1e-2e86bbccf3e5/download/nga_admin_boundaries.shp.zip",
+          "license": "CC BY-IGO", "attribution": "OSGOF, eHealth Africa and UNCS via OCHA HDX COD-AB",
+          "layers": [
+            { "member": "nga_admin3", "role": "district", "name": "adm3_name", "nameEn": "adm3_name", "code": "adm3_pcode" },
+            { "member": "nga_admin2", "role": "locality", "name": "adm2_name", "nameEn": "adm2_name", "code": "adm2_pcode" }
+          ]
+        }
+      ]
+    },
+    "BR": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "ibge-bairros-cd2022", "kind": "zip-shapefile",
+          "url": "https://ftp.ibge.gov.br/Censos/Censo_Demografico_2022/Agregados_por_Setores_Censitarios/malha_com_atributos/bairros/shp/BR/BR_bairros_CD2022.zip",
+          "license": "IBGE open data", "attribution": "IBGE, Censo Demográfico 2022, malha de bairros",
+          "layers": [
+            { "member": "BR_bairros_CD2022", "role": "district", "name": "NM_BAIRRO", "nameEn": "NM_BAIRRO", "code": "CD_BAIRRO" }
+          ]
+        },
+        {
+          "id": "overture-divisions", "kind": "overture-divisions",
+          "license": "ODbL", "attribution": "Overture Maps Foundation divisions, © OpenStreetMap contributors",
+          "layers": [
+            { "role": "district", "subtypes": ["neighborhood", "macrohood"], "priority": 1 }
+          ]
+        }
+      ]
+    },
+    "SA": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "saudi-national-address-districts", "kind": "geojson",
+          "url": "https://raw.githubusercontent.com/yasseralsamman/saudi-national-address/main/data/dist/districts.geojson",
+          "license": "Source terms not stated", "attribution": "SPL National Address map via yasseralsamman/saudi-national-address",
+          "layers": [
+            { "role": "district", "name": "name_ar", "nameEn": "name_en", "code": "district_id" }
+          ]
+        },
+        {
+          "id": "overture-divisions", "kind": "overture-divisions",
+          "license": "ODbL", "attribution": "Overture Maps Foundation divisions, © OpenStreetMap contributors",
+          "layers": [
+            { "role": "district", "subtypes": ["neighborhood"], "language": "ar", "priority": 1 }
+          ]
+        }
+      ]
+    },
+    "KR": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "admdongkor-emd", "kind": "parquet", "crs": "EPSG:5179", "geometry": "geom",
+          "url": "https://raw.githubusercontent.com/vuski/admdongkor/master/parquet/emd_20260701.parquet",
+          "license": "CC BY 4.0, KOGL Type 1", "attribution": "Statistics Korea SGIS boundaries via vuski/admdongkor",
+          "layers": [
+            { "role": "district", "name": "emdnm", "nameEn": "", "code": "emdcd" }
+          ]
+        }
+      ]
+    },
+    "ZA": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "overture-divisions", "kind": "overture-divisions",
+          "license": "ODbL", "attribution": "Overture Maps Foundation divisions, © OpenStreetMap contributors",
+          "layers": [
+            { "role": "district", "subtypes": ["neighborhood", "macrohood"] },
+            { "role": "locality", "subtypes": ["locality"] }
+          ]
+        }
+      ]
+    },
+    "IN": {
+      "revision": 1,
+      "datasets": [
+        {
+          "id": "overture-divisions", "kind": "overture-divisions",
+          "license": "ODbL", "attribution": "Overture Maps Foundation divisions, © OpenStreetMap contributors",
+          "layers": [
+            { "role": "district", "subtypes": ["neighborhood", "macrohood"], "language": "en" },
+            { "role": "locality", "subtypes": ["locality"], "language": "en" }
+          ]
+        }
+      ]
+    }
+  }
+}

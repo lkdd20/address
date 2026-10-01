@@ -86,7 +86,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
   const failed = new Set();
   const key = (value, target) => JSON.stringify([target, value]);
   const record = (set, values, target) => values.forEach((value) => set.add(key(value, target)));
-  const requestLimit = Math.min(20, Math.max(1, Number(environment.TRANSLATION_BACKFILL_REQUESTS) || 8));
+  const requestLimit = Math.min(20, Math.max(1, Number(environment.TRANSLATION_BACKFILL_REQUESTS) || 20));
   const reserveRequest = (count = 1) => {
     signal.throwIfAborted();
     if (requests + count > requestLimit) {

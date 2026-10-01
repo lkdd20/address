@@ -194,4 +194,4 @@ docker compose up -d
 
 ## 镜像发布
 
-推送到 `main` 或打版本标签时，GitHub Actions 会构建 AMD64/ARM64 镜像并发布到 Docker Hub：`daimon23/address`。仓库需要配置 `DOCKERHUB_TOKEN` 机密（具有读写权限的 Docker Hub Access Token）。
+推送版本标签（`v*`）时，GitHub Actions 会构建 AMD64/ARM64 镜像并发布到 Docker Hub：`daimon23/address`（版本号、`主.次` 版本和 `latest`）；推送 `main` 只运行验证。仓库需要配置 `DOCKERHUB_TOKEN` 机密（具有读写权限的 Docker Hub Access Token）。

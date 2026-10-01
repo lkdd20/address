@@ -17,7 +17,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
-      "countries": ["US", "CA", "MX", "DE", "FR", "IT", "ES", "NL", "TW", "HK", "AU"]
+      "countries": ["US", "CA", "MX", "DE", "FR", "IT", "ES", "NL", "TW", "HK", "AU", "BR", "SG"]
     },
     {
       "id": "france-bdnb-creuse-residential",
@@ -846,6 +846,7 @@
         { "countryCode": "GB", "extractId": "united-kingdom" },
         { "countryCode": "HK", "extractId": "china", "boundaryIso3": "HKG" },
         { "countryCode": "KR", "extractId": "south-korea" },
+        { "countryCode": "NG", "extractId": "nigeria" },
         { "countryCode": "MY", "extractId": "malaysia-singapore-brunei", "boundaryIso3": "MYS" },
         { "countryCode": "SG", "extractId": "malaysia-singapore-brunei", "boundaryIso3": "SGP" },
         { "countryCode": "TH", "extractId": "thailand" },

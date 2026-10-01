@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest';
-import { refreshResidentialCoverage } from '../server/database/residential-coverage.mjs';
+import { expect, it, vi } from 'vitest';
+import { refreshIndexedResidentialCoverage, refreshResidentialCoverage } from '../server/database/residential-coverage.mjs';
 
 it('does not overwrite a concurrently committed publication with pre-transaction coverage', async () => {
   let sourceCount = 1;
@@ -40,4 +40,23 @@ it('gives up after bounded lock retries and leaves other errors untouched', asyn
   const controller = new AbortController();
   controller.abort();
   await expect(refreshResidentialCoverage(fail('55P03'), 'CA', undefined, controller.signal)).rejects.toThrow();
+});
+
+it('skips only lock-contended countries when the migration asks to', async () => {
+  const lockTimeout = Object.assign(new Error('lock timeout'), { code: '55P03' });
+  let calls = 0;
+  const countries = { prepare: () => ({ all: async () => ({ results: [{ country_code: 'BR' }, { country_code: 'PH' }] }) }) };
+  const database = { ...countries, transaction: async () => { calls += 1; if (calls <= 6) throw lockTimeout; return 'done'; } };
+  vi.useFakeTimers();
+  try {
+    const skipped = refreshIndexedResidentialCoverage(database, '2026-10-01T00:00:00Z', { skipLocked: true });
+    await vi.runAllTimersAsync();
+    await expect(skipped).resolves.toEqual(['PH']);
+    const strict = refreshIndexedResidentialCoverage({ ...countries, transaction: async () => { throw lockTimeout; } });
+    const assertion = expect(strict).rejects.toMatchObject({ code: '55P03' });
+    await vi.runAllTimersAsync();
+    await assertion;
+  } finally {
+    vi.useRealTimers();
+  }
 });

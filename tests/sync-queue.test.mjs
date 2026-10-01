@@ -376,6 +376,15 @@ describe('attempt evaluation and latching', () => {
       adapterRevisions: [['japan-abr-residential', 'abr-v1']], sourceVersions: [['japan-abr-residential', 'v1']]
     })).toBe(sourceFingerprint);
   });
+
+  it('releases Geofabrik redirect discovery failures without touching materialize failures', () => {
+    const sourceFingerprint = countryFingerprint({ adapterRevisions: [['google-residential-enrichment-ph', 'g-v9']], sourceVersions: [] });
+    const generic = (phase) => executionFailureFingerprint(sourceFingerprint, '', phase, 'overture');
+    for (const adapter of ['google-residential-enrichment', 'geofabrik']) {
+      expect(executionFailureFingerprint(sourceFingerprint, '', 'discover', adapter)).not.toBe(generic('discover'));
+    }
+    expect(executionFailureFingerprint(sourceFingerprint, '', 'materialize', 'geofabrik')).toBe(generic('materialize'));
+  });
 });
 
 describe('published queue snapshots', () => {

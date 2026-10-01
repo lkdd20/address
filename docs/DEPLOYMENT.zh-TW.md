@@ -194,4 +194,4 @@ docker compose up -d
 
 ## 映象釋出
 
-推送到 `main` 或打版本標籤時，GitHub Actions 會構建 AMD64/ARM64 映象併發布到 Docker Hub：`daimon23/address`。倉庫需要配置 `DOCKERHUB_TOKEN` 機密（具有讀寫許可權的 Docker Hub Access Token）。
+推送版本標籤（`v*`）時，GitHub Actions 會建置 AMD64/ARM64 映像並發布到 Docker Hub：`daimon23/address`（版本號、`主.次` 版本和 `latest`）；推送 `main` 只執行驗證。倉庫需要配置 `DOCKERHUB_TOKEN` 機密（具有讀寫許可權的 Docker Hub Access Token）。

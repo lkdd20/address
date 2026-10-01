@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -20,6 +20,11 @@ import { runProcess } from './process.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const catalogFile = resolve(syncRoot, 'source-shards.json');
+const adminBoundaryBuilder = resolve(syncRoot, 'admin-boundary-build.py');
+const adminBoundaryAssigner = resolve(syncRoot, 'admin-boundary-assign.py');
+const adminBoundaryCatalog = JSON.parse(readFileSync(resolve(syncRoot, 'admin-boundaries.json'), 'utf8'));
+const adminBoundaryAdapters = new Set(['geofabrik', 'overture', 'openaddresses-archive']);
+const adminBoundaryFormats = new Set(['overture-jsonl', 'geofabrik-geojsonseq']);
 const overtureExporter = resolve(syncRoot, 'overture-export.py');
 const geofabrikExporter = resolve(syncRoot, 'geofabrik-export.py');
 const googleResidentialSeedExporter = resolve(syncRoot, 'google-residential-seeds.py');
@@ -75,9 +80,15 @@ export const sourceAdapterRevisions = Object.freeze({
   'pdok-bag': pdokBagRevision
 });
 
+export const adminBoundaryRevision = (countryCode) => {
+  const entry = adminBoundaryCatalog.countries[String(countryCode || '').toUpperCase()];
+  return entry ? `adm${entry.revision}-${createHash('sha256').update(JSON.stringify(entry)).digest('hex').slice(0, 12)}` : '';
+};
+
 export const sourceCapabilityRevision = (shard) => {
   const adapter = String(shard?.source?.adapter || '');
-  const base = sourceAdapterRevisions[adapter] || '';
+  const boundary = adminBoundaryAdapters.has(adapter) ? adminBoundaryRevision(shard?.countryCode) : '';
+  const base = `${sourceAdapterRevisions[adapter] || ''}${boundary ? `:${boundary}` : ''}`;
   const inputs = shard?.source?.capabilityInputs;
   if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) return base;
   return `${base}:cap-${createHash('sha256').update(JSON.stringify({
@@ -195,6 +206,56 @@ const curlMetadataFetch = async (input, init = {}) => {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, signal: init.signal
   });
   return new Response(stdout, { status: 200, headers: { 'Content-Type': 'application/json' } });
+};
+
+// Geofabrik redirects `*-latest.osm.pbf` to a dated file, but stale edge caches can answer with
+// self-redirect loops. Follow hops manually; when that fails, derive the dated name from the
+// extract's replication state timestamp and confirm it exists. URLs end without a slash so
+// `.md5` siblings resolve.
+const curlText = (args, signal) => execFileAsync('curl', ['-4', ...args, '--connect-timeout', '15', '--max-time', '60'],
+  { encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true, signal }).then(({ stdout }) => stdout);
+const lastHeaderBlock = (text) => String(text).split(/\r?\n\r?\n/u).map((value) => value.trim())
+  .filter((value) => /^HTTP\//u.test(value)).at(-1) || '';
+const headerStatus = (block) => Number(block.match(/^HTTP\/\S+\s+(\d+)/u)?.[1] || 0);
+export const resolveGeofabrikPbfUrl = async (url, {
+  signal,
+  head = (target) => curlText(['-sSI', target], signal),
+  get = (target) => curlText(['-fsSL', target], signal),
+  now = () => new Date()
+} = {}) => {
+  const visited = new Set();
+  let current = url;
+  let failure;
+  for (let hop = 0; hop < 10 && !failure; hop += 1) {
+    visited.add(current);
+    const block = lastHeaderBlock(await head(current));
+    const status = headerStatus(block);
+    if (status >= 200 && status < 300) return current.replace(/\/+$/u, '');
+    const location = block.match(/^location:\s*(\S+)/imu)?.[1];
+    if (status < 300 || status >= 400 || !location) { failure = new Error(`Geofabrik URL did not resolve (${status}): ${url}`); break; }
+    let next = new URL(location, current).href;
+    if (visited.has(next)) next = next.endsWith('/') ? next.replace(/\/+$/u, '') : `${next}/`;
+    if (visited.has(next)) failure = new Error(`Geofabrik redirect loop: ${url}`);
+    else current = next;
+  }
+  failure ||= new Error(`Geofabrik redirect chain too long: ${url}`);
+  const base = url.match(/^(.*)-latest\.osm\.pbf$/u)?.[1];
+  if (!base) throw failure;
+  // Newest first: the replication state date (when reachable), then the last week of daily extracts.
+  const timestamp = (await get(`${base}-updates/state.txt`).catch(() => ''))
+    .match(/^timestamp=(\d{4})-(\d{2})-(\d{2})T/mu);
+  const stateDay = timestamp ? Date.UTC(Number(timestamp[1]), Number(timestamp[2]) - 1, Number(timestamp[3])) : null;
+  const today = Date.UTC(now().getUTCFullYear(), now().getUTCMonth(), now().getUTCDate());
+  const days = [...new Set([
+    ...(stateDay === null ? [] : [stateDay, stateDay + 86_400_000, stateDay - 86_400_000]),
+    ...Array.from({ length: 8 }, (_, index) => today - index * 86_400_000)
+  ])];
+  for (const day of days) {
+    const date = new Date(day).toISOString();
+    const candidate = `${base}-${date.slice(2, 4)}${date.slice(5, 7)}${date.slice(8, 10)}.osm.pbf`;
+    if (headerStatus(lastHeaderBlock(await head(candidate).catch(() => ''))) === 200) return candidate;
+  }
+  throw failure;
 };
 
 const jsonRequest = async (url, fetchImpl, { attempts = 3, signal } = {}) => {
@@ -701,7 +762,8 @@ export const createSourceAdapters = ({
   credentialPool = null,
   credentialBrokerClient = null,
   loadSeedLocations = async () => [],
-  loadGoogleCoverageTargets = async () => []
+  loadGoogleCoverageTargets = async () => [],
+  resolveGeofabrikUrl = null
 } = {}) => {
   const apiFetchImpl = fetchImpl;
   const useCurlTransport = fetchImpl === fetch;
@@ -881,6 +943,16 @@ export const createSourceAdapters = ({
     }
     return geofabrikIndexPromise;
   };
+  const resolvedGeofabrikUrls = new Map();
+  const geofabrikPbfUrl = (url) => {
+    const resolver = resolveGeofabrikUrl || (useCurlTransport ? (target) => resolveGeofabrikPbfUrl(target, { signal }) : null);
+    if (!url || !resolver) return Promise.resolve(url);
+    if (!resolvedGeofabrikUrls.has(url)) {
+      resolvedGeofabrikUrls.set(url, Promise.resolve(resolver(url))
+        .catch((error) => { resolvedGeofabrikUrls.delete(url); throw error; }));
+    }
+    return resolvedGeofabrikUrls.get(url);
+  };
 
   const discoverOverture = async (shard, { includeAssetSizes = false } = {}) => {
     const catalog = await overtureCatalog();
@@ -936,8 +1008,8 @@ export const createSourceAdapters = ({
   const discoverGeofabrik = async (shard, { syncMode, cacheDir } = {}) => {
     const index = await geofabrikIndex();
     const feature = index.features?.find((entry) => entry.properties?.id === shard.extractId);
-    const dataUrl = feature?.properties?.urls?.pbf;
-    if (!dataUrl) throw new Error(`Geofabrik extract is missing: ${shard.extractId}`);
+    if (!feature?.properties?.urls?.pbf) throw new Error(`Geofabrik extract is missing: ${shard.extractId}`);
+    const dataUrl = await geofabrikPbfUrl(feature.properties.urls.pbf);
     const response = await fetchHead(dataUrl);
     if (!response.ok) throw new Error(`Geofabrik metadata request failed (${response.status}): ${dataUrl}`);
     const modified = response.headers.get('last-modified');
@@ -1071,8 +1143,8 @@ export const createSourceAdapters = ({
     requireLicensedSource(shard.source);
     const index = await geofabrikIndex();
     const feature = index.features?.find((entry) => entry.properties?.id === shard.extractId);
-    const dataUrl = feature?.properties?.urls?.pbf;
-    if (!dataUrl) throw new Error(`Geofabrik extract is missing: ${shard.extractId}`);
+    if (!feature?.properties?.urls?.pbf) throw new Error(`Geofabrik extract is missing: ${shard.extractId}`);
+    const dataUrl = await geofabrikPbfUrl(feature.properties.urls.pbf);
     const rawRoot = options?.cacheDir ? resolve(options.cacheDir, 'raw') : null;
     if (rawRoot) {
       const prefix = `${shard.id}-state-`;
@@ -1090,14 +1162,18 @@ export const createSourceAdapters = ({
           }
           if (progress.schemaVersion !== 2 || progress.version !== googleResidentialRevision
             || !String(progress.rawVersion || '') || !/^[a-f\d]{64}$/u.test(String(progress.sourceChecksum || ''))) continue;
-          const rawIdentity = createHash('sha256')
-            .update(`${dataUrl}\u001f${progress.rawVersion}`).digest('hex').slice(0, 16);
-          const rawFile = resolve(rawRoot, `${rawIdentity}-${basename(new URL(dataUrl).pathname)}`);
-          const sourceBytes = await existingFileSize(rawFile);
-          if (!(sourceBytes > 0)) throw sourceStateError('Google residential raw source', new Error('Raw source is missing or empty'));
-          if (sourceBytes > 0) return {
+          // Checkpoints created before dated-extract resolution keyed their raw file by the `-latest` URL.
+          let resumed = null;
+          for (const candidateUrl of [...new Set([dataUrl, feature.properties.urls.pbf])]) {
+            const rawIdentity = createHash('sha256')
+              .update(`${candidateUrl}\u001f${progress.rawVersion}`).digest('hex').slice(0, 16);
+            const sourceBytes = await existingFileSize(resolve(rawRoot, `${rawIdentity}-${basename(new URL(candidateUrl).pathname)}`));
+            if (sourceBytes > 0) { resumed = { dataUrl: candidateUrl, sourceBytes }; break; }
+          }
+          if (!resumed) throw sourceStateError('Google residential raw source', new Error('Raw source is missing or empty'));
+          return {
             adapter: 'google-residential-enrichment', version: googleResidentialRevision,
-            rawVersion: progress.rawVersion, publishedAt: null, dataUrl, sourceBytes,
+            rawVersion: progress.rawVersion, publishedAt: null, ...resumed,
             estimateMethod: 'resumable-checkpoint'
           };
         } catch (error) {
@@ -1143,7 +1219,7 @@ export const createSourceAdapters = ({
       try {
         const index = await geofabrikIndex();
         const feature = index.features?.find((entry) => entry.properties?.id === shard.extractId);
-        const candidateUrl = feature?.properties?.urls?.pbf;
+        const candidateUrl = await geofabrikPbfUrl(feature?.properties?.urls?.pbf);
         if (candidateUrl) {
           const candidateResponse = await fetchHead(candidateUrl);
           if (candidateResponse.ok) {
@@ -3425,6 +3501,47 @@ export const createSourceAdapters = ({
     };
   };
 
+  const builtBoundaries = new Map();
+  const ensureAdminBoundaries = (countryCode, cacheDir) => {
+    const revision = adminBoundaryRevision(countryCode);
+    const output = resolve(cacheDir, 'boundaries', countryCode, `${revision}.parquet`);
+    if (existsSync(output)) return Promise.resolve(output);
+    if (!builtBoundaries.has(output)) builtBoundaries.set(output, (async () => {
+      const entry = adminBoundaryCatalog.countries[countryCode];
+      const configFile = resolve(cacheDir, 'boundaries', countryCode, `${revision}.${process.pid}.tmp.json`);
+      await mkdir(resolve(cacheDir, 'boundaries', countryCode), { recursive: true });
+      await writeFile(configFile, JSON.stringify(entry));
+      try {
+        const overture = entry.datasets.some((dataset) => dataset.kind === 'overture-divisions');
+        await runExecute({
+          file: pythonBin,
+          args: [adminBoundaryBuilder, '--country', countryCode, '--config-file', configFile,
+            '--cache-dir', resolve(cacheDir, 'boundaries'), '--output', output,
+            ...(overture ? ['--overture-release', (await overtureCatalog()).version] : [])],
+          phase: `boundaries:${countryCode}`
+        });
+      } finally {
+        await rm(configFile, { force: true });
+      }
+      return output;
+    })().finally(() => builtBoundaries.delete(output)));
+    return builtBoundaries.get(output);
+  };
+  const assignAdminBoundaries = async (shard, result, options) => {
+    if (!result?.file || !adminBoundaryAdapters.has(shard.source?.adapter)
+      || !adminBoundaryFormats.has(result.format) || !adminBoundaryRevision(shard.countryCode)) return result;
+    const boundaries = await ensureAdminBoundaries(shard.countryCode, options.cacheDir);
+    const output = resolve(options.cacheDir, 'boundaries', 'assigned', `${shard.id}.jsonl`);
+    await mkdir(resolve(options.cacheDir, 'boundaries', 'assigned'), { recursive: true });
+    await runExecute({
+      file: pythonBin,
+      args: [adminBoundaryAssigner, '--boundaries', boundaries, '--input', result.file,
+        '--output', output, '--format', result.format],
+      phase: `assign-boundaries:${shard.id}`
+    });
+    return { ...result, file: output, cacheFile: result.file };
+  };
+
   const materialize = async (shard, discovery, options) => {
     let result;
     if (discovery.adapter === 'overture') result = await materializeOverture(shard, discovery, options);
@@ -3447,6 +3564,7 @@ export const createSourceAdapters = ({
     else if (discovery.adapter === 'hong-kong-residential') result = await materializeHongKongResidential(shard, discovery, options);
     else if (discovery.adapter === 'pdok-bag') result = await materializePdokBag(shard, discovery, options);
     else if (!result) throw new Error(`Unsupported source adapter: ${discovery.adapter}`);
+    result = await assignAdminBoundaries(shard, result, options);
     return { ...result, snapshotMode: result.snapshotMode || shard.source?.snapshotMode || 'merge' };
   };
 

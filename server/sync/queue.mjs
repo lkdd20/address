@@ -35,7 +35,8 @@ const executionCapabilityRevisions = Object.freeze({
 const adapterExecutionCapabilityRevisions = Object.freeze({
   'japan-abr': { materialize: 'japan-abr-materialize-v4' },
   'korea-kapt': { materialize: 'korea-kapt-bridge-v3' },
-  'google-residential-enrichment': { discover: 'google-checkpoint-discovery-v1' }
+  'google-residential-enrichment': { discover: 'google-checkpoint-discovery-v5-legacy-raw-url' },
+  geofabrik: { discover: 'geofabrik-redirect-resolver-v3-dated-probe' }
 });
 // Countries whose synchronization consumes a metered provider quota. A shard
 // may declare `quotaProvider` in source-shards.json to extend this; the

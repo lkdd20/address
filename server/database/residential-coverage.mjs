@@ -204,14 +204,22 @@ export const refreshResidentialCoverage = async (
   };
 };
 
-export const refreshIndexedResidentialCoverage = async (database, now = new Date().toISOString()) => {
+export const refreshIndexedResidentialCoverage = async (database, now = new Date().toISOString(), { skipLocked = false } = {}) => {
   const countries = (await database.prepare(`SELECT country_code FROM (
     SELECT country_code FROM sync_country_policies WHERE enabled=1
     UNION SELECT country_code FROM address_generation_index
     UNION SELECT country_code FROM residential_coverage
   ) countries WHERE country_code<>'CN' ORDER BY country_code`).all()).results;
+  const refreshed = [];
   for (const { country_code: countryCode } of countries) {
-    await refreshResidentialCoverage(database, countryCode, now, undefined, { useGenerationIndex: true });
+    try {
+      await refreshResidentialCoverage(database, countryCode, now, undefined, { useGenerationIndex: true });
+      refreshed.push(countryCode);
+    } catch (error) {
+      if (!skipLocked || error?.code !== '55P03') throw error;
+      // The running sync service holds the publication locks and refreshes this country after its import.
+      console.warn(JSON.stringify({ event: 'residential_coverage_refresh_skipped', countryCode, reason: 'lock_timeout' }));
+    }
   }
-  return countries.map((row) => row.country_code);
+  return refreshed;
 };

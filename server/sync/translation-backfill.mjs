@@ -192,7 +192,7 @@ const publish = async (database, candidates, revision, now, signal, outcome) => 
 };
 
 const runTranslationBatch = async ({ database, environment = process.env, fetchImpl = fetch,
-  pendingLimit = integer(environment.TRANSLATION_BACKFILL_BATCH, 30, 300),
+  pendingLimit = integer(environment.TRANSLATION_BACKFILL_BATCH, 150, 300),
   scanLimit = integer(environment.TRANSLATION_BACKFILL_SCAN, 2000, 20_000),
   now = () => new Date(), signal: parentSignal, brokerClient, cacheOnly: onlyCached = false, countryCodes = [] }) => {
   const countries = [...new Set(countryCodes.map((country) => String(country).toUpperCase()))];
@@ -209,15 +209,25 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
     JOIN address_pool address ON address.id=recovery.address_id
     WHERE recovery.status='failed' AND recovery.reason IN ('translation_or_publication_rejected','retry_limit')
       AND recovery.address_id>?${countryScope} ORDER BY recovery.address_id LIMIT ?`).bind(cacheProgress.cursor, ...countries, pendingLimit).all()).results;
-  const due = onlyCached ? [] : (await database.prepare(`SELECT recovery.address_id AS id,address.country_code FROM translation_recovery recovery
-    JOIN address_pool address ON address.id=recovery.address_id
-    WHERE ((recovery.status IN ('pending','waiting') AND (recovery.next_attempt_at IS NULL OR recovery.next_attempt_at<=?))
-      OR (recovery.status IN ('failed','rejected') AND recovery.service_revision<>
-        CASE WHEN recovery.status='rejected' AND recovery.reason='base_contract' THEN ?
-          WHEN recovery.status='failed' AND recovery.reason='translation_or_publication_rejected' THEN ? ELSE ? END))${countryScope}
-    ORDER BY CASE WHEN address.match_level='street' THEN 0 ELSE 1 END,address.active DESC,recovery.updated_at LIMIT ?`)
-    .bind(now().toISOString(), stateRevision(services.revision, 'rejected', 'base_contract'),
-      stateRevision(services.revision, 'failed', 'translation_or_publication_rejected'), services.revision, ...countries, scanLimit).all()).results;
+  // Bound each due branch through the recovery indexes before joining addresses; hundreds of thousands of
+  // deferred rows can be due at once, and sorting all of them exceeds the statement timeout.
+  const scopedRecovery = countries.length
+    ? ` AND address_id IN (SELECT id FROM address_pool address WHERE 1=1${countryScope})` : '';
+  const dueBranch = async (where, bindings, order) => (await database.prepare(`SELECT recovery.address_id AS id,
+      address.country_code,address.match_level,address.active,recovery.updated_at
+    FROM (SELECT address_id,updated_at FROM translation_recovery WHERE ${where}${scopedRecovery} ORDER BY ${order} LIMIT ?) recovery
+    JOIN address_pool address ON address.id=recovery.address_id`).bind(...bindings, ...countries, scanLimit).all()).results;
+  const due = onlyCached ? [] : [
+    ...await dueBranch(`status IN ('pending','waiting') AND (next_attempt_at IS NULL OR next_attempt_at<=?)`,
+      [now().toISOString()], 'next_attempt_at,address_id'),
+    ...await dueBranch(`status IN ('failed','rejected') AND service_revision<>
+        CASE WHEN status='rejected' AND reason='base_contract' THEN ?
+          WHEN status='failed' AND reason='translation_or_publication_rejected' THEN ? ELSE ? END`,
+      [stateRevision(services.revision, 'rejected', 'base_contract'),
+        stateRevision(services.revision, 'failed', 'translation_or_publication_rejected'), services.revision], 'address_id')
+  ].sort((left, right) => Number(left.match_level !== 'street') - Number(right.match_level !== 'street')
+    || Number(right.active) - Number(left.active) || String(left.updated_at).localeCompare(String(right.updated_at)))
+    .slice(0, scanLimit).map(({ id, country_code: countryCode }) => ({ id, country_code: countryCode }));
   const rows = (await database.prepare(`SELECT address.id,address.country_code,address.component_variants_json,address.native_language,
       address.active,address.retired_at,recovery.status AS recovery_status
     FROM address_pool address LEFT JOIN translation_recovery recovery ON recovery.address_id=address.id
@@ -242,7 +252,13 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
     }
     const firstLane = Number(progress.lane || 0) % 3;
     progress.lane = (firstLane + 1) % 3;
-    const candidates = [...recoveryCandidates([due, rows, terminal], firstLane)];
+    // Countries still below their address target are translated and published first.
+    const belowTarget = new Set((await database.prepare(`SELECT policy.country_code FROM sync_country_policies policy
+      LEFT JOIN sync_country_state state ON state.country_code=policy.country_code
+      WHERE policy.enabled=1 AND coalesce(state.address_count,0)<policy.target_count`).all().catch(() => ({ results: [] })))
+      .results.map((row) => row.country_code));
+    const candidates = [...recoveryCandidates([due, rows, terminal], firstLane)]
+      .sort((left, right) => Number(belowTarget.has(right.country_code)) - Number(belowTarget.has(left.country_code)));
     let prefetched = new Map();
     let recoveryStates = new Map();
     let cachedValues = {};
@@ -349,7 +365,11 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
       }
     }
     ready = pending.filter(({ row, variants }) => readyToPublish(row, variants, now()));
-    const country = ready[0]?.row.country_code;
+    // Publish the country with the most ready rows; the rest stay cached and are retried next batch.
+    const readyByCountry = new Map();
+    for (const { row } of ready) readyByCountry.set(row.country_code, (readyByCountry.get(row.country_code) || 0) + 1);
+    const country = [...readyByCountry].sort((left, right) => Number(belowTarget.has(right[0])) - Number(belowTarget.has(left[0]))
+      || right[1] - left[1])[0]?.[0];
     ready.filter(({ row }) => row.country_code !== country).forEach(({ row }) => deferred.add(row.id));
     phase = 'publication';
     await publish(database, ready.filter(({ row }) => !deferred.has(row.id)), services.revision, now, signal, outcome);

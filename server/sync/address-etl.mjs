@@ -603,7 +603,8 @@ export const normalizeSourceRecord = (value, shard, format) => {
     latitude,
     formattedAddress: formattedAddress(components, shard.countryCode),
     components,
-    englishComponentHints
+    englishComponentHints,
+    ...(value.admin_boundary && typeof value.admin_boundary === 'object' ? { administrativeBoundary: value.admin_boundary } : {})
   };
 };
 
@@ -1016,7 +1017,8 @@ export const runAddressEtl = async ({
         });
         state.shards[task.shard.id] = task.report;
         await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
-        if (sourceComplete) await pruneShardCache(cacheDir, task.shard, task.materialized.file);
+        if (sourceComplete) await pruneShardCache(cacheDir, task.shard, task.materialized.cacheFile || task.materialized.file);
+        if (task.materialized.cacheFile) await rm(task.materialized.file, { force: true });
         plannedCacheBytes = await directorySize(cacheDir);
         plannedStorageBytes = await measureStorage([dataRoot]);
         changed ||= !imported.skipped;

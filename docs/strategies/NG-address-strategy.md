@@ -2,7 +2,7 @@
 
 | 项目 | 核心内容 |
 |---|---|
-| 数据源 | Geofabrik `nigeria`；Google Geocoding 补全 |
+| 数据源 | Geofabrik `nigeria` 真实街道与门牌（2026-10-01 起独立批量导入，此前仅作 Google 种子）；Google Geocoding 补全 |
 | 既有门牌级格式 / 邮编 | `<house> <street>, <district>, <city>, <state> <postcode>, NG`；仅保留源记录且通过 6 位格式门禁；任一必填组件缺失即淘汰，不推算。只清洗格式，不创造或按邻近地址补齐 |
 | 行政区 | 源字段与 catalog；官方行政边界作为候选核验。行政层级必须与坐标反查一致；冲突时拒绝发布 |
 | 住宅子集证据 | OSM 明确住宅建筑标签；Google 只补全地址字段，不单独证明住宅 |
@@ -113,3 +113,10 @@
 - Initial online import translation follows enabled per-key priorities and pins each broker dispatch to its credential. Caller environment, fetch implementation and cancellation propagate to localization; deferred localization remains the default.
 - Display translation caches include source component contents, country and native language. Corrected components invalidate old cache entries; unchanged inputs reuse validated translations. Numeric and HTTP-date Retry-After values are respected.
 - Existing source, administrative, coordinate, identifier, language and publication gates remain enforced. DeepL credit accounting is unchanged; no periodic refill is introduced for one-time rewards.
+
+## 城市级契约与行政边界补全（2026-10-01）
+
+- 必填行政层级降为“一级行政区（如适用）+ 城市”，district 改为可选：来源有值时保留，缺失时用官方/开放行政边界按坐标补全，补不到则留空，不再整条拒绝。街道和门牌仍必须来自来源，坐标、国家边界、语言和邮编门禁不变。
+- 边界数据：NGA COD-AB（OSGOF/eHealth/UNCS，OCHA HDX，CC BY-IGO）：ADM3 ward → district，ADM2 LGA → locality。
+- 补全规则：只填补来源为空的 district，或与城市同名的 district；来源已有值不覆盖；坐标不落在任何边界内则不补；城市只在来源与目录补全后仍为空时用边界补。边界名称直接取自数据集，不翻译反推。
+- Geofabrik、Overture、OpenAddresses 三类批量来源的能力指纹附加本国边界版本，仅这些来源因能力变化重新执行一次；其他来源的耗尽状态不受影响。
