@@ -44,12 +44,18 @@ const mapplsReverse = (value) => {
 };
 
 const chinaPlace = (value) => {
-  if (!exactKeys(value, new Set(['region', 'page', 'subdivision']))
+  if (!exactKeys(value, new Set(['region', 'page', 'subdivision', 'location', 'radius']))
     || !/^.{1,100}$/u.test(String(value.region || ''))
     || !integer(value.page, 1, 100)
-    || !/^.{0,100}$/u.test(String(value.subdivision || ''))) return null;
-  return { region: String(value.region), page: value.page, subdivision: String(value.subdivision || '') };
+    || !/^.{0,100}$/u.test(String(value.subdivision || ''))
+    || (value.location !== undefined && !/^\d{1,3}\.\d{1,6},\d{1,2}\.\d{1,6}$/u.test(String(value.location)))
+    || (value.radius !== undefined && !integer(value.radius, 1, 50000))) return null;
+  return { region: String(value.region), page: value.page, subdivision: String(value.subdivision || ''),
+    ...(value.location ? { location: String(value.location), radius: value.radius || 3000 } : {}) };
 };
+
+const amapDistrict = (value) => exactKeys(value, new Set(['keywords']))
+  && /^.{1,100}$/u.test(String(value.keywords || '')) ? { keywords: String(value.keywords) } : null;
 
 const onemapSearch = (value) => exactKeys(value, new Set(['searchVal']))
   && /^.{1,160}$/u.test(String(value.searchVal || '')) ? { searchVal: String(value.searchVal) } : null;
@@ -64,6 +70,18 @@ const providerFailure = (outcome, retryAt = null, metadata = {}) => {
     ...(metadata.quotaPeriod ? { quotaPeriod: metadata.quotaPeriod } : {}),
     ...(metadata.service ? { service: String(metadata.service) } : {})
   };
+};
+
+// AMap's WAF denies keyword place search for valid keys; radius search is served normally.
+const amapAroundRequest = (version, parameters, secret) => {
+  const url = new URL(`https://restapi.amap.com/${version}/place/around`);
+  Object.entries(version === 'v5'
+    ? { key: secret, location: parameters.location, radius: String(parameters.radius), types: '120302',
+      sortrule: 'distance', page_size: '25', page_num: String(parameters.page), show_fields: 'business' }
+    : { key: secret, location: parameters.location, radius: String(parameters.radius), types: '120302',
+      sortrule: 'distance', offset: '25', page: String(parameters.page), extensions: 'all' })
+    .forEach(([name, value]) => url.searchParams.set(name, value));
+  return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
 };
 
 const classifyAmap = (body) => {
@@ -232,6 +250,7 @@ export const operationDefinitions = {
     provider: 'amap',
     validate: chinaPlace,
     request(parameters, secret) {
+      if (parameters.location) return amapAroundRequest('v5', parameters, secret);
       const url = new URL('https://restapi.amap.com/v5/place/text');
       Object.entries({
         key: secret, region: parameters.region, types: '120302', city_limit: 'true', page_size: '25',
@@ -241,12 +260,24 @@ export const operationDefinitions = {
       return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
     },
     fallbackRequest(parameters, secret) {
+      if (parameters.location) return amapAroundRequest('v3', parameters, secret);
       const url = new URL('https://restapi.amap.com/v3/place/text');
       Object.entries({
         key: secret, city: parameters.region, types: '120302', citylimit: 'true', offset: '25',
         page: String(parameters.page), extensions: 'all'
       }).forEach(([name, value]) => url.searchParams.set(name, value));
       if (parameters.subdivision) url.searchParams.set('keywords', parameters.subdivision);
+      return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
+    },
+    classify: classifyAmap
+  },
+  'amap.district': {
+    provider: 'amap',
+    validate: amapDistrict,
+    request(parameters, secret) {
+      const url = new URL('https://restapi.amap.com/v3/config/district');
+      Object.entries({ key: secret, keywords: parameters.keywords, subdistrict: '1', extensions: 'base' })
+        .forEach(([name, value]) => url.searchParams.set(name, value));
       return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
     },
     classify: classifyAmap

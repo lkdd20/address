@@ -39,7 +39,7 @@ describe('real street address contract', () => {
       components: { ...components, locality: '' } }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'premise', components }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street',
-      components: { ...components, postcode: 'wrong' } }).valid).toBe(false);
+      components: { ...components, postcode: 'wrong' } })).toMatchObject({ valid: true, components: { postcode: '' } });
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street',
       components: { ...components, houseNumber: '12' } }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'CN', matchLevel: 'street', components }).valid).toBe(false);

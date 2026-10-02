@@ -130,3 +130,10 @@
 - 边界数据：Royal Thai Survey Department COD-AB（OCHA HDX，CC BY-IGO）：ADM3 ตำบล/แขวง（泰文名）→ district，ADM2 อำเภอ/เขต → locality。
 - 补全规则：只填补来源为空的 district，或与城市同名的 district；来源已有值不覆盖；坐标不落在任何边界内则不补；城市只在来源与目录补全后仍为空时用边界补。边界名称直接取自数据集，不翻译反推。
 - Geofabrik、Overture、OpenAddresses 三类批量来源的能力指纹附加本国边界版本，仅这些来源因能力变化重新执行一次；其他来源的耗尽状态不受影响。
+
+## Google 结果与城市级字段（2026-10-02）
+
+- 适配器版本 `osm-address-street-google-geocoding-v10-city-level`（Mappls 为 `osm-source-address-street-mappls-reverse-v5-city-level`）。
+- Google 结果落在 OSM 种子建筑外或 15 米外时，不再以 `geometry_mismatch` 丢弃：作为 Google 自身坐标的真实地址发布，`property_type=unknown`，不借用 OSM 住宅证据；只有落在种子建筑内的结果才标记住宅。
+- 住宅结果只要求门牌、道路及城市级行政字段（府、区）；区县和邮编来源有值时保留，缺失、冲突或格式无效时留空，不淘汰地址。
+- 通用规则：中国以外无法验证的邮编留空，本地数字（阿拉伯-印度、泰文）先转为 ASCII。

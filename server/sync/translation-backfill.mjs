@@ -127,10 +127,15 @@ const translationDiagnostics = (row, variants) => Object.entries(pendingTranslat
 const readyToPublish = (row, variants, now) => !translationDiagnostics(row, variants).length
   && storedAddressPoolV2RowIsPublishable(localizedRow(row, variants), now);
 
-const publish = async (database, candidates, revision, now, signal, outcome) => {
-  const { published, busy, failed, started } = outcome;
-  for (const country of new Set(candidates.map(({ row }) => row.country_code))) {
+const publish = async (database, candidates, revision, now, signal, outcome, countries, startBefore = Infinity) => {
+  const { published, busy, failed, started, deferred } = outcome;
+  for (const country of countries) {
     signal.throwIfAborted();
+    // Each country refreshes its coverage on publication; later countries wait for the next batch near the deadline.
+    if (published.size && Date.now() >= startBefore) {
+      candidates.filter(({ row }) => row.country_code === country).forEach(({ row }) => deferred.add(row.id));
+      continue;
+    }
     try {
     const completed = await database.transaction(async (transaction) => {
       await transaction.exec("SET LOCAL lock_timeout TO '250ms'");
@@ -199,7 +204,9 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
   if (countries.some((country) => !/^[A-Z]{2}$/u.test(country) || country === 'CN')) throw new Error('INVALID_RECOVERY_COUNTRY');
   const countryScope = countries.length ? ` AND address.country_code IN (${countries.map(() => '?').join(',')})` : '';
   const progressKey = onlyCached || countries.length ? `scan:${onlyCached ? 'cache' : 'online'}:${countries.sort().join(',') || 'all'}` : 'scan';
-  const timeout = AbortSignal.timeout(integer(environment.TRANSLATION_BACKFILL_TIMEOUT_MS, 180_000, 300_000));
+  const timeoutMs = integer(environment.TRANSLATION_BACKFILL_TIMEOUT_MS, 180_000, 300_000);
+  const publicationStartBefore = Date.now() + timeoutMs * 0.6;
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   const services = await createBackfillProviders({ database, environment, fetchImpl, signal, now, brokerClient });
   if (!services.enabled && !onlyCached) return { scanned: 0, updated: 0, done: true };
@@ -365,14 +372,13 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
       }
     }
     ready = pending.filter(({ row, variants }) => readyToPublish(row, variants, now()));
-    // Publish the country with the most ready rows; the rest stay cached and are retried next batch.
+    // Publish below-target countries first, then those with the most ready rows.
     const readyByCountry = new Map();
     for (const { row } of ready) readyByCountry.set(row.country_code, (readyByCountry.get(row.country_code) || 0) + 1);
-    const country = [...readyByCountry].sort((left, right) => Number(belowTarget.has(right[0])) - Number(belowTarget.has(left[0]))
-      || right[1] - left[1])[0]?.[0];
-    ready.filter(({ row }) => row.country_code !== country).forEach(({ row }) => deferred.add(row.id));
+    const publicationOrder = [...readyByCountry].sort((left, right) => Number(belowTarget.has(right[0])) - Number(belowTarget.has(left[0]))
+      || right[1] - left[1]).map(([country]) => country);
     phase = 'publication';
-    await publish(database, ready.filter(({ row }) => !deferred.has(row.id)), services.revision, now, signal, outcome);
+    await publish(database, ready, services.revision, now, signal, { ...outcome, deferred }, publicationOrder, publicationStartBefore);
   } catch (error) {
     if (!signal.aborted) throw error;
     interrupted = parentSignal?.aborted ? 'cancelled' : 'batch_timeout';

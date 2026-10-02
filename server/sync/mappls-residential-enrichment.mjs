@@ -24,10 +24,10 @@ export const evaluateMapplsResidentialResult = (payload, seed) => {
   const admin1 = text(result.state);
   const locality = text(result.city || result.village || result.locality);
   const district = text(result.district || result.subDistrict);
-  const postcode = text(result.pincode);
-  const missing = Object.entries({ admin1, locality, district, postcode }).find(([, value]) => !value)?.[0];
+  // City-level contract: district and PIN code are kept when valid but not required.
+  const postcode = isValidPostcode('IN', text(result.pincode)) ? text(result.pincode) : '';
+  const missing = Object.entries({ admin1, locality }).find(([, value]) => !value)?.[0];
   if (missing) return { record: null, reason: `missing_${missing}` };
-  if (!isValidPostcode('IN', postcode)) return { record: null, reason: 'invalid_postcode' };
   return { reason: null, record: {
     id: `mappls:${seed.building_id}`,
     source_record_id: `${seed.building_id}:${payload.version || 'unknown'}`,

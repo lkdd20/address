@@ -6,14 +6,15 @@ const allowedTypes = new Set(['street_address', 'premise', 'subpremise']);
 const residentialBuildings = new Set(['apartments', 'bungalow', 'cabin', 'detached', 'dormitory', 'ger',
   'house', 'residential', 'semidetached_house', 'terrace']);
 export const isResidentialSeed = (seed) => Boolean(seed.building_id && residentialBuildings.has(seed.building_class));
+// City-level contract: district and postcode are kept when Google returns them but are not required.
 const requiredComponents = {
-  IN: ['admin1', 'locality', 'district', 'postcode'],
-  NG: ['admin1', 'locality', 'district', 'postcode'],
-  PH: ['admin1', 'locality', 'district', 'postcode'],
-  SA: ['locality', 'district', 'postcode'],
-  TH: ['admin1', 'locality', 'district', 'postcode'],
-  TR: ['admin1', 'locality', 'district', 'postcode'],
-  VN: ['admin1', 'locality', 'postcode']
+  IN: ['admin1', 'locality'],
+  NG: ['admin1', 'locality'],
+  PH: ['admin1', 'locality'],
+  SA: ['locality'],
+  TH: ['admin1', 'locality'],
+  TR: ['admin1', 'locality'],
+  VN: ['admin1', 'locality']
 };
 
 export const googleResidentialLanguages = Object.freeze({
@@ -170,20 +171,11 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
       reason = 'geometry_mismatch';
       continue;
     }
-    const baseParts = addressParts(result, countryCode);
-    if (baseParts.ambiguousPostcode) {
-      reason = 'ambiguous_postcode';
-      continue;
-    }
-    const parts = supplementAdministrativeParts(baseParts, results, countryCode);
+    const parts = supplementAdministrativeParts(addressParts(result, countryCode), results, countryCode);
     const missing = ['number', 'street', ...(requiredComponents[countryCode] || [])]
       .find((name) => !parts[name]);
     if (missing) {
       reason = `missing_${missing}`;
-      continue;
-    }
-    if (!isValidPostcode(countryCode, parts.postcode)) {
-      reason = 'invalid_postcode';
       continue;
     }
     const contract = validateAddressContract(countryCode, { ...parts, houseNumber: parts.number }, { strict: true });
@@ -233,10 +225,12 @@ export const evaluateGoogleAddressResults = (payload, seed, countryCode) => {
     const longitude = Number(result.location?.longitude);
     const latitude = Number(result.location?.latitude);
     if (![longitude, latitude].every(Number.isFinite) || Math.abs(longitude) > 180 || Math.abs(latitude) > 90) continue;
-    if (!pointMatchesSeedGeometry(seed, result)) { reason = 'geometry_mismatch'; continue; }
+    // A result off the seed building is still a real Google address at its own coordinates; it just cannot borrow
+    // the seed's residential evidence.
+    const onSeed = pointMatchesSeedGeometry(seed, result);
     const matchLevel = streetLevel ? 'street' : 'premise';
     if (!parts.street || (!streetLevel && !parts.number)) continue;
-    const residential = !streetLevel && isResidentialSeed(seed) && seed.match_level !== 'street'
+    const residential = onSeed && !streetLevel && isResidentialSeed(seed) && seed.match_level !== 'street'
       ? evaluateGoogleResidentialResult({ results: [result, ...results.filter((entry) =>
         !entry.types?.some((type) => allowedTypes.has(type)))] }, seed, countryCode).record : null;
     if (['admin1', 'locality', 'district'].some((field) => seed[field] && (residential || parts)[field]

@@ -118,3 +118,7 @@
 - 边界数据：Overture Maps divisions（ODbL）：`neighborhood`/`macrohood` → district（郊区），`locality` → locality；HDX COD-AB ADM4 为编号选区，未采用。
 - 补全规则：只填补来源为空的 district，或与城市同名的 district；来源已有值不覆盖；坐标不落在任何边界内则不补；城市只在来源与目录补全后仍为空时用边界补。边界名称直接取自数据集，不翻译反推。
 - Geofabrik、Overture、OpenAddresses 三类批量来源的能力指纹附加本国边界版本，仅这些来源因能力变化重新执行一次；其他来源的耗尽状态不受影响。
+
+## 邮编留空（2026-10-02）
+
+- 本地数字先转 ASCII；不符合本国格式的邮编留空并保留地址，不再以 invalid_postcode 淘汰整条记录。

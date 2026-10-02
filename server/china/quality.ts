@@ -4,7 +4,6 @@ const navigationTerms = [
 ];
 
 const trailingNavigation = /[（(][^）)]*(?:步行|地铁|公交|入口|出口|\d+\s*米)[）)]\s*$/u;
-const premiseNumber = /\d+(?:[-之]\d+)*(?:号|號|弄|巷|院)(?:楼|棟|栋)?/u;
 const directionalDistance = /(?:东北|东南|西北|西南|东|西|南|北)\s*(?:方向\s*)?\d+\s*米/u;
 const directionalDistanceFragment = /(?:东北|东南|西北|西南|东|西|南|北)\s*(?:方向\s*)?\d+\s*米(?:处)?/gu;
 
@@ -40,19 +39,25 @@ export const normalizeChinaProviderAddress = (value: string, fields: ChinaAdmini
     if (!prefix) break;
     normalized = normalized.slice(prefix.length);
   }
-  return normalizeChinaDeliveryAddress(normalized);
+  return cleanChinaDeliveryAddress(normalized);
 };
 
-export const isChinaDeliveryAddress = (value: string): boolean => {
+// Chinese communities are addressed by district and community name; a road and house number are kept only when the
+// provider gives a clean one, and navigation descriptions are dropped rather than rejecting the community.
+export const cleanChinaDeliveryAddress = (value: string): string => {
   const normalized = normalizeChinaDeliveryAddress(value);
-  if (!normalized || normalized.length > 160 || !premiseNumber.test(normalized)) return false;
-  if (directionalDistance.test(normalized)) return false;
-  return !navigationTerms.some((term) => normalized.includes(term));
+  if (!normalized || normalized.length > 160 || directionalDistance.test(normalized)
+    || navigationTerms.some((term) => normalized.includes(term))) return '';
+  return normalized;
+};
+
+// Providers often append the community name to its address; the published address already ends with that name.
+export const withoutTrailingCommunityName = (address: string, name: string): string => {
+  const communityName = normalizeChinaDeliveryAddress(name);
+  return communityName && address.endsWith(communityName) ? address.slice(0, -communityName.length) : address;
 };
 
 export const chinaDeliveryAddressClause = (alias = 'community'): string => [
-  `${alias}.provider_address ~ '[0-9]'`,
-  `(${alias}.provider_address LIKE '%号%' OR ${alias}.provider_address LIKE '%號%' OR ${alias}.provider_address LIKE '%弄%' OR ${alias}.provider_address LIKE '%巷%' OR ${alias}.provider_address LIKE '%院%')`,
   ...navigationTerms.map((term) => `${alias}.provider_address NOT LIKE '%${term}%'`),
   `${alias}.provider_address !~ '[东南西北][0-9]+米'`
 ].join(' AND ');

@@ -4,7 +4,7 @@ import type { Database } from '../../database/database.mjs';
 import type { AddressComponents, AddressEvidence, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters } from './address-repository';
 import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
-import { chinaDeliveryAddressClause, normalizeChinaProviderAddress } from '../../china/quality';
+import { chinaDeliveryAddressClause, normalizeChinaProviderAddress, withoutTrailingCommunityName } from '../../china/quality';
 
 interface CommunityCandidateRow {
   id: string; canonical_name: string; province: string; city: string; district: string; township: string;
@@ -47,17 +47,19 @@ export const chinaCommunityPublicationClause = (alias = 'community'): string => 
   chinaFreshTimestampClause(`${alias}.last_seen_at`),
   chinaDeliveryAddressClause(alias),
   `(${alias}.postcode ~ '^[0-9]{6}$' OR NOT EXISTS (SELECT 1 FROM catalog_postcodes WHERE country_code='CN'))`,
-  `${alias}.provider_address ~ '^[^A-Za-z]+[0-9A-Za-z]+((弄|巷)[0-9A-Za-z]+)?([-之][0-9A-Za-z]+)*(号|號)(院|楼|栋|棟)?$'`,
+  `${alias}.provider_address ~ '^([^A-Za-z]|[A-Za-z](区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))*$'`,
   `${alias}.canonical_name ~ '^([^A-Za-z]|[A-Za-z](区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))*$'`,
   `${alias}.id IN (SELECT publication_source.community_id FROM cn_community_sources publication_source
     LEFT JOIN cn_ingest_candidates strict_candidate
       ON strict_candidate.provider=publication_source.provider
       AND strict_candidate.provider_poi_id=publication_source.provider_poi_id
       AND strict_candidate.decision='accepted'
-      AND strict_candidate.strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible')
+      AND strict_candidate.strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible',
+        'community-poi-v10-amap-around','community-poi-v11-amap-community','community-poi-v8-community')
     WHERE ${chinaFreshTimestampClause('publication_source.last_seen_at')}
       AND (publication_source.provider='amap' OR strict_candidate.provider IS NOT NULL
-        OR publication_source.accepted_strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible')))`
+        OR publication_source.accepted_strategy_version IN ('community-poi-v6','community-poi-v7','community-poi-v8-amap-v5','community-poi-v9-amap-compatible',
+        'community-poi-v10-amap-around','community-poi-v11-amap-community','community-poi-v8-community')))`
 ].join(' AND ');
 
 const seedIndex = (seed: string, length: number): number => Number.parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 8), 16) % length;
@@ -85,7 +87,7 @@ const splitChinaDeliveryAddress = (value: string): { street: string; houseNumber
 };
 
 const rowToAddress = (row: CommunityRow): VerifiedAddress => {
-  const providerAddress = normalizeChinaProviderAddress(row.provider_address, row);
+  const providerAddress = withoutTrailingCommunityName(normalizeChinaProviderAddress(row.provider_address, row), row.canonical_name);
   const delivery = splitChinaDeliveryAddress(providerAddress);
   const native: AddressComponents = {
     houseNumber: delivery.houseNumber, street: delivery.street, buildingName: row.canonical_name,

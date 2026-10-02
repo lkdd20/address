@@ -39,10 +39,13 @@ const response = (overrides = {}) => ({
 });
 
 describe('Google residential enrichment', () => {
-  it('rejects generic Google results outside the seed geometry or conflicting with sourced administration', () => {
+  it('keeps Google results outside the seed geometry at their own coordinates but rejects conflicting administration', () => {
     const road = { ...seed, building_id: undefined, building_class: undefined, match_level: 'street',
       admin1: 'กรุงเทพมหานคร', locality: 'กรุงเทพมหานคร' };
-    expect(evaluateGoogleAddressResults(response({ location: { latitude: 13.8, longitude: 100.6 } }), road, 'TH').records).toEqual([]);
+    expect(evaluateGoogleAddressResults(response({ location: { latitude: 13.8, longitude: 100.6 } }), road, 'TH').records)
+      .toEqual([expect.objectContaining({ latitude: 13.8, longitude: 100.6, property_type: 'unknown', number: '99' })]);
+    expect(evaluateGoogleAddressResults(response({ location: { latitude: 13.8, longitude: 100.6 } }), seed, 'TH').records)
+      .toEqual([expect.not.objectContaining({ residential_building_id: expect.anything() })]);
     const conflicting = response();
     conflicting.results[0].addressComponents = conflicting.results[0].addressComponents.map((entry) =>
       entry.types.includes('locality') ? { ...entry, longText: 'เชียงใหม่' } : entry);
@@ -118,7 +121,7 @@ describe('Google residential enrichment', () => {
     expect(selectGoogleResidentialResult(response({
       postalAddress: { regionCode: 'TH' },
       addressComponents: response().results[0].addressComponents.filter(({ types }) => !types.includes('postal_code'))
-    }), seed, 'TH')).toBeNull();
+    }), seed, 'TH')).toMatchObject({ number: '99', postcode: '' });
   });
 
   it('normalizes Arabic-Indic digits without weakening the Saudi postcode gate', () => {
@@ -150,10 +153,9 @@ describe('Google residential enrichment', () => {
   it('returns anonymous rejection reasons without retaining an upstream address', () => {
     const evaluation = evaluateGoogleResidentialResult(response({
       addressComponents: response().results[0].addressComponents
-        .filter(({ types }) => !types.includes('postal_code')),
-      postalAddress: { regionCode: 'TH' }
+        .filter(({ types }) => !types.includes('street_number'))
     }), seed, 'TH');
-    expect(evaluation).toEqual({ record: null, reason: 'missing_postcode' });
+    expect(evaluation).toEqual({ record: null, reason: 'missing_number' });
   });
 
   it('does not borrow a missing postcode from a conflicting city in the same response', () => {
@@ -163,13 +165,13 @@ describe('Google residential enrichment', () => {
     const otherCity = { ...detailed, placeId: 'other-city', types: ['postal_code'],
       addressComponents: detailed.addressComponents.map((entry) => entry.types.includes('locality')
         ? { ...entry, longText: 'เมืองเชียงใหม่' } : entry) };
-    expect(evaluateGoogleResidentialResult({ results: [incomplete, otherCity] }, seed, 'TH').record).toBeNull();
+    expect(evaluateGoogleResidentialResult({ results: [incomplete, otherCity] }, seed, 'TH').record).toMatchObject({ postcode: '' });
   });
 
-  it('rejects conflicting valid postcodes and unsupported countries', () => {
+  it('leaves conflicting valid postcodes empty and rejects unsupported countries', () => {
     expect(evaluateGoogleResidentialResult(response({
       postalAddress: { regionCode: 'TH', postalCode: '10110' }
-    }), seed, 'TH').record).toBeNull();
+    }), seed, 'TH').record).toMatchObject({ number: '99', postcode: '' });
     expect(evaluateGoogleResidentialResult(response(), seed, 'ZZ').record).toBeNull();
   });
 

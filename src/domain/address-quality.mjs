@@ -65,7 +65,7 @@ const addDuplicateReasons = (country, components, reasons) => {
   const locality = localityValue(components);
   const district = districtValue(components);
   const koreanLandLot = country === 'KR' && same(components.street, district)
-    && /(?:동|읍|면|리)$/u.test(clean(components.street));
+    && /(?:동|읍|면|리|\d가)$/u.test(clean(components.street));
   if (['JP', 'TW'].includes(country) && same(components.admin1, locality)) {
     reasons.push('duplicate_admin1_locality');
   }
@@ -115,9 +115,12 @@ const addCoordinateReasons = (country, latitude, longitude, reasons) => {
   }
 };
 
+const localDigits = /[٠-٩۰-۹๐-๙]/gu;
+const asciiDigit = (digit) => String(digit.codePointAt(0) - (digit >= '๐' ? 0x0E50 : digit >= '۰' ? 0x06F0 : 0x0660));
+
 export const normalizePostcode = (countryCode, value) => {
   const country = clean(countryCode).toUpperCase();
-  const source = clean(value).toUpperCase();
+  const source = clean(value).replace(localDigits, asciiDigit).toUpperCase();
   if (!source) return '';
   const packed = compact(source);
   if (country === 'CA' && /^[A-Z]\d[A-Z]\d[A-Z]\d$/u.test(packed)) return `${packed.slice(0, 3)} ${packed.slice(3)}`;
@@ -135,6 +138,10 @@ const districtValue = (components) => clean(components.district || components.de
 export const normalizeAddressFacts = (countryCode, input = {}) => {
   const components = Object.fromEntries(Object.entries(input).map(([key, value]) => [key, typeof value === 'string' ? clean(value) : value]));
   components.postcode = normalizePostcode(countryCode, components.postcode);
+  // Outside China a postcode that cannot be validated is left empty instead of rejecting a real address.
+  if (components.postcode && clean(countryCode).toUpperCase() !== 'CN' && !isValidPostcode(clean(countryCode).toUpperCase(), components.postcode)) {
+    components.postcode = '';
+  }
   const buildingName = clean(components.buildingName);
   const unit = clean(components.unit);
   if (/^\d+[\p{L}\p{N}./-]*$/u.test(buildingName)) {
@@ -172,8 +179,12 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   if (streetLevel && ['houseNumber', 'buildingName', 'unit'].some((field) => clean(normalizedComponents[field]))) {
     reasons.push('street_has_premise_fields');
   }
-  if (!streetLevel && !clean(normalizedComponents.houseNumber)) reasons.push('missing_house_number');
-  if (!clean(normalizedComponents.street)) reasons.push('missing_street');
+  // A Chinese residential address is identified by its community name; road and house number are optional there.
+  const chinaCommunity = country === 'CN' && clean(normalizedComponents.buildingName);
+  if (!streetLevel && !clean(normalizedComponents.houseNumber) && !chinaCommunity) reasons.push('missing_house_number');
+  if (!clean(normalizedComponents.street)) {
+    if (!chinaCommunity) reasons.push('missing_street');
+  }
   else if (isPlaceholderStreet(normalizedComponents.street)) reasons.push('placeholder_street');
   if (policy?.admin1 && !clean(normalizedComponents.admin1 || normalizedComponents.admin1Code)) reasons.push('missing_admin1');
   if (policy?.locality && !localityValue(normalizedComponents)) reasons.push('missing_locality');
@@ -205,8 +216,10 @@ export const addressQualitySqlClause = (prefix = '') => {
     AND trim(${prefix}house_number) = '' AND trim(${prefix}building_name) = '' AND ${prefix}property_type = 'unknown')`;
   const groups = new Map();
   for (const [country, policy] of Object.entries(policies)) {
-    const checks = [`((${prefix}match_level IN ('premise','subpremise') AND ${value('house_number')}) OR ${streetLevel})`, value('street'),
-      `lower(trim(${prefix}street)) NOT IN (${placeholderStreetNames.map((name) => `'${name}'`).join(',')})`];
+    const checks = country === 'CN'
+      ? [`(${prefix}match_level IN ('premise','subpremise') AND (${value('house_number')} OR ${value('building_name')}))`]
+      : [`((${prefix}match_level IN ('premise','subpremise') AND ${value('house_number')}) OR ${streetLevel})`, value('street')];
+    checks.push(`lower(trim(${prefix}street)) NOT IN (${placeholderStreetNames.map((name) => `'${name}'`).join(',')})`);
     if (policy.admin1) checks.push(region);
     if (policy.locality) checks.push(city);
     if (policy.district) checks.push(district);

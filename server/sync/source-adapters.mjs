@@ -43,7 +43,7 @@ const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.p
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
 const overtureResidentialRevision = 'addresses-streets-residential-subset-v6';
 const geofabrikExportRevision = 'g70-streets';
-const googleResidentialRevision = 'osm-address-street-google-geocoding-v9';
+const googleResidentialRevision = 'osm-address-street-google-geocoding-v10-city-level';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v14';
 const singaporeHdbExportRevision = 'hdb-property-address-onemap-streets-v6';
 const koreaKaptExportRevision = 'kapt-official-addresses-geoapify-streets-v7';
@@ -57,7 +57,7 @@ const franceBdnbExportRevision = 'bdnb-ban-fiabilite17-v2';
 const spainCatastroExportRevision = 'inspire-residential-join-v2';
 const taiwanResidentialExportRevision = 'molit-lvr-oa-post-v2';
 const hongKongResidentialExportRevision = 'bd-building-information-v1';
-const mapplsResidentialRevision = 'osm-source-address-street-mappls-reverse-v4';
+const mapplsResidentialRevision = 'osm-source-address-street-mappls-reverse-v5-city-level';
 const pdokBagRevision = 'strict-active-residential-coverage-round-robin-v2';
 export const sourceAdapterRevisions = Object.freeze({
   overture: overtureResidentialRevision,

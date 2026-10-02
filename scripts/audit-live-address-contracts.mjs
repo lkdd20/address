@@ -83,8 +83,9 @@ const issueFor = (code, address) => {
   const streetLevel = matchLevel === 'street' && code !== 'CN';
   if (address.countryCode !== code) issues.push('country_mismatch');
   if (address.addressStatus !== 'verified') issues.push('not_verified');
-  if (!streetLevel && !String(components.houseNumber || '').trim()) issues.push('missing_house_number');
-  if (!String(components.street || '').trim()) issues.push('missing_street');
+  const chinaCommunity = code === 'CN' && String(components.buildingName || '').trim();
+  if (!streetLevel && !String(components.houseNumber || '').trim() && !chinaCommunity) issues.push('missing_house_number');
+  if (!String(components.street || '').trim() && !chinaCommunity) issues.push('missing_street');
   for (const reason of validateAddressContract(code, nativeVariant, { strict: true, matchLevel }).reasons) issues.push(`contract_${reason}`);
   for (const reason of validateAddressQuality({ countryCode: code, matchLevel, components: nativeVariant,
     latitude: address.coordinates?.latitude, longitude: address.coordinates?.longitude }).reasons) issues.push(`quality_${reason}`);

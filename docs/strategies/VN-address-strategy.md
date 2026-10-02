@@ -118,3 +118,10 @@
 - Initial online import translation follows enabled per-key priorities and pins each broker dispatch to its credential. Caller environment, fetch implementation and cancellation propagate to localization; deferred localization remains the default.
 - Display translation caches include source component contents, country and native language. Corrected components invalidate old cache entries; unchanged inputs reuse validated translations. Numeric and HTTP-date Retry-After values are respected.
 - Existing source, administrative, coordinate, identifier, language and publication gates remain enforced. DeepL credit accounting is unchanged; no periodic refill is introduced for one-time rewards.
+
+## Google 结果与城市级字段（2026-10-02）
+
+- 适配器版本 `osm-address-street-google-geocoding-v10-city-level`（Mappls 为 `osm-source-address-street-mappls-reverse-v5-city-level`）。
+- Google 结果落在 OSM 种子建筑外或 15 米外时，不再以 `geometry_mismatch` 丢弃：作为 Google 自身坐标的真实地址发布，`property_type=unknown`，不借用 OSM 住宅证据；只有落在种子建筑内的结果才标记住宅。
+- 住宅结果只要求门牌、道路及城市级行政字段（省、坊/社）；区县和邮编来源有值时保留，缺失、冲突或格式无效时留空，不淘汰地址。
+- 通用规则：中国以外无法验证的邮编留空，本地数字（阿拉伯-印度、泰文）先转为 ASCII。

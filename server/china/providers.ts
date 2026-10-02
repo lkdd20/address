@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { bd09ToWgs84, gcj02ToWgs84 } from './coordinates';
-import { isChinaDeliveryAddress, normalizeChinaDeliveryAddress } from './quality';
+import { cleanChinaDeliveryAddress } from './quality';
 import type { ProviderName, ProviderQuotaObservation } from '../control/store';
 
 export interface CommunityCandidate {
@@ -79,7 +79,7 @@ const requestErrorMessage = (error: unknown, url: URL): string => {
   return redactSecrets(message, secrets) || 'NETWORK_ERROR';
 };
 const presentCandidate = <T extends CommunityCandidate>(value: T | null): value is T => Boolean(
-  value?.providerPoiId && value.name && value.address && value.province && value.city && value.district
+  value?.providerPoiId && value.name && value.province && value.city && value.district
   && Number.isFinite(value.latitude) && Number.isFinite(value.longitude)
 );
 const residentialCategory = (value: string): boolean => /(?:住宅|小区|公寓|家园|花园|新村|嘉园|名苑|家属院)/u.test(value);
@@ -111,7 +111,7 @@ const requestJson = async (url: URL, fetcher: typeof fetch): Promise<{ body: unk
   try { return { body: await response.json(), headers: response.headers }; } catch { throw new ProviderRequestError('network', 'INVALID_JSON'); }
 };
 
-const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPage => {
+const assertAmapOk = (body: AmapResponse, key: string): void => {
   if (body.status !== '1') {
     const code = body.infocode || '';
     const outcome = ['10003', '10044', '10045', '40000'].includes(code) ? 'quota'
@@ -127,6 +127,10 @@ const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPa
     throw new ProviderRequestError(outcome, redactSecrets(body.info || body.infocode, [key]), code, retryAt,
       outcome === 'quota' ? quotaPeriod : undefined);
   }
+};
+
+const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPage => {
+  assertAmapOk(body, key);
   const pois = body.pois || [];
   const candidates = pois.map((item) => {
     const [rawLongitude, rawLatitude] = clean(item.location).split(',').map(Number);
@@ -134,9 +138,8 @@ const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPa
     const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
     const typecode = clean(item.typecode); const adcode = clean(item.adcode);
     if (typecode !== '120302' || (/^\d{6}$/u.test(region) && adcode !== region)) return null;
-    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const address = cleanChinaDeliveryAddress(clean(item.address));
     const postcode = clean(item.postcode || (item.business as Record<string, unknown> | undefined)?.postcode);
-    if (!isChinaDeliveryAddress(address)) return null;
     return {
       provider: 'amap' as const, providerPoiId: clean(item.id), name: clean(item.name), address,
       province: clean(item.pname), city: clean(item.cityname), district: clean(item.adname), township: '', postcode,
@@ -151,12 +154,46 @@ const requestAmapPage = async (url: URL, region: string, key: string, fetcher: t
   return parseAmapPage(body, region, key);
 };
 
-export const fetchAmapCommunities = async (region: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver, subdivision = ''): Promise<ProviderPage> => {
-  const url = new URL('https://restapi.amap.com/v3/place/text');
-  Object.entries({ key, city: region, types: '120302', citylimit: 'true', offset: '25', page: String(page), extensions: 'all' })
+export interface SearchArea { location: string; radius: number }
+
+export const fetchAmapCommunities = async (region: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver, subdivision = '', area?: SearchArea): Promise<ProviderPage> => {
+  const url = new URL(`https://restapi.amap.com/v3/place/${area ? 'around' : 'text'}`);
+  Object.entries(area
+    ? { key, location: area.location, radius: String(area.radius), types: '120302', sortrule: 'distance', offset: '25', page: String(page), extensions: 'all' }
+    : { key, city: region, types: '120302', citylimit: 'true', offset: '25', page: String(page), extensions: 'all' })
     .forEach(([name, value]) => url.searchParams.set(name, value));
-  if (subdivision) url.searchParams.set('keywords', subdivision);
+  if (subdivision && !area) url.searchParams.set('keywords', subdivision);
   return await requestAmapPage(url, region, key, fetcher);
+};
+
+export interface AmapDistrict {
+  center: { latitude: number; longitude: number } | null;
+  townships: Array<{ name: string; latitude: number; longitude: number }>;
+}
+
+const amapCenter = (value: unknown): { latitude: number; longitude: number } | null => {
+  const [longitude, latitude] = clean(value).split(',').map(Number);
+  return Number.isFinite(latitude) && Number.isFinite(longitude) ? { latitude, longitude } : null;
+};
+
+export const parseAmapDistrict = (body: unknown, key = ''): AmapDistrict => {
+  assertAmapOk(body as AmapResponse, key);
+  const district = ((body as { districts?: Array<Record<string, unknown>> }).districts || [])[0];
+  const children = (district?.districts || []) as Array<Record<string, unknown>>;
+  return {
+    center: amapCenter(district?.center),
+    townships: children.flatMap((item) => {
+      const center = amapCenter(item.center);
+      return center && clean(item.name) ? [{ name: clean(item.name), ...center }] : [];
+    })
+  };
+};
+
+export const fetchAmapDistrict = async (keywords: string, key: string, fetcher: typeof fetch = fetch): Promise<AmapDistrict> => {
+  const url = new URL('https://restapi.amap.com/v3/config/district');
+  Object.entries({ key, keywords, subdistrict: '1', extensions: 'base' }).forEach(([name, value]) => url.searchParams.set(name, value));
+  const { body } = await requestJson(url, fetcher);
+  return parseAmapDistrict(body, key);
 };
 
 export const fetchTencentCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, observeQuota?: QuotaObserver, subdivision = ''): Promise<ProviderPage> => {
@@ -183,10 +220,10 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
     const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
-    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const address = cleanChinaDeliveryAddress(clean(item.address));
     const postcode = clean(item.postcode);
     const typecode = clean(item.category);
-    if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+    if (!residentialCategory(typecode)) return null;
     return {
       provider: 'tencent' as const, providerPoiId: clean(item.id), name: clean(item.title),
       province: clean(admin?.province), city: clean(admin?.city), district: clean(admin?.district), township: '',
@@ -217,10 +254,10 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
     const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = bd09ToWgs84(rawLatitude, rawLongitude);
-    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const address = cleanChinaDeliveryAddress(clean(item.address));
     const postcode = clean(item.postcode);
     const typecode = clean(detail?.tag);
-    if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+    if (!residentialCategory(typecode)) return null;
     return {
       provider: 'baidu' as const, providerPoiId: clean(item.uid), name: clean(item.name),
       province: clean(item.province), city: clean(item.city), district: clean(item.area), township: '',
@@ -236,9 +273,11 @@ export const fetchBrokerCommunities = async (
   region: string,
   page: number,
   broker: ChinaCredentialBroker,
-  subdivision = ''
+  subdivision = '',
+  area?: SearchArea
 ): Promise<ProviderPage> => {
-  const body = await broker.request(`${provider}.place-search`, { region, page, subdivision });
+  const body = await broker.request(`${provider}.place-search`, provider === 'amap' && area
+    ? { region, page, subdivision, location: area.location, radius: area.radius } : { region, page, subdivision });
   if (provider === 'amap') return parseAmapPage(body as AmapResponse, region);
   if (provider === 'tencent') {
     const data = (body as { data?: Array<Record<string, unknown>> })?.data || [];
@@ -248,10 +287,10 @@ export const fetchBrokerCommunities = async (
       const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
       if (rawLatitude === null || rawLongitude === null) return null;
       const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
-      const address = normalizeChinaDeliveryAddress(clean(item.address));
+      const address = cleanChinaDeliveryAddress(clean(item.address));
       const postcode = clean(item.postcode);
       const typecode = clean(item.category);
-      if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+      if (!residentialCategory(typecode)) return null;
       return {
         provider: 'tencent' as const, providerPoiId: clean(item.id), name: clean(item.title),
         province: clean(admin?.province), city: clean(admin?.city), district: clean(admin?.district), township: '',
@@ -268,10 +307,10 @@ export const fetchBrokerCommunities = async (
     const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
     if (rawLatitude === null || rawLongitude === null) return null;
     const [latitude, longitude] = bd09ToWgs84(rawLatitude, rawLongitude);
-    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const address = cleanChinaDeliveryAddress(clean(item.address));
     const postcode = clean(item.postcode);
     const typecode = clean(detail?.tag);
-    if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+    if (!residentialCategory(typecode)) return null;
     return {
       provider: 'baidu' as const, providerPoiId: clean(item.uid), name: clean(item.name),
       province: clean(item.province), city: clean(item.city), district: clean(item.area), township: '',

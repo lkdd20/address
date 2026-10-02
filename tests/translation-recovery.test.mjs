@@ -22,6 +22,15 @@ const translate = vi.fn(async (url) => {
 
 describe('source-backed translation recovery', () => {
   let database;
+  // Moves the clock past the publication start deadline once the first country commits.
+  const expireAfterFirstPublication = () => {
+    const transaction = database.transaction.bind(database);
+    vi.spyOn(database, 'transaction').mockImplementation(async (work) => {
+      const result = await transaction(work);
+      vi.spyOn(Date, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER);
+      return result;
+    });
+  };
 
   it('strictly revalidates only changed addresses when publishing a translation batch', async () => {
     const prepare = vi.spyOn(PostgresDatabase.prototype, 'prepare');
@@ -498,19 +507,22 @@ describe('source-backed translation recovery', () => {
       return new Response((await response.text()).replaceAll('Ottawa', '\u6e25\u592a\u534e').replaceAll('Ontario', '\u5b89\u5927\u7565\u7701'),
         { headers: { 'Content-Type': 'application/json' } });
     });
-    expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now, signal: controller.signal })).updated).toBe(1);
-    expect(await database.prepare("SELECT status,attempts,reason FROM translation_recovery WHERE address_id='z-canada'").first())
-      .toEqual({ status: 'waiting', attempts: 0, reason: 'publication_deferred' });
-    expect(await database.prepare("SELECT active FROM address_pool WHERE id='z-canada'").first('active')).toBe(0);
+    expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now, signal: controller.signal })).updated)
+      .toBe(cancel ? 1 : 2);
+    if (cancel) {
+      expect(await database.prepare("SELECT status,attempts,reason FROM translation_recovery WHERE address_id='z-canada'").first())
+        .toEqual({ status: 'waiting', attempts: 1, reason: 'cancelled' });
+      expect(await database.prepare("SELECT active FROM address_pool WHERE id='z-canada'").first('active')).toBe(0);
+    }
     expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl,
-      now: () => new Date(now().getTime() + 120_000) })).updated).toBe(1);
+      now: () => new Date(now().getTime() + 120_000) })).updated).toBe(cancel ? 1 : 0);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect((await database.prepare('SELECT status FROM translation_recovery').all()).results)
       .toEqual([{ status: 'complete' }, { status: 'complete' }]);
     expect(await database.prepare('SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1').first('total')).toBe(2);
   });
 
-  it('publishes the country with the most ready rows first and defers the rest', async () => {
+  it('publishes the country with the most ready rows first and defers the rest past the start deadline', async () => {
     const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
@@ -535,9 +547,38 @@ describe('source-backed translation recovery', () => {
       return new Response((await response.text()).replaceAll('Ottawa', '渥太华').replaceAll('Ontario', '安大略省'),
         { headers: { 'Content-Type': 'application/json' } });
     });
+    expireAfterFirstPublication();
     expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now })).updated).toBe(2);
     expect(await database.prepare("SELECT reason FROM translation_recovery WHERE address_id='street-fixture'").first('reason'))
       .toBe('publication_deferred');
+  });
+
+  it('publishes every ready country in one batch before the start deadline', async () => {
+    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
+    await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
+      format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
+      redistribution_allowed,status)
+      SELECT 'canada-dataset',source_id,'CA',version,retrieved_at,imported_at,input_checksum,format,license_code,license_name,
+        license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status
+      FROM address_datasets WHERE id='dataset'`);
+    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,
+      latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,quality_score,
+      generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
+      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','',45.42,-75.69,'en',?,?,'unknown',.95,
+        'v1','CA/ON',2,0,?,?,'publication-validation:fixture','street')`)
+      .bind(JSON.stringify({ native: canadian, en: canadian, 'zh-CN': canadian }),
+        JSON.stringify({ native: 'Main Street 21, Ottawa, Ontario', en: '', 'zh-CN': '' }), observedAt, observedAt).run();
+    await database.exec(`INSERT INTO address_pool_evidence(id,address_id,dataset_id,source_record_id,
+      observed_at,evidence_type,is_primary,is_current,created_at)
+      VALUES ('canada-evidence','z-canada','canada-dataset','way/22','${observedAt}','address_existence',1,1,'${observedAt}')`);
+    const fetchImpl = vi.fn(async (url) => {
+      const response = await translate(url);
+      return new Response((await response.text()).replaceAll('Ottawa', '渥太华').replaceAll('Ontario', '安大略省'),
+        { headers: { 'Content-Type': 'application/json' } });
+    });
+    expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now })).updated).toBe(2);
+    expect((await database.prepare('SELECT status FROM translation_recovery ORDER BY address_id').all()).results)
+      .toEqual([{ status: 'complete' }, { status: 'complete' }]);
   });
 
   it('publishes countries still below their target before countries that already met it', async () => {
@@ -570,6 +611,7 @@ describe('source-backed translation recovery', () => {
       return new Response((await response.text()).replaceAll('Ottawa', '渥太华').replaceAll('Ontario', '安大略省'),
         { headers: { 'Content-Type': 'application/json' } });
     });
+    expireAfterFirstPublication();
     expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now })).updated).toBe(1);
     expect(await database.prepare("SELECT active FROM address_pool WHERE id='z-canada'").first('active')).toBe(1);
     expect(await database.prepare("SELECT reason FROM translation_recovery WHERE address_id='street-fixture'").first('reason'))

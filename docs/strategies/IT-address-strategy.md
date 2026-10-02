@@ -108,3 +108,7 @@
 - Initial online import translation follows enabled per-key priorities and pins each broker dispatch to its credential. Caller environment, fetch implementation and cancellation propagate to localization; deferred localization remains the default.
 - Display translation caches include source component contents, country and native language. Corrected components invalidate old cache entries; unchanged inputs reuse validated translations. Numeric and HTTP-date Retry-After values are respected.
 - Existing source, administrative, coordinate, identifier, language and publication gates remain enforced. DeepL credit accounting is unchanged; no periodic refill is introduced for one-time rewards.
+
+## 邮编留空（2026-10-02）
+
+- 本地数字先转 ASCII；不符合本国格式的邮编留空并保留地址，不再以 invalid_postcode 淘汰整条记录。

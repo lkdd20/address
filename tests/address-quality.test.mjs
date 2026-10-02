@@ -25,7 +25,7 @@ describe('country address quality gate', () => {
     for (const matchLevel of ['premise', 'street']) {
       const components = { houseNumber: matchLevel === 'street' ? '' : '1', street: 'Fixture Road', postcode: '' };
       expect(validateAddressQuality({ countryCode: 'SG', components, matchLevel }).reasons).toContain('missing_postcode');
-      expect(validateAddressQuality({ countryCode: 'SG', components: { ...components, postcode: '12345' }, matchLevel }).reasons).toContain('invalid_postcode');
+      expect(validateAddressQuality({ countryCode: 'SG', components: { ...components, postcode: '12345' }, matchLevel }).reasons).toContain('missing_postcode');
       expect(validateAddressQuality({ countryCode: 'SG', components: { ...components, postcode: '018989' }, matchLevel }).valid).toBe(true);
     }
     expect(validateAddressQuality({ countryCode: 'HK', components: { ...base, postcode: '' } }).valid).toBe(true);
@@ -67,12 +67,25 @@ describe('country address quality gate', () => {
   it.each([
     ['DE', { ...base, locality: '', postcode: '' }, 'missing_locality'],
     ['MX', { ...base, district: '', postcode: '' }, 'missing_district'],
-    ['US', { ...base, admin1: '', postcode: '' }, 'missing_admin1'],
-    ['DE', { ...base, admin1: '', district: '', postcode: 'ABCDE' }, 'invalid_postcode'],
-    ['IN', { ...base, postcode: '012345' }, 'invalid_postcode'],
-    ['US', { ...base, postcode: '1234' }, 'invalid_postcode']
-  ])('rejects incomplete or malformed %s records', (countryCode, components, reason) => {
+    ['US', { ...base, admin1: '', postcode: '' }, 'missing_admin1']
+  ])('rejects incomplete %s records', (countryCode, components, reason) => {
     expect(validateAddressQuality({ countryCode, components })).toMatchObject({ valid: false, reasons: expect.arrayContaining([reason]) });
+  });
+
+  it.each([
+    ['DE', { ...base, admin1: '', district: '', postcode: 'ABCDE' }],
+    ['IN', { ...base, postcode: '012345' }],
+    ['US', { ...base, postcode: '1234' }],
+    ['VN', { ...base, postcode: '100000' }]
+  ])('keeps a %s address and leaves an invalid postcode empty', (countryCode, components) => {
+    expect(validateAddressQuality({ countryCode, components })).toMatchObject({ valid: true, components: { postcode: '' } });
+  });
+
+  it('normalizes local-script postcode digits and keeps China postcodes strict', () => {
+    expect(validateAddressQuality({ countryCode: 'SA', components: { ...base, postcode: '١٢٣٤٥' } }).components.postcode).toBe('12345');
+    expect(validateAddressQuality({ countryCode: 'TH', components: { ...base, postcode: '๑๐๓๓๐' } }).components.postcode).toBe('10330');
+    expect(validateAddressQuality({ countryCode: 'CN', components: { ...base, buildingName: '光明小区', postcode: '1234' } }).reasons)
+      .toContain('invalid_postcode');
   });
 
   it('rejects geocoder placeholder street names but keeps real names that contain those words', () => {
@@ -109,9 +122,6 @@ describe('country address quality gate', () => {
         district: '', admin1: 'Thành phố Hồ Chí Minh', postcode: '70000'
       }
     }).valid).toBe(true);
-    expect(validateAddressQuality({
-      countryCode: 'VN', components: { ...base, postcode: '100000' }
-    }).reasons).toContain('invalid_postcode');
   });
 
   it('accepts a Korean land-lot address whose neighborhood is the address line', () => {
@@ -122,6 +132,10 @@ describe('country address quality gate', () => {
     expect(validateAddressQuality({
       countryCode: 'KR', components, latitude: 37.57435296, longitude: 126.97178982
     }).valid).toBe(true);
+    const numberedDong = { ...components, street: '신포동1가', district: '신포동1가', locality: '창원시 마산합포구', admin1: '경상남도' };
+    expect(validateAddressQuality({ countryCode: 'KR', components: numberedDong }).valid).toBe(true);
+    expect(validateAddressQuality({ countryCode: 'KR', components: { ...numberedDong, street: '마산합포구', district: '마산합포구' } }).reasons)
+      .toContain('street_matches_administration');
   });
 
   it('only performs deterministic postcode formatting', () => {
@@ -162,15 +176,15 @@ describe('country address quality gate', () => {
     }).reasons).toContain('coordinates_outside_country');
   });
 
-  it('rejects Hong Kong coordinates outside its territory and non-existent postcodes', () => {
+  it('rejects Hong Kong coordinates outside its territory and drops non-existent postcodes', () => {
     const components = {
       houseNumber: '8號', street: '正德街', locality: '深水埗區', admin1: '九龍', postcode: ''
     };
     expect(validateAddressQuality({ countryCode: 'HK', components, latitude: 22.33, longitude: 114.16 }).valid).toBe(true);
     expect(validateAddressQuality({ countryCode: 'HK', components, latitude: 39.9, longitude: 116.4 }).reasons)
       .toContain('coordinates_outside_country');
-    expect(validateAddressQuality({ countryCode: 'HK', components: { ...components, postcode: '999077' } }).reasons)
-      .toContain('invalid_postcode');
+    expect(validateAddressQuality({ countryCode: 'HK', components: { ...components, postcode: '999077' } }).components.postcode)
+      .toBe('');
   });
 
   it('accepts French overseas coordinates without opening a cross-ocean envelope', () => {
