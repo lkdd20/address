@@ -12,6 +12,7 @@ import {
   chinaFreshTimestampClause
 } from '../api/repositories/china-community';
 import { distanceMeters } from './coordinates';
+import { chinaDistrictPostcode } from './district-postcodes';
 import { CredentialBrokerClient } from '../credential-broker/client.mjs';
 import {
   fetchBrokerCommunities, providerFetcher, ProviderRequestError,
@@ -365,6 +366,7 @@ export class ChinaDataService {
   private waitReason = '';
   private statusSnapshot: { expiresAt: number; promise: Promise<Record<string, unknown>> } | undefined;
   private postcodeCatalogPromise: Promise<ChinaPostcodeRow[]> | undefined;
+  private districtPostcode: typeof chinaDistrictPostcode = chinaDistrictPostcode;
   private postcodeIndexPromise: Promise<Map<string, ChinaPostcodeRow[]>> | undefined;
   private readonly credentialBroker: ChinaCredentialBroker | null;
   private readonly leaseOwnerToken = randomUUID();
@@ -412,7 +414,12 @@ export class ChinaDataService {
     return this.postcodeIndexPromise;
   }
 
+  // Locality catalog first (unique code only); otherwise the district's own postcode.
   private resolveChinaPostcode(candidate: CommunityCandidate, catalog: ChinaPostcodeRow[], index?: Map<string, ChinaPostcodeRow[]>): string {
+    return this.resolveCatalogPostcode(candidate, catalog, index) || this.districtPostcode(candidate);
+  }
+
+  private resolveCatalogPostcode(candidate: CommunityCandidate, catalog: ChinaPostcodeRow[], index?: Map<string, ChinaPostcodeRow[]>): string {
     const province = normalizeChinaPostcodeName(candidate.province);
     if (!province) return '';
     const localityNames = [candidate.township, candidate.district, candidate.city].map(normalizeChinaPostcodeName).filter(Boolean);
@@ -700,15 +707,21 @@ export class ChinaDataService {
     }
   }
 
+  async replayRecoverableCandidates(): Promise<void> {
+    await this.reprocessRejectedMismatches();
+    await this.reconcileCommunityVerification();
+    await this.refreshCoverage();
+  }
+
   private async reprocessRejectedMismatches(): Promise<void> {
-    // Candidates rejected only for the municipality pseudo-city mismatch are recoverable
-    // without spending any provider quota; replay them through the acceptance pipeline.
+    // Candidates rejected for the municipality pseudo-city mismatch or a missing postcode are
+    // recoverable without spending any provider quota; replay them through the acceptance pipeline.
     let provider = '';
     let providerPoiId = '';
     for (;;) {
       const rows = (await this.addressDb.prepare(`SELECT provider,provider_poi_id,target_adcode,name,address,province,city,district,
         township,longitude,latitude,raw_longitude,raw_latitude,raw_crs,response_hash,typecode,adcode
-        FROM cn_ingest_candidates WHERE decision='rejected' AND rejection_reason='administrative_mismatch'
+        FROM cn_ingest_candidates WHERE decision='rejected' AND rejection_reason IN ('administrative_mismatch','missing_postcode')
           AND (provider>? OR (provider=? AND provider_poi_id>?))
         ORDER BY provider,provider_poi_id LIMIT 500`).bind(provider, provider, providerPoiId)
         .all<Record<string, unknown>>()).results;

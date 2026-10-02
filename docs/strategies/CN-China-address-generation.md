@@ -3,7 +3,7 @@
 | 项目 | 核心内容 |
 |---|---|
 | 主源 | AreaCity/StatsGov 行政区版本 + 高德、百度、腾讯 WebService 严格住宅小区 POI。高德 `120302` 是首选主源；百度、腾讯用于补充独有合格小区。 |
-| 格式 / 邮编 | `省市区县街道/道路门牌小区名称 + 室内字段 + 六位邮编`；小区、道路门牌、邮编和坐标真实或来自官方目录映射。只为中国合成 `1-3栋、1-3单元、2-6楼、01-04室`，并标记 `synthetic`；缺少官方区县邮编目录值的候选不发布。 |
+| 格式 / 邮编 | `省市区县街道/道路门牌小区名称 + 室内字段 + 六位邮编`；小区、道路门牌、邮编和坐标真实或来自官方目录映射。只为中国合成 `1-3栋、1-3单元、2-6楼、01-04室`，并标记 `synthetic`；邮编先按官方目录名称唯一匹配，否则用区县级邮编目录（`server/china/district-postcodes.json`，tombcato/china-zipcode-data，MIT）按 adcode 且名称一致或省+区县名唯一匹配；仍无法确定的候选不发布。 |
 | 行政区 | AreaCity 主源，民政部版本页对照；省/市/区县/街道层级和法定后缀必须一致。 |
 | 住宅证据 | 高德候选必须是 `typecode=120302`，`adcode` 与目标区县一致，并带可投递的数字门牌地址。 |
 | 真实字段 / 生成字段 | 省、市、区县、小区名、道路门牌和平台坐标为来源真实字段；仅栋、单元、楼层和室号为生成字段并标记 `synthetic` |
@@ -130,3 +130,9 @@
 - Initial online import translation follows enabled per-key priorities and pins each broker dispatch to its credential. Caller environment, fetch implementation and cancellation propagate to localization; deferred localization remains the default.
 - Display translation caches include source component contents, country and native language. Corrected components invalidate old cache entries; unchanged inputs reuse validated translations. Numeric and HTTP-date Retry-After values are respected.
 - Existing source, administrative, coordinate, identifier, language and publication gates remain enforced. DeepL credit accounting is unchanged; no periodic refill is introduced for one-time rewards.
+
+## 区县级邮编补全（2026-10-02）
+
+- 中国邮编精度要求为区县级，无法区县级时可退到市级目录；不再要求街道或小区级邮编。
+- 提供商未返回邮编且 GeoNames 目录名称匹配不唯一时，使用区县级邮编目录：adcode 命中且省、区县名称一致才采用，否则按省+区县名唯一匹配；冲突时留空并按 `missing_postcode` 拒绝。
+- 已存储的 `missing_postcode` 与 `administrative_mismatch` 候选在启动时离线重放，不消耗提供商配额。住宅、行政归属、坐标、门牌与来源门禁不变。

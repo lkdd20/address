@@ -339,6 +339,8 @@ describe('China community storage integration', () => {
       resolveChinaPostcode(value: CommunityCandidate, catalog: typeof rows, index?: Map<string, typeof rows>): string;
     }).resolveChinaPostcode.bind(service);
     const value = candidate('amap', 'postcode-ambiguity', '文化路18号');
+    expect(resolver(value, rows)).toBe('064000');
+    Object.assign(service, { districtPostcode: () => '' });
     expect(resolver(value, rows)).toBe('');
     expect(resolver(value, rows, new Map([['河北\u0000丰润', rows]]))).toBe('');
     expect(resolver(value, [rows[0]])).toBe('064000');
@@ -415,6 +417,7 @@ describe('China community storage integration', () => {
 
   it('exposes missing postcode rejection in China history without publishing the candidate', async () => {
     const service = new ChinaDataService(addressDb, control);
+    Object.assign(service, { districtPostcode: () => '' });
     vi.spyOn(service as unknown as { chinaPostcodeCatalog(): Promise<unknown[]> }, 'chinaPostcodeCatalog')
       .mockResolvedValue([{ code: '100000', locality_name: '海淀区', region_name: 'Beijing',
         region_native_name: '北京市', region_zh_name: '北京市', latitude: null, longitude: null }]);
@@ -802,7 +805,7 @@ describe('China community storage integration', () => {
     const value = { ...candidate('baidu', 'incomplete-refresh', '文化路18号'), postcode: '064000' };
     expect(await processCandidate(service, value)).toBe(1);
     expect(await countChinaCommunities(addressDb)).toBe(1);
-    Object.assign(service, { postcodeCatalogPromise: Promise.resolve([{ code: '100000', locality_name: 'Other district',
+    Object.assign(service, { districtPostcode: () => '', postcodeCatalogPromise: Promise.resolve([{ code: '100000', locality_name: 'Other district',
       region_name: 'Other province', region_native_name: '', region_zh_name: '', latitude: null, longitude: null }]) });
     expect(await processCandidate(service, { ...value, postcode: '' })).toBe(0);
     expect(await addressDb.prepare("SELECT decision FROM cn_ingest_candidates WHERE provider_poi_id='incomplete-refresh'").first('decision')).toBe('rejected');
@@ -1589,6 +1592,27 @@ describe('China community storage integration', () => {
       await service.close();
       expect(await addressDb.prepare("SELECT decision,rejection_reason FROM cn_ingest_candidates WHERE provider_poi_id='cq-replay'")
         .first<Record<string, unknown>>()).toMatchObject({ decision: 'accepted', rejection_reason: '' });
+      expect(await countChinaCommunities(addressDb)).toBe(1);
+    });
+
+    it('re-accepts stored missing_postcode candidates with the district postcode without spending quota', async () => {
+      await insertAdminArea('50', null, 'province', '重庆市');
+      await insertAdminArea('5001', '50', 'city', '重庆城区');
+      await insertAdminArea('500101', '5001', 'district', '万州区');
+      await addressDb.prepare(`INSERT INTO catalog_postcodes(id,country_code,region_id,city_id,code,locality_name)
+        VALUES (900001,'CN',NULL,NULL,'100010','东城')`).run();
+      const now = new Date().toISOString();
+      await addressDb.prepare(`INSERT INTO cn_ingest_candidates(provider,provider_poi_id,target_adcode,name,address,province,city,
+        district,township,longitude,latitude,raw_longitude,raw_latitude,raw_crs,typecode,adcode,response_hash,decision,
+        rejection_reason,strategy_version,first_seen_at,last_seen_at)
+        VALUES ('tencent','cq-postcode','500101','江畔人家','滨江路8号','重庆市','重庆市','万州区','',108.41,30.82,108.415,30.825,
+          'GCJ-02','房产小区;住宅区','500101','hash-postcode','rejected','missing_postcode','community-poi-v7',?,?)`)
+        .bind(now, now).run();
+      const service = new ChinaDataService(addressDb, control);
+      await service.initializeTargets();
+      await service.close();
+      expect(await addressDb.prepare("SELECT decision,rejection_reason,postcode FROM cn_ingest_candidates WHERE provider_poi_id='cq-postcode'")
+        .first<Record<string, unknown>>()).toMatchObject({ decision: 'accepted', rejection_reason: '', postcode: '404100' });
       expect(await countChinaCommunities(addressDb)).toBe(1);
     });
   });

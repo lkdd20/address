@@ -29,14 +29,19 @@ const ensureChinaTargets = async (database, environment, postgresUrl) => {
   if (String(environment.NODE_ENV || '').toLowerCase() === 'test'
     || !String(environment.CONFIG_MASTER_KEY || '').trim()) return;
   const count = Number(await database.prepare('SELECT COUNT(*) AS total FROM cn_sync_targets').first('total') || 0);
-  if (count > 0) return;
   const control = new ControlStore(database, masterKeyFrom(environment.CONFIG_MASTER_KEY));
   const china = new ChinaDataService(database, control, resolve(environment.ADDRESS_DATA_ROOT || 'data'), {
     postgresUrl,
     masterKey: masterKeyFrom(environment.CONFIG_MASTER_KEY)
   });
-  await china.initializeTargets({ scheduleContinuation: false });
-  await china.close();
+  if (count === 0) {
+    await china.initializeTargets({ scheduleContinuation: false });
+    await china.close();
+    return;
+  }
+  void china.replayRecoverableCandidates()
+    .catch((error) => console.error('[china-sync] candidate replay failed', error))
+    .finally(() => china.close());
 };
 
 export const createPublicationValidationWorker = ({
