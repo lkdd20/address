@@ -236,8 +236,8 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
     const result = await broker.request('openai-compatible.translate', { values: texts, target }, { signal, maxDispatches: 2, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000 });
     return result.translations;
   } : null);
+  const chunks = [];
   for (let offset = 0; offset < missing.length;) {
-    signal?.throwIfAborted();
     const chunk = [];
     let characters = 0;
     while (offset < missing.length && chunk.length < 30) {
@@ -247,16 +247,46 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
       characters += value.length;
       offset += 1;
     }
+    chunks.push(chunk);
+  }
+  const legacyChain = routed ? null : [deepl ? (texts) => deepl(texts, target, fetchImpl, signal) : null,
+    openAICompatible ? (texts) => openAICompatible(texts, target, fetchImpl, signal) : null,
+    (texts) => (providers.youdao || youdaoTranslate)(texts, target, environment, fetchImpl, signal),
+    /^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true')) ? null
+      : (texts) => (providers.google || googleTranslate)(texts, target, fetchImpl, signal)];
+  // Routed chains run chunks in parallel within each route's concurrency; equal-priority routes share the load and a
+  // busy group is awaited rather than skipped, so lower-priority fallbacks are used only for values left untranslated.
+  const routes = routed ? providers.translationChain.filter((route) => route.translate) : [];
+  const groups = [];
+  for (const route of routes) {
+    const last = groups.at(-1);
+    if (last && route.priority !== undefined && last[0].priority === route.priority) last.push(route);
+    else groups.push([route]);
+  }
+  const limit = (route) => Math.max(1, Math.trunc(Number(route.maxConcurrency) || 1));
+  const active = new Map();
+  let notify = () => {};
+  let released = new Promise((resolve) => { notify = resolve; });
+  const acquire = async (candidates) => {
+    for (;;) {
+      signal?.throwIfAborted();
+      const route = candidates.filter((item) => (active.get(item) || 0) < limit(item))
+        .sort((left, right) => (active.get(left) || 0) / limit(left) - (active.get(right) || 0) / limit(right))[0];
+      if (route) { active.set(route, (active.get(route) || 0) + 1); return route; }
+      await released;
+    }
+  };
+  const release = (route) => {
+    active.set(route, active.get(route) - 1);
+    const wake = notify;
+    released = new Promise((resolve) => { notify = resolve; });
+    wake();
+  };
+  const translateChunk = async (chunk) => {
     const translated = new Map(chunk.map((value) => [value, value]));
-    const chain = routed || [deepl ? (texts) => deepl(texts, target, fetchImpl, signal) : null,
-      openAICompatible ? (texts) => openAICompatible(texts, target, fetchImpl, signal) : null,
-      (texts) => (providers.youdao || youdaoTranslate)(texts, target, environment, fetchImpl, signal),
-      /^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true')) ? null
-        : (texts) => (providers.google || googleTranslate)(texts, target, fetchImpl, signal)];
-    for (const translate of chain) {
+    const attempt = async (translate) => {
       const retry = chunk.filter((value) => !accepts(translated.get(value), target, value));
-      if (!retry.length) break;
-      if (!translate) continue;
+      if (!retry.length || !translate) return;
       try {
         const results = await translate(retry, target, fetchImpl, signal);
         retry.forEach((value, index) => {
@@ -265,11 +295,34 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
       } catch {
         signal?.throwIfAborted();
       }
+    };
+    if (routed) {
+      for (const group of groups) {
+        const pending = [...group];
+        while (pending.length && chunk.some((value) => !accepts(translated.get(value), target, value))) {
+          const route = await acquire(pending);
+          pending.splice(pending.indexOf(route), 1);
+          try { await attempt(route.translate); } finally { release(route); }
+        }
+      }
+    } else {
+      for (const translate of legacyChain) {
+        if (!chunk.some((value) => !accepts(translated.get(value), target, value))) break;
+        await attempt(translate);
+      }
     }
     for (const [value, translation] of translated) output.set(value, translation);
     const accepted = new Map([...translated].filter(([value, translation]) => accepts(translation, target, value)));
     if (accepted.size) await cache?.set(accepted, target, signal);
-  }
+  };
+  const workers = routed ? Math.min(50, chunks.length, Math.max(1, routes.reduce((total, route) => total + limit(route), 0))) : 1;
+  let next = 0;
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (next < chunks.length) {
+      signal?.throwIfAborted();
+      await translateChunk(chunks[next++]);
+    }
+  }));
   return output;
 };
 

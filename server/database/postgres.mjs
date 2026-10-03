@@ -12,7 +12,7 @@ const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
 const ADDRESS_SCHEMA_VERSION = 30;
-const CONTROL_SCHEMA_VERSION = 25;
+const CONTROL_SCHEMA_VERSION = 26;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -397,6 +397,24 @@ export const initializePostgres = async (pool, {
           await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (25,CURRENT_TIMESTAMP::text)
             ON CONFLICT (version) DO NOTHING`);
           await client.query('COMMIT');
+        }
+        if (Number(versions.control_version) < 26) {
+          // The live broker locks credential rows briefly on every reservation; retry short lock windows between them.
+          await client.query("SET lock_timeout TO '1s'");
+          for (let attempt = 1; ; attempt += 1) {
+            try {
+              await client.query('ALTER TABLE control.provider_credentials ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 1');
+              break;
+            } catch (error) {
+              if (error?.code !== '55P03' || attempt >= 60) throw error;
+              await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+          }
+          await client.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_credential_broker_dispatches_in_flight
+            ON control.credential_broker_dispatches(credential_id,status,reserved_at)`);
+          await client.query('RESET lock_timeout');
+          await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (26,CURRENT_TIMESTAMP::text)
+            ON CONFLICT (version) DO NOTHING`);
         }
         return;
       }

@@ -281,6 +281,9 @@ CREATE INDEX IF NOT EXISTS idx_credential_broker_requests_status
   ON credential_broker_requests(status,updated_at);
 CREATE INDEX IF NOT EXISTS idx_credential_broker_dispatches_request
   ON credential_broker_dispatches(request_key,reserved_at);
+CREATE INDEX IF NOT EXISTS idx_credential_broker_dispatches_in_flight
+  ON credential_broker_dispatches(credential_id,status,reserved_at);
+ALTER TABLE provider_credentials ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 1;
 
 ALTER TABLE provider_credentials DROP CONSTRAINT IF EXISTS provider_credentials_provider_check;
 ALTER TABLE provider_credentials ADD CONSTRAINT provider_credentials_provider_check
@@ -343,5 +346,5 @@ WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000
   AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
 
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 25) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 26) AS version
 ON CONFLICT (version) DO NOTHING;

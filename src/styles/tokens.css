@@ -1,0 +1,43 @@
+/* Design tokens shared by the admin console and the public pages. */
+:root {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans SC", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", SFMono-Regular, Consolas, monospace;
+  --canvas: #edf2f9;
+  --canvas-gradient: linear-gradient(128deg, #f4f8fe 0%, #e8f0fb 46%, #eef6fb 100%);
+  --blob-a: radial-gradient(circle at 50% 50%, rgba(122, 162, 255, .55), rgba(182, 212, 255, 0) 68%);
+  --blob-b: radial-gradient(circle at 50% 50%, rgba(110, 206, 214, .42), rgba(125, 235, 220, 0) 70%);
+  --glass: rgba(255, 255, 255, .72);
+  --glass-strong: rgba(255, 255, 255, .9);
+  --glass-soft: rgba(255, 255, 255, .5);
+  --glass-edge: rgba(255, 255, 255, .78);
+  --glass-blur: blur(20px) saturate(165%);
+  --surface-sunken: rgba(236, 242, 250, .7);
+  --hairline: rgba(24, 44, 82, .08);
+  --hairline-strong: rgba(24, 44, 82, .14);
+  --ink-1: #15233b;
+  --ink-2: #44546e;
+  --ink-3: #74829a;
+  --ink-4: #a4afc0;
+  --accent: #2d6cec;
+  --accent-strong: #1f57cc;
+  --accent-soft: rgba(45, 108, 236, .1);
+  --accent-softer: rgba(45, 108, 236, .055);
+  --ring: 0 0 0 3px rgba(45, 108, 236, .18);
+  --success: #127a57; --success-soft: #e2f4ec;
+  --warning: #9a5a05; --warning-soft: #fff2d9;
+  --danger: #bf3a2e; --danger-soft: #fdebe8;
+  --violet: #6645c2; --violet-soft: #eee9fc;
+  --neutral: #5d6b82; --neutral-soft: #edf1f6;
+  --radius-xl: 20px;
+  --radius-lg: 16px;
+  --radius-md: 11px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, .85), 0 1px 2px rgba(24, 44, 82, .04), 0 12px 32px -18px rgba(24, 44, 82, .18);
+  --shadow-float: inset 0 1px 0 rgba(255, 255, 255, .9), 0 18px 48px -18px rgba(24, 44, 82, .3), 0 2px 6px rgba(24, 44, 82, .06);
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --sidebar-width: 240px;
+  --sidebar-collapsed: 76px;
+  --topbar-height: 62px;
+  --page-gutter: 28px;
+}

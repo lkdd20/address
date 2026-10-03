@@ -269,6 +269,43 @@ const addressPoolV2Counts = async (db: Database | undefined): Promise<Map<string
   return counts;
 };
 
+// One country-count snapshot for public pages: the precomputed coverage totals the admin console also shows.
+// A stale snapshot is served while it refreshes so no request waits on a recount.
+const countrySnapshots = new WeakMap<object, { counts: Map<string, AddressPoolV2Count>; expiresAt: number; pending?: Promise<Map<string, AddressPoolV2Count>> }>();
+const loadCountrySnapshot = async (db: Database): Promise<Map<string, AddressPoolV2Count>> => {
+  const rows = await db.prepare(`SELECT country_code,total_count AS total,residential_count AS residential
+    FROM admin_coverage_stats WHERE level=0 AND total_count IS NOT NULL ORDER BY country_code`)
+    .all<AddressPoolV2CountRow>().catch(() => ({ results: [] as AddressPoolV2CountRow[] }));
+  if (!rows.results?.length) {
+    const [counts, chinaCount] = await Promise.all([addressPoolV2Counts(db), countChinaCommunities(db)]);
+    counts.set('CN', { total: chinaCount, residential: chinaCount });
+    return counts;
+  }
+  return new Map(rows.results.map((row) => [row.country_code, { total: Number(row.total || 0), residential: Number(row.residential || 0) }]));
+};
+const publishedCountryCounts = async (db: Database | undefined): Promise<Map<string, AddressPoolV2Count>> => {
+  if (!db) return new Map();
+  const snapshot = countrySnapshots.get(db as object);
+  if (snapshot && snapshot.expiresAt > Date.now()) return snapshot.counts;
+  const refresh = () => {
+    const pending = loadCountrySnapshot(db).then((counts) => {
+      countrySnapshots.set(db as object, { counts, expiresAt: Date.now() + 60_000 });
+      return counts;
+    }).catch((error) => {
+      const current = countrySnapshots.get(db as object);
+      if (current) delete current.pending;
+      throw error;
+    });
+    countrySnapshots.set(db as object, { counts: snapshot?.counts || new Map(), expiresAt: snapshot?.expiresAt || 0, pending });
+    return pending;
+  };
+  if (snapshot) {
+    if (!snapshot.pending) void refresh().catch(() => undefined);
+    return snapshot.counts;
+  }
+  return refresh();
+};
+
 const hotPoolCoverage = async (
   db: Database | undefined,
   requiredCountries: string[],
@@ -337,10 +374,8 @@ app.get('/api/v1/openapi.json', (context) => context.json(publicOpenApiDocument)
 
 app.get('/api/v1/countries', async (context) => {
   const coverage = new Map<string, number>();
-  const [poolV2Counts, chinaCommunities] = await Promise.all([
-    addressPoolV2Counts(context.env.ADDRESS_DB),
-    countChinaCommunities(context.env.ADDRESS_DB)
-  ]);
+  const poolV2Counts = await publishedCountryCounts(context.env.ADDRESS_DB);
+  const chinaCommunities = poolV2Counts.get('CN')?.total || 0;
   if (context.env.LOCATION_DB) {
     const rows = await context.env.LOCATION_DB.prepare('SELECT country_code, SUM(GREATEST(total_count,address_count)) AS total FROM residential_coverage GROUP BY country_code')
       .all<{ country_code: string; total: number }>();
@@ -370,11 +405,8 @@ app.get('/api/v1/countries', async (context) => {
 
 app.get('/api/v1/availability', async (context) => {
   if (!context.env.ADDRESS_DB) return context.json({ data: [] });
-  const [counts, chinaCount] = await Promise.all([
-    addressPoolV2Counts(context.env.ADDRESS_DB), countChinaCommunities(context.env.ADDRESS_DB)
-  ]);
-  counts.set('CN', { total: chinaCount, residential: chinaCount });
-  context.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
+  const counts = await publishedCountryCounts(context.env.ADDRESS_DB);
+  context.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
   return context.json({ data: [...counts].filter(([, count]) => count.total > 0)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([code, count]) => ({ code, available: true, residentialAvailable: count.residential > 0 })) });
@@ -393,6 +425,10 @@ app.get('/api/v1/client-context', async (context) => {
   return context.json({ data });
 });
 
+// Filter option lists change only as addresses are published; a short server and browser cache makes reopening
+// a filter instant while counts stay at most a few minutes old.
+const LOCATION_CACHE_MS = 120_000;
+const locationResponseCache = new Map<string, { expiresAt: number; data: Record<string, unknown>; revision: string }>();
 app.get('/api/v1/locations/search', async (context) => {
   const country = context.req.query('country')?.toUpperCase() || 'US';
   if (!isCountryCode(country)) throw new DomainError('INVALID_COUNTRY', `Unknown country code: ${country}`);
@@ -410,6 +446,13 @@ app.get('/api/v1/locations/search', async (context) => {
   const limit = Number.parseInt(context.req.query('limit') || '100', 10);
   const residential = context.req.query('residential') === 'true';
   if (context.env.LOCATION_DB) {
+    const cacheKey = JSON.stringify([config.code, field, query, region, regionId, cityId, city, residential, cursor, limit]);
+    const cachedLocations = locationResponseCache.get(cacheKey);
+    if (cachedLocations && cachedLocations.expiresAt > Date.now()) {
+      context.header('X-Address-Catalog-Revision', cachedLocations.revision);
+      context.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      return context.json({ data: cachedLocations.data });
+    }
     const catalog = await queryLocationCatalog(context.env.LOCATION_DB, {
       country: config.code,
       field,
@@ -434,8 +477,10 @@ app.get('/api/v1/locations/search', async (context) => {
       revision: catalog.revision || '',
       source: catalog.source
     };
+    locationResponseCache.set(cacheKey, { expiresAt: Date.now() + LOCATION_CACHE_MS, data: responseData, revision: catalog.revision || '' });
+    while (locationResponseCache.size > 2000) locationResponseCache.delete(locationResponseCache.keys().next().value!);
     context.header('X-Address-Catalog-Revision', catalog.revision || '');
-    context.header('Cache-Control', 'no-store');
+    context.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
     return context.json({ data: responseData });
   }
   if (field === 'region') {

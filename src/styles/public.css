@@ -1,0 +1,76 @@
+@import './tokens.css';
+
+/* Public pages reuse the admin console's light glass system; legacy variables map onto its tokens. */
+:root {
+  --ink: var(--ink-1);
+  --muted: var(--ink-3);
+  --line: var(--hairline-strong);
+  --blue: var(--accent);
+  --blue-dark: var(--accent-strong);
+  --blue-soft: var(--accent-soft);
+  --surface: var(--glass);
+  --page: var(--canvas);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+body { color: var(--ink-1); background: var(--canvas-gradient) fixed var(--canvas); }
+body::before, body::after { content: ""; position: fixed; z-index: -1; aspect-ratio: 1; border-radius: 50%; pointer-events: none; }
+body::before { top: -18vh; right: -12vw; width: 58vw; max-width: 820px; background: var(--blob-a); }
+body::after { bottom: -24vh; left: 6vw; width: 48vw; max-width: 700px; background: var(--blob-b); }
+
+.topbar { position: sticky; top: 0; z-index: 60; height: auto; min-height: 60px; border-bottom: 1px solid var(--hairline); background: var(--glass-strong); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
+.logo { color: var(--ink-1); font-size: 15px; letter-spacing: -.01em; }
+.top-links a { color: var(--ink-2); border-radius: var(--radius-sm); }
+.top-links a:hover { color: var(--accent-strong); background: var(--accent-soft); }
+.language-select { border-color: var(--hairline-strong); border-radius: var(--radius-sm); color: var(--ink-2); background: var(--glass-strong); }
+
+.panel, .country-browser, .mode-tabs { border: 1px solid var(--glass-edge); border-radius: var(--radius-lg); background: var(--glass); box-shadow: var(--shadow-card); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
+.container { margin-top: 18px; }
+/* Glass panels each form a stacking layer; keep the filter card above the cards after it so its dropdown is not covered. */
+.generator-card { position: relative; z-index: 20; }
+.country-group h2 { color: var(--ink-2); background: var(--accent-softer); }
+.country-group button { border-color: var(--hairline-strong); background: var(--glass-strong); }
+.country-group button.active { color: #fff; border-color: var(--accent); background: var(--accent); }
+
+/* Form controls */
+.filter > span, .filter > label { color: var(--ink-2); font-size: 12px; font-weight: 650; }
+.filter input, .ip-region-controls input { border-color: var(--hairline-strong); border-radius: var(--radius-md); background: var(--glass-strong); }
+.filter input:focus, .ip-region-controls input:focus, .combobox-control.open input { border-color: var(--accent); box-shadow: var(--ring); }
+.combobox-control button { border-left-color: var(--hairline); border-radius: 0 var(--radius-md) var(--radius-md) 0; background: transparent; }
+.combobox-control .combobox-clear { top: 50%; right: 40px; width: 26px; height: 26px; border: 0; border-radius: 50%; color: var(--ink-3); transform: translateY(-50%); }
+.combobox-control .combobox-clear:hover { color: var(--ink-1); background: var(--accent-softer); }
+.combobox-control input { padding-right: 70px; }
+.combobox-popup { padding: 6px; border: 1px solid var(--hairline-strong); border-radius: var(--radius-md); background: #fff; box-shadow: var(--shadow-float); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
+.combobox-options { max-height: 300px; }
+.combobox-popup button { border-radius: var(--radius-sm); }
+.combobox-popup button:hover, .combobox-popup button.active { color: var(--accent-strong); background: var(--accent-soft); }
+.combobox-popup button:hover small, .combobox-popup button.active small { color: var(--accent-strong); }
+.combobox-popup mark { padding: 0 1px; border-radius: 3px; color: inherit; background: rgba(45, 108, 236, .16); }
+.combobox-status { margin-top: 4px; border-top-color: var(--hairline); border-radius: 0 0 var(--radius-sm) var(--radius-sm); color: var(--ink-3); background: transparent; }
+.combobox-status button { border-color: var(--accent); border-radius: var(--radius-sm); color: var(--accent); background: transparent; }
+.generate-button { border-radius: var(--radius-md); background: var(--accent); border-color: var(--accent); box-shadow: 0 8px 18px -10px rgba(45, 108, 236, .7); transition: background .15s var(--ease-out), transform .15s var(--ease-out); }
+.generate-button:hover { background: var(--accent-strong); }
+.generate-button:active { transform: translateY(1px); }
+.ip-region-controls button { border-radius: var(--radius-md); }
+
+/* Result */
+.address-table { border-color: var(--hairline); border-radius: var(--radius-md); background: var(--glass-soft); }
+.result-row { border-bottom-color: var(--hairline); }
+.section-heading .favorite-toggle { border-radius: var(--radius-sm); }
+.address-skeleton { padding: 22px; display: grid; gap: 14px; }
+.skeleton-line { height: 14px; width: 62%; border-radius: 7px; background: linear-gradient(90deg, rgba(24, 44, 82, .06) 0%, rgba(24, 44, 82, .12) 50%, rgba(24, 44, 82, .06) 100%); background-size: 200% 100%; animation: skeleton-shimmer 1.2s ease-in-out infinite; }
+.skeleton-line.wide { width: 88%; }
+.skeleton-line.short { width: 38%; }
+@keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.shortcut-card { border-radius: var(--radius-lg); }
+.shortcut-card > header { background: linear-gradient(135deg, var(--accent), var(--accent-strong)); }
+.shortcut-card-special > header { background: linear-gradient(135deg, #2c4f9c, #1f3b7a); }
+.shortcut-card-cities > header { background: linear-gradient(135deg, #2f7a74, #245f5a); }
+
+@media (max-width: 760px) {
+  .topbar { position: static; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line { animation: none; }
+  .generate-button { transition: none; }
+}

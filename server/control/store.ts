@@ -34,7 +34,7 @@ export interface CredentialAvailability {
 }
 export interface CredentialInput {
   provider: CredentialProviderName; label: string; secret?: string; weight?: number; qpsLimit?: number;
-  enabled?: boolean;
+  maxConcurrency?: number; enabled?: boolean;
   quotaService?: string; quotaPeriod?: QuotaPeriod; quotaLimit?: number; quotaTimezoneOffset?: number;
   quotaScopeId?: string; quotaUsedBaseline?: number; dailyLimit?: number;
   apiKey?: string; baseUrl?: string; model?: string; reasoningEffort?: string; maxTokens?: number;
@@ -169,7 +169,7 @@ interface ApiTokenRow {
 }
 interface CredentialRow {
   id: string; provider: CredentialProviderName; label: string; secret_ciphertext: string; secret_iv: string; secret_tag: string;
-  enabled: number; status: string; weight: number; qps_limit: number; daily_limit: number; quota_scope_id: string;
+  enabled: number; status: string; weight: number; qps_limit: number; max_concurrency: number; daily_limit: number; quota_scope_id: string;
   quota_service: string; quota_period: QuotaPeriod; quota_limit: number; quota_timezone_offset: number;
   provider_reported_used: number | null; provider_reported_limit: number | null;
   provider_reported_reset_at: string | null; provider_reported_at: string | null;
@@ -195,7 +195,7 @@ export const AMAP_PERSONAL_MONTHLY_LIMIT = 5_000;
 export const GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT = 10_000;
 export const GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET = GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT;
 export const credentialProviderDefaults: Record<CredentialProviderName, {
-  qps: number; service: string; period: QuotaPeriod; limit: number; timezoneOffset: number;
+  qps: number; service: string; period: QuotaPeriod; limit: number; timezoneOffset: number; concurrency?: number;
 }> = {
   amap: { qps: 3, service: 'place-search-v5', period: 'month', limit: AMAP_PERSONAL_MONTHLY_LIMIT, timezoneOffset: 480 },
   baidu: { qps: 3, service: 'place-search-v2', period: 'day', limit: 100, timezoneOffset: 480 },
@@ -206,7 +206,7 @@ export const credentialProviderDefaults: Record<CredentialProviderName, {
   geoapify: { qps: 5, service: 'geocode', period: 'day', limit: 3_000, timezoneOffset: 0 },
   'google-geocoding': { qps: 5, service: 'geocode-v4', period: 'month', limit: GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, timezoneOffset: -480 },
   mappls: { qps: 5, service: 'nearby-place-details', period: 'day', limit: 1_000, timezoneOffset: 330 },
-  'openai-compatible': { qps: 1, service: 'chat-completions', period: 'day', limit: 1_000, timezoneOffset: 0 }
+  'openai-compatible': { qps: 5, service: 'chat-completions', period: 'day', limit: 1_000, timezoneOffset: 0, concurrency: 3 }
 };
 const quotaPeriodStart = (period: QuotaPeriod, offsetMinutes: number, date = new Date()): string => {
   const shifted = new Date(date.getTime() + offsetMinutes * 60_000).toISOString();
@@ -355,6 +355,7 @@ const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
     enabled: Boolean(row.enabled),
     status: !row.enabled || row.status === 'disabled' ? 'disabled' : inspection.invalid ? 'needs_review' : inspection.expired ? 'expired' : exhausted ? 'quota_exhausted' : row.status,
     expiresAt: inspection.expiresAt,
+    maxConcurrency: Number(row.max_concurrency || 1),
     quotaService: row.quota_service,
     quotaPeriod: row.quota_period,
     quotaUsed,
@@ -421,6 +422,13 @@ export class ControlStore {
     await this.setDefault('google_translation_enabled', environmentBoolean(environment.GOOGLE_TRANSLATION_ENABLED, true));
     await this.setDefault('map_display_config', mapDisplayConfigFromEnvironment(environment));
     await ensureTranslationRoutes(this.database);
+    // One-time default for keys created before per-key concurrency existed; later admin edits are kept.
+    if (!await this.setting('migration.credential_concurrency_v1', false)) {
+      await this.database.prepare(`UPDATE provider_credentials SET max_concurrency=?,qps_limit=GREATEST(qps_limit,?),updated_at=?
+        WHERE provider='openai-compatible'`).bind(credentialProviderDefaults['openai-compatible'].concurrency,
+        credentialProviderDefaults['openai-compatible'].qps, nowIso()).run();
+      await this.setSetting('migration.credential_concurrency_v1', true);
+    }
     const browserCredential = browserMapCredentialFromEnvironment(environment);
     if (browserCredential && !await this.browserMapCredentialRow()) await this.createBrowserMapCredential(browserCredential);
     await this.ensureQuotaWindows();
@@ -990,6 +998,7 @@ export class ControlStore {
     const weight = boundedInteger(input.weight, 100, 1, 10000, 'INVALID_CREDENTIAL_WEIGHT');
     const defaults = credentialProviderDefaults[input.provider];
     const qpsLimit = boundedInteger(input.qpsLimit, defaults.qps, 1, 10000, 'INVALID_CREDENTIAL_QPS');
+    const maxConcurrency = boundedInteger(input.maxConcurrency, defaults.concurrency || 1, 1, 50, 'INVALID_CREDENTIAL_CONCURRENCY');
     const quotaPeriod = input.quotaPeriod || defaults.period;
     if (!['day', 'month'].includes(quotaPeriod)) throw new Error('INVALID_CREDENTIAL_QUOTA_PERIOD');
     const quotaLimit = boundedInteger(input.quotaLimit ?? input.dailyLimit, defaults.limit, 1, 100000000, 'INVALID_CREDENTIAL_QUOTA_LIMIT');
@@ -997,11 +1006,11 @@ export class ControlStore {
     const quotaService = input.quotaService?.trim().slice(0, 80) || defaults.service;
     const quotaUsedBaseline = boundedInteger(input.quotaUsedBaseline, 0, 0, quotaLimit, 'INVALID_CREDENTIAL_QUOTA_BASELINE');
     await database.prepare(`INSERT INTO provider_credentials(
-      id,provider,label,secret_ciphertext,secret_iv,secret_tag,weight,qps_limit,daily_limit,
+      id,provider,label,secret_ciphertext,secret_iv,secret_tag,weight,qps_limit,max_concurrency,daily_limit,
       quota_service,quota_period,quota_limit,quota_timezone_offset,quota_scope_id,created_at,updated_at,enabled
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       id, input.provider, input.label.trim().slice(0, 80), encrypted.ciphertext, encrypted.iv, encrypted.tag,
-      weight, qpsLimit, quotaLimit, quotaService, quotaPeriod, quotaLimit, timezoneOffset,
+      weight, qpsLimit, maxConcurrency, quotaLimit, quotaService, quotaPeriod, quotaLimit, timezoneOffset,
       input.quotaScopeId?.trim().slice(0, 120)
         || (input.provider === 'google-geocoding' ? 'google-geocoding:project' : `${input.provider}:${quotaService}:${id}`), now, now, input.enabled === false ? 0 : 1
     ).run();
@@ -1183,6 +1192,7 @@ export class ControlStore {
     if (!label || !quotaScopeId) throw new Error('INVALID_PROVIDER_CREDENTIAL');
     const weight = boundedInteger(input.weight, current.weight, 1, 10000, 'INVALID_CREDENTIAL_WEIGHT');
     const qpsLimit = boundedInteger(input.qpsLimit, current.qps_limit, 1, 10000, 'INVALID_CREDENTIAL_QPS');
+    const maxConcurrency = boundedInteger(input.maxConcurrency, Number(current.max_concurrency || 1), 1, 50, 'INVALID_CREDENTIAL_CONCURRENCY');
     const quotaPeriod = String(input.quotaPeriod ?? current.quota_period) as QuotaPeriod;
     if (!['day', 'month'].includes(quotaPeriod)) throw new Error('INVALID_CREDENTIAL_QUOTA_PERIOD');
     const quotaLimit = boundedInteger(input.quotaLimit ?? input.dailyLimit, current.quota_limit, 1, 100000000, 'INVALID_CREDENTIAL_QUOTA_LIMIT');
@@ -1213,7 +1223,7 @@ export class ControlStore {
       if (secretChanged) encrypted = encryptSecret(nextSecret, this.masterKey);
     }
     const enabled = input.enabled === undefined ? current.enabled : input.enabled ? 1 : 0;
-    await database.prepare(`UPDATE provider_credentials SET label=?,enabled=?,weight=?,qps_limit=?,daily_limit=?,
+    await database.prepare(`UPDATE provider_credentials SET label=?,enabled=?,weight=?,qps_limit=?,max_concurrency=?,daily_limit=?,
       quota_service=?,quota_period=?,quota_limit=?,quota_timezone_offset=?,quota_scope_id=?,
       secret_ciphertext=?,secret_iv=?,secret_tag=?,
       status=CASE WHEN ?=0 THEN 'disabled' WHEN ?=1 THEN 'healthy' WHEN status='disabled' THEN 'healthy' ELSE status END,
@@ -1225,7 +1235,7 @@ export class ControlStore {
       provider_reported_reset_at=CASE WHEN ?=1 THEN NULL ELSE provider_reported_reset_at END,
       provider_reported_at=CASE WHEN ?=1 THEN NULL ELSE provider_reported_at END,
       updated_at=? WHERE id=?`).bind(
-      label, enabled, weight, qpsLimit, quotaLimit,
+      label, enabled, weight, qpsLimit, maxConcurrency, quotaLimit,
       quotaService, quotaPeriod, quotaLimit, timezoneOffset, quotaScopeId,
       encrypted.ciphertext, encrypted.iv, encrypted.tag,
       enabled, secretChanged ? 1 : 0,

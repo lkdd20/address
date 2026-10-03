@@ -85,6 +85,8 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
   const googleEnabled = value.googleTranslationEnabled && googleRoute?.enabled !== false;
   const [googlePriority, setGooglePriority] = useState(String(googleRoute?.priority ?? 40));
   useEffect(() => setGooglePriority(String(googleRoute?.priority ?? 40)), [googleRoute?.priority]);
+  const [googleConcurrency, setGoogleConcurrency] = useState(String(value.googleTranslationConcurrency ?? 1));
+  useEffect(() => setGoogleConcurrency(String(value.googleTranslationConcurrency ?? 1)), [value.googleTranslationConcurrency]);
   return <Panel title={t.translationTitle}>
     <div className="translation-settings">
       <div className="translation-toggle-row"><strong>{t.googleTranslationToggle}</strong><button type="button" className="toggle-switch" role="switch" aria-label={t.googleTranslationToggle} aria-checked={googleEnabled} disabled={busy}
@@ -92,8 +94,11 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
       <p className="security-note translation-notice">{cost.google}</p>
       <form className="translation-google-priority admin-form" onSubmit={async (event) => {
         event.preventDefault();
-        await mutate('/settings/translation/routes', 'PUT', { routes: [{ id: 'google', priority: Number(googlePriority) }] }, t.translationSaved);
-      }}><label><span>{openAI.routePriority}</span><input name="googleTranslationPriority" type="number" min="1" max="10000" required value={googlePriority} onChange={(event) => setGooglePriority(event.target.value)} /></label><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{openAI.routingHint}</small></form>
+        if (await mutate('/settings/translation/routes', 'PUT', { routes: [{ id: 'google', priority: Number(googlePriority) }] }, t.translationSaved)) {
+          await mutate('/settings/translation', 'PUT', { googleTranslationConcurrency: Number(googleConcurrency) }, t.translationSaved);
+        }
+      }}><label><span>{openAI.routePriority}</span><input name="googleTranslationPriority" type="number" min="1" max="10000" required value={googlePriority} onChange={(event) => setGooglePriority(event.target.value)} /></label>
+      <ConcurrencyField value={googleConcurrency} onChange={setGoogleConcurrency} locale={locale} /><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{openAI.routingHint}</small></form>
       <section className="translation-provider deepl-provider">
         <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>DeepL API Free</h3><span className="provider-key-count">{providerCredentialCount(locale, deeplCredentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openDeepL('create')}><Plus size={14} aria-hidden="true" />{deeplText(locale).add}</button></header>
         <p className="security-note translation-notice">{deeplText(locale).notice}</p>
@@ -121,6 +126,14 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
     {testing && <ProviderTestDialog credential={testing} locale={locale} request={request} close={() => setTesting(null)} refresh={() => void mutate('/providers', 'GET', undefined, '')} />}
   </Panel>;
 }
+const concurrencyText = (locale: AdminLocale) => ({
+  'zh-CN': { label: '并发数', hint: '同时进行的请求数（1-50）；超出时排队等待。' },
+  'zh-TW': { label: '並發數', hint: '同時進行的請求數（1-50）；超出時排隊等待。' },
+  en: { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' }
+} as Record<string, { label: string; hint: string }>)[locale] || { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' };
+const ConcurrencyField = ({ value, onChange, locale }: { value: string; onChange: (value: string) => void; locale: AdminLocale }) =>
+  <label><span>{concurrencyText(locale).label}</span><input name="maxConcurrency" type="number" min="1" max="50" step="1" required value={value} onChange={(event) => onChange(event.target.value)} /><small>{concurrencyText(locale).hint}</small></label>;
+
 export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   value?: Credential; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;
 }) {
@@ -134,6 +147,7 @@ export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults.youdao));
   const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
   const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 30));
+  const [maxConcurrency, setMaxConcurrency] = useState(String(value?.maxConcurrency ?? 1));
   const [enabled, setEnabled] = useState(value?.enabled ?? true);
   return <Dialog title={creating ? t.addKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
     event.preventDefault();
@@ -143,7 +157,8 @@ export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
     const body = {
       provider: 'youdao', label: label.trim() || `${t.providers.youdao} ${t.key}`,
       ...(key && secret ? { secret: JSON.stringify({ appKey: key, appSecret: secret }) } : {}),
-      quotaLimit: Number(quotaLimit), quotaPeriod, translationPriority: Number(translationPriority), enabled
+      quotaLimit: Number(quotaLimit), quotaPeriod, translationPriority: Number(translationPriority),
+      maxConcurrency: Number(maxConcurrency), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.youdaoSaved);
     if (result) close();
@@ -155,6 +170,7 @@ export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
     <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
     <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>
     <label><span>{openAIText(locale).priority}</span><input name="translationPriority" type="number" min="1" max="10000" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /></label>
+    <ConcurrencyField value={maxConcurrency} onChange={setMaxConcurrency} locale={locale} />
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -251,6 +267,7 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
   const savedEffort = value?.openAICompatible?.reasoningEffort;
   const [reasoningEffort, setReasoningEffort] = useState(savedEffort && savedEffort !== 'default' ? savedEffort : 'low');
   const [maxTokens, setMaxTokens] = useState(String(value?.openAICompatible?.maxTokens || 8192));
+  const [maxConcurrency, setMaxConcurrency] = useState(String(value?.maxConcurrency ?? 3));
   const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 10));
   const [translationPrompt, setTranslationPrompt] = useState(value?.translationPrompt || DEFAULT_TRANSLATION_PROMPT);
   const endpointBase = normalizeOpenAICompatibleBaseUrl(baseUrl);
@@ -304,7 +321,8 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
       provider: 'openai-compatible', label: label.trim() || `${providerLabel(locale, 'openai-compatible')} ${t.key}`,
       ...(key ? { apiKey: key } : {}), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort,
       maxTokens: Number(maxTokens), translationPriority: Number(translationPriority), translationPrompt: translationPrompt.trim(),
-      quotaLimit: unlimited ? UNLIMITED_QUOTA : Number(quotaLimit), quotaPeriod: 'day', enabled
+      quotaLimit: unlimited ? UNLIMITED_QUOTA : Number(quotaLimit), quotaPeriod: 'day',
+      maxConcurrency: Number(maxConcurrency), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, text.saved);
     if (result) close();
@@ -325,6 +343,7 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
     <label><span>{text.prompt}</span><textarea name="translationPrompt" maxLength={4000} value={translationPrompt} onChange={(event) => setTranslationPrompt(event.target.value)} /><small>{text.promptHint}</small>{translationPrompt.trim() !== DEFAULT_TRANSLATION_PROMPT && <button type="button" className="compact-action prompt-reset" onClick={() => setTranslationPrompt(DEFAULT_TRANSLATION_PROMPT)}>{localeText[locale].test.restoreDefaultPrompt}</button>}</label>
     <label className="check"><input name="unlimitedQuota" type="checkbox" checked={unlimited} onChange={(event) => { setUnlimited(event.target.checked); if (!event.target.checked && Number(quotaLimit) >= UNLIMITED_QUOTA) setQuotaLimit('1000'); }} />{localeText[locale].ui.unlimitedQuota}</label>
     {!unlimited && <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max={UNLIMITED_QUOTA - 1} required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>}
+    <ConcurrencyField value={maxConcurrency} onChange={setMaxConcurrency} locale={locale} />
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -342,6 +361,7 @@ export function ProviderCredentialDialog({ value, initialProvider = 'amap', loca
   const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
   const [quotaUsedBaseline, setQuotaUsedBaseline] = useState(String(value?.quotaBaseline || 0));
   const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 20));
+  const [maxConcurrency, setMaxConcurrency] = useState(String(value?.maxConcurrency ?? 1));
   const [enabled, setEnabled] = useState(value?.enabled ?? true);
   const creating = !value;
   const changeProvider = (next: string) => {
@@ -359,7 +379,8 @@ export function ProviderCredentialDialog({ value, initialProvider = 'amap', loca
       ...(secretValue ? { secret: secretValue } : {}),
       quotaLimit: Number(quotaLimit), quotaPeriod,
       ...(provider === 'deepl' ? { translationPriority: Number(translationPriority) } : {}),
-      ...(provider === 'google-geocoding' ? { quotaUsedBaseline: Number(quotaUsedBaseline) } : {}), enabled
+      ...(provider === 'google-geocoding' ? { quotaUsedBaseline: Number(quotaUsedBaseline) } : {}),
+      maxConcurrency: Number(maxConcurrency), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.keySaved);
     if (result) close();
@@ -373,6 +394,7 @@ export function ProviderCredentialDialog({ value, initialProvider = 'amap', loca
     {provider === 'deepl' ? <p className="security-note">{deeplText(locale).reset}</p> : <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>}
     {provider === 'google-geocoding' && <label><span>{googleQuota.baseline}</span><input name="quotaUsedBaseline" type="number" min="0" max={quotaLimit || '9000'} required value={quotaUsedBaseline} onChange={(event) => setQuotaUsedBaseline(event.target.value)} /><small>{googleQuota.hint}</small></label>}
     {provider === 'deepl' && <label><span>{openAIText(locale).priority}</span><input name="translationPriority" type="number" min="1" max="10000" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /><small>{openAIText(locale).routingHint}</small></label>}
+    <ConcurrencyField value={maxConcurrency} onChange={setMaxConcurrency} locale={locale} />
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -390,7 +412,7 @@ export const CredentialRowCompact = ({ item, locale, reveal, actions, secrets, r
     remaining: item.quotaRemaining, resetAt: item.quotaResetAt, usageSource: item.quotaUsageSource, exhausted: item.quotaUsed >= item.quotaLimit
   }];
   return <article className="provider-key-row">
-    <div className="provider-key-name"><span>{t.name}</span><strong>{credentialDisplayLabel(locale, item.label)}</strong>{item.translationPriority !== undefined && <small>{openAIText(locale).routePriority}: {item.translationPriority}</small>}{item.openAICompatible && openAI && <small className="provider-key-config"><span>{openAI.endpoint}: {item.openAICompatible.baseUrl}</span><span>{openAI.model}: {item.openAICompatible.model}</span></small>}</div>
+    <div className="provider-key-name"><span>{t.name}</span><strong>{credentialDisplayLabel(locale, item.label)}</strong>{item.translationPriority !== undefined && <small>{openAIText(locale).routePriority}: {item.translationPriority}</small>}{item.maxConcurrency !== undefined && <small>{concurrencyText(locale).label}: {item.maxConcurrency}</small>}{item.openAICompatible && openAI && <small className="provider-key-config"><span>{openAI.endpoint}: {item.openAICompatible.baseUrl}</span><span>{openAI.model}: {item.openAICompatible.model}</span></small>}</div>
     <div className={`provider-key-secrets${secretFields.length > 1 ? ' is-paired' : ''}`}>{secretFields.map((secret) => <div className="provider-key-secret" key={secret.field}><span>{secret.label}</span><SecretCell mask={secret.mask} locale={locale} reveal={reveal} path={revealPath || `/providers/${item.id}/reveal`} field={secret.field} /></div>)}</div>
     <div className="provider-key-status"><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small>{dateTime(item.expiresAt, locale)}</small>}<small>{t.lastSuccess}: {dateTime(item.lastSuccessAt, locale)}</small></div>
     <div className="quota-cell">{item.characterQuota ? <div className="quota-window">

@@ -335,6 +335,16 @@ export class CredentialBrokerStore {
             WHERE id=? AND status NOT IN ('disabled','needs_review')`).bind(nowIso, row.id).run();
           continue;
         }
+        // Per-key concurrency: dispatches without an outcome count as in flight until the stale-request cutoff.
+        const inFlight = Number(await database.prepare(`SELECT COUNT(*) AS total FROM credential_broker_dispatches
+          WHERE credential_id=? AND status='dispatched' AND reserved_at>?`)
+          .bind(row.id, new Date(now.getTime() - this.staleMs).toISOString()).first('total') || 0);
+        if (inFlight >= Math.max(1, Number(row.max_concurrency || 1))) {
+          const candidate = new Date(now.getTime() + 250).toISOString();
+          if (!nextAvailableAt || candidate < nextAvailableAt) nextAvailableAt = candidate;
+          blockedReason = 'qps';
+          continue;
+        }
         const pacingAt = row.last_used_at
           ? Date.parse(row.last_used_at) + 1000 / Number(row.qps_limit || 1) : 0;
         if (pacingAt > now.getTime()) {

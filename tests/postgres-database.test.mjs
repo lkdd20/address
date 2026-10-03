@@ -17,12 +17,40 @@ describe('PostgreSQL database adapter', () => {
   });
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 30, control_version: 25 }], fields: [], rowCount: 1
+      rows: [{ address_version: 30, control_version: 26 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
     expect(query).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('upgrades control version 25 with per-key concurrency outside a transaction', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ address_version: 30, control_version: 25 }], fields: [], rowCount: 1
+    }));
+    const release = vi.fn();
+    await initializePostgres({ connect: async () => ({ query, release }) });
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements).toContain('ALTER TABLE control.provider_credentials ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 1');
+    expect(statements.some((sql) => sql.includes('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_credential_broker_dispatches_in_flight'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('VALUES (26,CURRENT_TIMESTAMP::text)'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('queue_snapshot_json'))).toBe(false);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('retries the per-key concurrency column between live credential locks', async () => {
+    let blocked = true;
+    const query = vi.fn(async (sql) => {
+      if (sql.startsWith('ALTER TABLE control.provider_credentials ADD COLUMN') && blocked) {
+        blocked = false;
+        throw Object.assign(new Error('lock timeout'), { code: '55P03' });
+      }
+      return { rows: [{ address_version: 30, control_version: 25 }], fields: [], rowCount: 1 };
+    });
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    expect(query.mock.calls.filter(([sql]) => sql.startsWith('ALTER TABLE control.provider_credentials ADD COLUMN'))).toHaveLength(2);
+    expect(query.mock.calls.some(([sql]) => sql.includes('VALUES (26,CURRENT_TIMESTAMP::text)'))).toBe(true);
   });
 
   it('upgrades control version 24 with queue snapshot columns and one-time credential fixes', async () => {
@@ -190,7 +218,7 @@ describe('PostgreSQL database adapter', () => {
     expect(addressSchema).toContain('idx_cn_communities_city_random');
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
     expect(controlSchema).toContain("WHERE provider='mappls' AND status='needs_review'");
-    expect(controlSchema).toContain("generate_series(1, 25)");
+    expect(controlSchema).toContain("generate_series(1, 26)");
   });
 
   it('does not mark version 25 applied when the cursor index cannot be verified', async () => {

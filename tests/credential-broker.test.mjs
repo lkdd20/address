@@ -734,6 +734,22 @@ describe('credential broker', () => {
     expect(order).toEqual([10, 30, 20]);
   });
 
+  it('skips a key whose in-flight dispatches reach its concurrency until one completes', async () => {
+    await expect(addGeoapify('Too many', 'too-many-secret', { maxConcurrency: 51 })).rejects.toThrow('INVALID_CREDENTIAL_CONCURRENCY');
+    const id = await addGeoapify('Concurrent', 'concurrent-secret', { maxConcurrency: 2 });
+    const broker = await createCredentialBroker({ database, masterKey, tokens, fetchImpl: async () => Response.json({ results: [] }) });
+    const reserve = async (requestId) => {
+      const started = await broker.store.beginRequest({ clientId: 'production', requestId, provider: 'geoapify',
+        operation: 'geoapify.reverse', parametersHash: requestId });
+      return broker.store.reserve({ requestKey: started.request.id, clientId: 'production', provider: 'geoapify' });
+    };
+    const first = await reserve('request-concurrent-01');
+    expect((await reserve('request-concurrent-02')).credential?.id).toBe(id);
+    expect(await reserve('request-concurrent-03')).toMatchObject({ credential: null, reason: 'qps', nextAvailableAt: expect.any(String) });
+    await broker.store.report({ dispatchId: first.dispatchId, outcome: 'success' });
+    expect((await reserve('request-concurrent-04')).credential?.id).toBe(id);
+  });
+
   it('marks stale dispatches unknown without refunding their reserved counter', async () => {
     const id = await addGeoapify('Stale', 'stale-secret', { quotaLimit: 2 });
     let clock = new Date('2026-08-10T00:00:00.000Z');

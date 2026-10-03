@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
-import { Activity, Bookmark, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Activity, Bookmark, ChevronDown, X } from 'lucide-react';
 import AmapPreview from './AmapPreview';
 import {
   addressDisplayComponents,
@@ -101,6 +101,25 @@ const groupMessage = {
   'middle-east': 'middleEast', 'south-america': 'southAmerica', africa: 'africa'
 } as const;
 const countrySessionKey = 'address-generator-country';
+const availabilityStorageKey = 'address-generator-availability-v1';
+interface AddressBoot {
+  generate?: { country: string; requestId: string; payload: Promise<{ data?: GenerateResponseData; error?: { code?: string } } | null> };
+  availability?: Promise<{ data?: CountryAvailability[] } | null>;
+}
+// The page's inline script starts these requests before the bundle loads; each is consumed once.
+const takeBoot = <K extends keyof AddressBoot>(key: K): AddressBoot[K] | undefined => {
+  const boot = (globalThis as { __addressBoot?: AddressBoot }).__addressBoot;
+  const value = boot?.[key];
+  if (boot) delete boot[key];
+  return value;
+};
+const storedAvailability = (): Set<CountryCode> | null => {
+  try {
+    const codes = JSON.parse(window.localStorage.getItem(availabilityStorageKey) || 'null') as string[] | null;
+    const known = Array.isArray(codes) ? codes.filter((code): code is CountryCode => isCountryCode(code)) : [];
+    return known.length ? new Set(known) : null;
+  } catch { return null; }
+};
 export const addressLanguageStorageKey = 'address-generator-address-language';
 export const profileLanguageStorageKey = 'address-generator-profile-language';
 const displayLanguages = new Set<string>(['native', 'pinyin', ...supportedLocales]);
@@ -198,10 +217,30 @@ const locationSearchForms = (value: string): string[] => {
   return simplified && simplified !== normalized ? [normalized, simplified] : [normalized];
 };
 export const LOCATION_OPTION_RENDER_LIMIT = 200;
+const LOCATION_OPTION_RENDER_STEP = 100;
 export const selectAvailableCountry = (requested: CountryCode | undefined, available: ReadonlySet<CountryCode>): CountryCode | undefined => {
   if (requested && available.has(requested)) return requested;
   if (available.has('US')) return 'US';
   return countries.find(({ code }) => available.has(code))?.code;
+};
+// Marks the first accent- and case-insensitive occurrence of the query in a label.
+const highlightMatch = (label: string, query: string): ReactNode => {
+  const needle = query.trim();
+  if (!needle) return label;
+  const fold = (value: string) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase();
+  const folded = [...label].map((character) => fold(character));
+  const target = fold(needle);
+  for (let index = 0; index < folded.length; index += 1) {
+    let joined = '';
+    for (let end = index; end < folded.length && joined.length < target.length; end += 1) {
+      joined += folded[end];
+      if (joined === target) {
+        const chars = [...label];
+        return <>{chars.slice(0, index).join('')}<mark>{chars.slice(index, end + 1).join('')}</mark>{chars.slice(end + 1).join('')}</>;
+      }
+    }
+  }
+  return label;
 };
 export const filterLocationOptions = (options: LocationOption[], query: string): LocationOption[] => {
   const searches = locationSearchForms(query);
@@ -353,8 +392,10 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [copied, setCopied] = useState('');
   const [fallbackNotice, setFallbackNotice] = useState('');
   const [copyToast, setCopyToast] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
-  const [residentialCountries, setResidentialCountries] = useState<Set<CountryCode>>(new Set());
-  const [countriesReady, setCountriesReady] = useState(false);
+  // Render at once from the last known availability (or every country); the live list replaces it when it arrives.
+  const [residentialCountries, setResidentialCountries] = useState<Set<CountryCode>>(() =>
+    (typeof window === 'undefined' ? null : storedAvailability()) || new Set(countries.map((country) => country.code)));
+  const [countriesReady, setCountriesReady] = useState(true);
   const [mapDisplay, setMapDisplay] = useState<MapDisplayConfig | null>(null);
   const [shortcutConfigs, setShortcutConfigs] = useState<Partial<Record<CountryCode, CountryShortcutConfig>>>({});
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
@@ -375,7 +416,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const prefetchController = useRef<AbortController | null>(null);
   const prefetchingKey = useRef('');
   const userNavigated = useRef(false);
-  const residentialCountriesRef = useRef<Set<CountryCode>>(new Set());
+  const residentialCountriesRef = useRef<Set<CountryCode>>(residentialCountries);
 
   const refreshFavoriteState = async () => {
     const { values } = await listFavorites();
@@ -621,11 +662,16 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   };
 
   const loadResidentialCountries = async (): Promise<Set<CountryCode>> => {
-    const response = await fetchWithTimeout(`${endpoint}/v1/availability`, { headers: { Accept: 'application/json' } }, 8000);
-    if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
-    const payload = await response.json() as { data?: CountryAvailability[] };
+    let payload = await takeBoot('availability');
+    if (!payload) {
+      const response = await fetchWithTimeout(`${endpoint}/v1/availability`, { headers: { Accept: 'application/json' } }, 8000);
+      if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
+      payload = await response.json() as { data?: CountryAvailability[] };
+    }
     const records = payload.data || [];
     const available = new Set(records.filter((country) => country.available ?? country.residentialAvailable).map((country) => country.code));
+    if (!available.size) throw new Error('COUNTRIES_UNAVAILABLE');
+    try { window.localStorage.setItem(availabilityStorageKey, JSON.stringify([...available])); } catch { /* storage is optional */ }
     residentialCountriesRef.current = available;
     setResidentialCountries(available);
     setCountriesReady(true);
@@ -710,11 +756,22 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     return () => controller.abort();
   }, [endpoint, result?.address.countryCode]);
 
+  const countryAvailable = countriesReady && residentialCountries.has(countryCode);
   useEffect(() => {
-    if (!countriesReady || !residentialCountries.has(countryCode)) return;
+    if (!countryAvailable) return;
     void loadOptions('region');
     return () => Object.values(locationControllers.current).forEach((controller) => controller?.abort());
-  }, [countryCode, mode, countriesReady, residentialCountries]);
+  }, [countryCode, mode, countryAvailable]);
+  // Warm the country-wide city list once the regions are in, so opening or searching the city filter is instant.
+  useEffect(() => {
+    if (locationLoadState.region !== 'ready' || locationLoadState.city !== 'idle' || !filterFields.includes('city') || region) return;
+    const idle = (globalThis as { requestIdleCallback?: (callback: () => void) => number }).requestIdleCallback;
+    const handle = idle ? idle(() => void loadOptions('city')) : window.setTimeout(() => void loadOptions('city'), 300);
+    return () => {
+      const cancel = (globalThis as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback;
+      if (idle && cancel) cancel(handle); else window.clearTimeout(handle);
+    };
+  }, [locationLoadState.region, locationLoadState.city, countryCode, region]);
 
   const changeCountry = (nextCountry: CountryCode) => {
     if (nextCountry === countryCode) return;
@@ -779,23 +836,31 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     generationController.current?.abort();
     const controller = new AbortController();
     generationController.current = controller;
+    const unfiltered = !spec.ipRegion && !spec.ip && ![spec.region, spec.regionId, spec.city, spec.cityId, spec.district, spec.postcode, spec.postcodeId].some(Boolean);
+    const boot = strategy === 'instant' && unfiltered ? takeBoot('generate') : undefined;
+    const adoptBoot = boot?.country === spec.country;
+    if (adoptBoot) context.requestId = boot!.requestId;
     activeRequest.current = context;
     setLoading(true); setError('');
     try {
-      const params = paramsFor(spec, context.requestId, strategy);
-      const response = await fetchWithTimeout(
-        `${endpoint}/v1/generate?${params}`,
-        { signal: controller.signal },
-        spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
-      );
-      if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
-      const payload = await response.json() as {
-        data?: GenerateResponseData;
-        error?: { code?: string }
-      };
+      let ok = true;
+      let payload: { data?: GenerateResponseData; error?: { code?: string } };
+      const bootPayload = adoptBoot ? await boot!.payload : null;
+      if (bootPayload?.data) payload = bootPayload;
+      else {
+        const params = paramsFor(spec, context.requestId, strategy);
+        const response = await fetchWithTimeout(
+          `${endpoint}/v1/generate?${params}`,
+          { signal: controller.signal },
+          spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
+        );
+        if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
+        payload = await response.json() as { data?: GenerateResponseData; error?: { code?: string } };
+        ok = response.ok;
+      }
       const current = activeRequest.current;
       if (!current || current.requestId !== context.requestId || current.country !== context.country || current.mode !== context.mode) return;
-      if (!response.ok || !payload.data) throw new Error(payload.error?.code || 'API_ERROR');
+      if (!ok || !payload.data) throw new Error(payload.error?.code || 'API_ERROR');
       const expectedMode = generationResponseMode(context.country, overrides.ipRegion);
       if (payload.data.requestId !== context.requestId || payload.data.mode !== expectedMode) return;
       if (!overrides.ipRegion && payload.data.country !== context.country) return;
@@ -1032,7 +1097,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         : !visibleCountries.length ? <section className="panel availability-state">{t.noCountriesAvailable}</section> : <>
       <section className="country-browser" aria-label={t.countryRegion}>
         {countryGroups.map(({ group, countries: items }) => <div className="country-group" key={group}>
-          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onMouseEnter={() => prefetchCountry(country.code)} onFocus={() => prefetchCountry(country.code)} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`https://flagcdn.com/24x18/${country.code.toLowerCase()}.png`} width="24" height="18" alt=""/>{localizedCountryName(country.code, locale, country.name[textLocale])}</button>)}</div>
+          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onMouseEnter={() => prefetchCountry(country.code)} onFocus={() => prefetchCountry(country.code)} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`/flags/${country.code.toLowerCase()}.svg`} width="24" height="18" alt="" decoding="async"/>{localizedCountryName(country.code, locale, country.name[textLocale])}</button>)}</div>
         </div>)}
       </section>
 
@@ -1084,6 +1149,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
             {!error && !locationError && fallbackNotice && <div className="compact-notice" role="status">{fallbackNotice}</div>}
           </section>
 
+          {!result && loading && <section className="address-card panel address-skeleton" aria-busy="true" aria-label={t.loading}>
+            <span className="skeleton-line wide" /><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line short" /><span className="skeleton-line wide" />
+          </section>}
           {result && presentation && components && <>
             <section className="address-card panel">
               <header className="section-heading"><h2>{t.address}</h2><span className="address-heading-actions"><button type="button" className={`favorite-toggle ${favoriteIds.has(favoriteIdFor(result)) ? 'active' : ''}`} aria-pressed={favoriteIds.has(favoriteIdFor(result))} aria-label={favoritesCopy[locale].save} title={favoritesCopy[locale].save} onClick={() => void toggleFavorite()}><Bookmark aria-hidden="true"/></button><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></span></header>
@@ -1193,8 +1261,7 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [pageIndex, setPageIndex] = useState(0);
-  const pendingPage = useRef<number | null>(null);
+  const [renderCount, setRenderCount] = useState(LOCATION_OPTION_RENDER_STEP);
   const searchedQuery = useRef('');
   const skipValueSync = useRef(false);
   const onSearchRef = useRef(onSearch);
@@ -1208,14 +1275,16 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
     if (skipValueSync.current) { skipValueSync.current = false; return; }
     setQuery(selectedLabel);
   }, [value, selectedLabel]);
+  // Loaded options are filtered instantly; the server is asked only when the loaded list is incomplete.
+  const complete = !hasMore && total <= options.length;
   useEffect(() => {
     if (!open || clientFilter || !onSearchRef.current) return;
     const searchQuery = selectedLabel === query ? '' : query;
-    if (searchedQuery.current === searchQuery) return;
-    const timer = window.setTimeout(() => { searchedQuery.current = searchQuery; void onSearchRef.current?.(searchQuery); }, 280);
+    if (searchedQuery.current === searchQuery || (complete && searchedQuery.current === '')) return;
+    const timer = window.setTimeout(() => { searchedQuery.current = searchQuery; void onSearchRef.current?.(searchQuery); }, 150);
     return () => window.clearTimeout(timer);
-  }, [query, open, selectedLabel, clientFilter]);
-  useEffect(() => { setActiveIndex(0); setPageIndex(0); pendingPage.current = null; }, [query, clientFilter]);
+  }, [query, open, selectedLabel, clientFilter, complete]);
+  useEffect(() => { setActiveIndex(0); setRenderCount(LOCATION_OPTION_RENDER_STEP); }, [query, clientFilter]);
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => {
@@ -1225,43 +1294,39 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
     return () => document.removeEventListener('pointerdown', close);
   }, [open, selectedLabel]);
   const searchQuery = selectedLabel === query ? '' : query;
-  const visibleOptions = (clientFilter ? filterLocationOptions(options, searchQuery) : options)
+  const visibleOptions = filterLocationOptions(options, searchQuery)
     .filter((option) => !option.disabled && option.availableCount !== 0);
-  const pages = Math.max(1, Math.ceil(visibleOptions.length / LOCATION_OPTION_RENDER_LIMIT));
-  const currentPage = Math.min(pageIndex, pages - 1);
-  const start = currentPage * LOCATION_OPTION_RENDER_LIMIT;
-  const renderedOptions = visibleOptions.slice(start, start + LOCATION_OPTION_RENDER_LIMIT)
+  const renderedOptions = visibleOptions.slice(0, renderCount)
     .map((option) => ({ ...option, label: locationOptionLabel(option, locale) }));
   const values: LocationOption[] = [{ value: '', label: placeholder }, ...renderedOptions];
   useEffect(() => {
-    if (pendingPage.current !== null && state === 'ready') {
-      setPageIndex(Math.min(pendingPage.current, pages - 1)); pendingPage.current = null; setActiveIndex(0);
-    }
-  }, [options, state, pages]);
-  useEffect(() => {
     if (open) document.getElementById(`${id}-option-${Math.min(activeIndex, values.length - 1)}`)?.scrollIntoView({ block: 'nearest' });
-  }, [id, activeIndex, currentPage, open, values.length]);
+  }, [id, activeIndex, open, values.length]);
+  const showMore = () => {
+    if (renderCount < visibleOptions.length) setRenderCount((count) => count + LOCATION_OPTION_RENDER_STEP);
+    else if (hasMore && state !== 'loading') void onLoadMore?.();
+  };
   const openMenu = () => {
-    if (!open) { searchedQuery.current = ''; void onOpenRef.current?.(); setPageIndex(0); setActiveIndex(0); }
+    if (!open) { searchedQuery.current = ''; void onOpenRef.current?.(); setRenderCount(LOCATION_OPTION_RENDER_STEP); setActiveIndex(0); }
     setOpen(true);
   };
   const select = (option: LocationOption) => {
     setQuery(option.value ? option.label : ''); onChange(option.value, option); setOpen(false); setActiveIndex(0);
   };
-  const changePage = (next: number) => { setPageIndex(next); setActiveIndex(0); };
-  const loadMore = () => {
-    if (state === 'loading') return;
-    pendingPage.current = Math.floor(visibleOptions.length / LOCATION_OPTION_RENDER_LIMIT);
-    void onLoadMore?.();
-  };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (!open) { openMenu(); return; }
-      setActiveIndex((index) => Math.max(0, Math.min(index + (event.key === 'ArrowDown' ? 1 : -1), values.length - 1)));
+      setActiveIndex((index) => {
+        const next = Math.max(0, Math.min(index + (event.key === 'ArrowDown' ? 1 : -1), values.length - 1));
+        if (next >= values.length - 3) showMore();
+        return next;
+      });
     }
-    if (event.key === 'PageDown' && open && currentPage + 1 < pages) { event.preventDefault(); changePage(currentPage + 1); }
-    if (event.key === 'PageUp' && open && currentPage > 0) { event.preventDefault(); changePage(currentPage - 1); }
+    if ((event.key === 'PageDown' || event.key === 'PageUp') && open) {
+      event.preventDefault();
+      setActiveIndex((index) => Math.max(0, Math.min(index + (event.key === 'PageDown' ? 10 : -10), values.length - 1)));
+    }
     if (event.key === 'Enter' && open) { event.preventDefault(); select(values[activeIndex] || values[0]); }
     if (event.key === 'Escape') { event.preventDefault(); setOpen(false); setQuery(selectedLabel); }
   };
@@ -1277,21 +1342,21 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
         }
         setQuery(nextQuery); setOpen(true); setActiveIndex(0);
       }} onKeyDown={keyDown}/>
+      {value && <button type="button" className="combobox-clear" aria-label={`${label}: ${placeholder}`} title={placeholder} onMouseDown={(event) => event.preventDefault()} onClick={() => select(values[0])}><X size={14} aria-hidden="true" /></button>}
       <button type="button" aria-label={label} aria-expanded={open} onMouseDown={(event) => event.preventDefault()} onClick={() => open ? setOpen(false) : openMenu()}><ChevronDown size={16} aria-hidden="true" /></button>
     </div>
     {open && <div className="combobox-popup">
-      <div className="combobox-options" id={`${id}-list`} role="listbox" aria-label={label}>
-        {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} key={option.id || option.value} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{new Intl.NumberFormat(locale).format(option.availableCount)}</small>}</button>)}
+      <div className="combobox-options" id={`${id}-list`} role="listbox" aria-label={label} onScroll={(event) => {
+        const list = event.currentTarget;
+        if (list.scrollTop + list.clientHeight >= list.scrollHeight - 48) showMore();
+      }}>
+        {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} key={option.id || option.value} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{index ? highlightMatch(option.label, searchQuery) : option.label}</span>{option.availableCount !== undefined && <small>{new Intl.NumberFormat(locale).format(option.availableCount)}</small>}</button>)}
       </div>
       <div className="combobox-status" role="status" aria-live="polite">
         {state === 'loading' ? <span>{loadingLabel}</span>
           : state === 'error' ? <><span>{errorLabel}</span>{onRetry && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onRetry()}>{filterRetryLabel[locale]}</button>}</>
-            : <span>{visibleOptions.length ? `${start + 1}–${start + renderedOptions.length}` : unavailableLabel} / {clientFilter ? visibleOptions.length : total}</span>}
-        {pages > 1 && <span className="combobox-pagination">
-          <button type="button" aria-label={text[0]} disabled={currentPage === 0} onMouseDown={(event) => event.preventDefault()} onClick={() => changePage(currentPage - 1)}><ChevronLeft size={16} /></button>
-          <button type="button" aria-label={text[1]} disabled={currentPage + 1 >= pages} onMouseDown={(event) => event.preventDefault()} onClick={() => changePage(currentPage + 1)}><ChevronRight size={16} /></button>
-        </span>}
-        {state !== 'error' && hasMore && onLoadMore && <button type="button" disabled={state === 'loading'} onMouseDown={(event) => event.preventDefault()} onClick={loadMore}>{text[2]}</button>}
+            : <span>{visibleOptions.length ? `${new Intl.NumberFormat(locale).format(visibleOptions.length)} / ${new Intl.NumberFormat(locale).format(searchQuery ? visibleOptions.length : Math.max(total, visibleOptions.length))}` : unavailableLabel}</span>}
+        {state !== 'error' && hasMore && onLoadMore && <button type="button" disabled={state === 'loading'} onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>{text[2]}</button>}
       </div>
     </div>}
   </div>;

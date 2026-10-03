@@ -15,6 +15,29 @@ describe('bounded translation backfill', () => {
     expect(result.get('Block D1-12')).toBe('栋 D1-12');
     expect(result.get('Rue du 8 Mai 1945')).toBe('街 8 五月 1945');
   });
+  it('translates chunks in parallel within each route concurrency and shares equal-priority routes', async () => {
+    const active = new Map();
+    const peak = new Map();
+    const route = (id, priority, maxConcurrency, fail = false) => ({ id, priority, maxConcurrency, translate: async (values) => {
+      active.set(id, (active.get(id) || 0) + 1);
+      peak.set(id, Math.max(peak.get(id) || 0, active.get(id)));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active.set(id, active.get(id) - 1);
+      return fail ? null : values.map((value) => `${value} 路`);
+    } });
+    const values = Array.from({ length: 300 }, (_, index) => `Road ${index} ${'x'.repeat(30)}`);
+    const chain = [route('first', 10, 3), route('second', 10, 2), route('fallback', 40, 1)];
+    const result = await translateValues(values, 'zh-CN', {}, vi.fn(), null, undefined, { translationChain: chain });
+    expect([...result.values()].every((value) => value.endsWith(' 路'))).toBe(true);
+    expect(peak.get('first')).toBe(3);
+    expect(peak.get('second')).toBe(2);
+    expect(peak.get('fallback')).toBeUndefined();
+    peak.clear();
+    await translateValues(values.map((value) => `${value}!`), 'zh-CN', {}, vi.fn(), null, undefined,
+      { translationChain: [route('broken', 10, 4, true), route('fallback', 40, 1)] });
+    expect(peak.get('fallback')).toBe(1);
+  });
+
   it('preserves contextual ordinals, leading zeros and unchanged route identifiers', () => {
     expect(preservesAddressNumbers('二丁目', '三丁目')).toBe(false);
     expect(preservesAddressNumbers('二丁目', '2-chome')).toBe(true);

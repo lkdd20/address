@@ -1385,7 +1385,8 @@ export class ChinaDataService {
           return;
         }
       }
-      await updateRun(adapterRejectedPages ? 'needs_review' : 'succeeded', {
+      // Pages whose results were all filtered (neighbouring districts, non-residential POIs) are normal, not a review case.
+      await updateRun('succeeded', {
         phase: 'complete', accepted, requests, targets: targets.length, providers: providers.length, adapterRejectedPages,
         published: publishedCount
       });

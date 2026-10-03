@@ -5,6 +5,23 @@ import { googleTranslate } from './address-etl.mjs';
 import { ensureTranslationRoutes, TranslationRouteScheduler, translationRouteRevision, translationRouteStatus } from '../translation/routing.mjs';
 
 const translationRouteScheduler = new TranslationRouteScheduler();
+const DEFAULT_GOOGLE_TRANSLATION_CONCURRENCY = 1;
+const googleTranslationConcurrency = async (database) => {
+  const value = Number(parse(await database.prepare("SELECT value_json FROM system_settings WHERE key='google_translation_concurrency'")
+    .first('value_json'), DEFAULT_GOOGLE_TRANSLATION_CONCURRENCY));
+  return Number.isInteger(value) && value >= 1 && value <= 50 ? value : DEFAULT_GOOGLE_TRANSLATION_CONCURRENCY;
+};
+// A key at its concurrency limit answers SOURCE_RATE_LIMITED with a sub-second retry; wait for it instead of failing over.
+const waitForBusyKey = async (request, signal) => {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await request(); } catch (error) {
+      const waitMs = Date.parse(error?.retryAt || '') - Date.now();
+      if (error?.code !== 'SOURCE_RATE_LIMITED' || attempt >= 40 || !(waitMs <= 2_000)) throw error;
+      signal?.throwIfAborted();
+      await new Promise((resolve) => setTimeout(resolve, Math.max(50, waitMs)));
+    }
+  }
+};
 
 const parse = (value, fallback) => {
   try { return JSON.parse(value) ?? fallback; } catch { return fallback; }
@@ -22,19 +39,22 @@ export const createImportTranslationProviders = async ({ database, environment, 
   const setting = await database.prepare("SELECT value_json FROM system_settings WHERE key='google_translation_enabled'").first('value_json');
   const googleEnabled = setting === null ? !/^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true')) : parse(setting, false) === true;
   const broker = brokerClient === undefined ? await createCredentialBrokerClient(environment, { fetchImpl }) : brokerClient;
+  const googleConcurrency = await googleTranslationConcurrency(database);
   const rows = (await database.prepare(`SELECT route.id,route.provider,route.credential_id,route.priority,route.enabled,
-      route.prompt,credential.enabled AS credential_enabled,credential.status,credential.cooldown_until
+      route.prompt,credential.enabled AS credential_enabled,credential.status,credential.cooldown_until,credential.max_concurrency
     FROM translation_routes route LEFT JOIN provider_credentials credential ON credential.id=route.credential_id
     WHERE route.credential_id IS NOT NULL OR route.provider='google'`).all()).results;
   const routes = rows.map((row) => ({ ...row, credentialId: row.credential_id, enabled: Boolean(row.enabled) && (row.provider === 'google'
     ? googleEnabled : Boolean(broker && row.credential_enabled)), status: translationRouteStatus(row.status || 'healthy', row.cooldown_until) }));
   return { translationChain: translationRouteScheduler.order(routes).map((route) => ({ id: route.id, provider: route.provider,
+    priority: Number(route.priority),
+    maxConcurrency: route.provider === 'google' ? googleConcurrency : Number(route.max_concurrency || 1),
     translate: async (values, target) => {
       if (route.provider === 'google') return googleTranslate(values, target, fetchImpl, signal);
-      const result = await broker.request(`${route.provider}.translate`, {
+      const result = await waitForBusyKey(() => broker.request(`${route.provider}.translate`, {
         values, target, credentialId: route.credentialId,
         ...(route.provider === 'openai-compatible' && route.prompt ? { prompt: route.prompt } : {})
-      }, { signal, maxDispatches: route.provider === 'deepl' ? 2 : 1 });
+      }, { signal, maxDispatches: route.provider === 'deepl' ? 2 : 1 }), signal);
       if (route.provider === 'deepl') return result.translations.map((item) => item.text);
       if (route.provider === 'youdao') return String(result?.errorCode) === '0'
         ? result.translateResults?.map((item) => item.translation) : null;
@@ -52,9 +72,10 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     CASE WHEN status='needs_review' THEN 1 ELSE 0 END AS needs_review
     FROM provider_credentials WHERE provider IN ('deepl','youdao','openai-compatible') ORDER BY id`).all()).results;
   await ensureTranslationRoutes(database, now());
+  const googleConcurrency = await googleTranslationConcurrency(database);
   const routeRows = (await database.prepare(`SELECT route.id,route.provider,route.credential_id,route.priority,route.enabled,
       route.prompt,route.updated_at,credential.label,credential.enabled AS credential_enabled,
-      credential.status AS credential_status,credential.cooldown_until,credential.last_used_at
+      credential.status AS credential_status,credential.cooldown_until,credential.last_used_at,credential.max_concurrency
     FROM translation_routes route LEFT JOIN provider_credentials credential ON credential.id=route.credential_id
     WHERE route.credential_id IS NOT NULL OR route.provider='google'
     ORDER BY route.priority,route.id`).all()).results;
@@ -62,7 +83,8 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     id: String(row.id), provider: String(row.provider), credentialId: row.credential_id ? String(row.credential_id) : null,
     priority: Number(row.priority), enabled: Boolean(row.enabled) && (row.credential_id ? Boolean(row.credential_enabled) : true),
     prompt: String(row.prompt || ''), status: translationRouteStatus(String(row.credential_status || 'healthy'), row.cooldown_until, now()), model: '',
-    lastUsedAt: row.last_used_at ? String(row.last_used_at) : null, updatedAt: String(row.updated_at || '')
+    lastUsedAt: row.last_used_at ? String(row.last_used_at) : null, updatedAt: String(row.updated_at || ''),
+    maxConcurrency: row.credential_id ? Number(row.max_concurrency || 1) : googleConcurrency
   }));
   const configured = (provider) => credentials.some((row) => row.provider === provider && row.enabled && !row.needs_review);
   const broker = brokerClient === undefined ? await createCredentialBrokerClient(environment, { fetchImpl }) : brokerClient;
@@ -86,7 +108,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
   const failed = new Set();
   const key = (value, target) => JSON.stringify([target, value]);
   const record = (set, values, target) => values.forEach((value) => set.add(key(value, target)));
-  const requestLimit = Math.min(20, Math.max(1, Number(environment.TRANSLATION_BACKFILL_REQUESTS) || 20));
+  const requestLimit = Math.min(100, Math.max(1, Number(environment.TRANSLATION_BACKFILL_REQUESTS) || 100));
   const reserveRequest = (count = 1) => {
     signal.throwIfAborted();
     if (requests + count > requestLimit) {
@@ -218,20 +240,20 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     if (route.provider !== 'openai-compatible') {
       const translateProvider = providers[route.provider];
       return {
-        id: route.id, provider: route.provider,
+        id: route.id, provider: route.provider, priority: route.priority, maxConcurrency: route.maxConcurrency,
         translate: (values, target) => translateProvider?.(values, target, fetchImpl, signal, route.credentialId)
       };
     }
     return {
-      id: route.id, provider: route.provider,
+      id: route.id, provider: route.provider, priority: route.priority, maxConcurrency: route.maxConcurrency,
       translate: async (values, target) => {
         if (!broker || !route.credentialId || !reserveRequest()) return null;
         record(dispatched, values, target);
         try {
-          const result = await broker.request('openai-compatible.translate', {
+          const result = await waitForBusyKey(() => broker.request('openai-compatible.translate', {
             values, target, credentialId: route.credentialId,
             ...(route.prompt ? { prompt: route.prompt } : {})
-          }, { signal, maxDispatches: 1, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000, onDispatch: (count) => { requests += count - 1; } });
+          }, { signal, maxDispatches: 1, timeoutMs: OPENAI_COMPATIBLE_TIMEOUT_MS + 5_000, onDispatch: (count) => { requests += count - 1; } }), signal);
           return result.translations.map((item) => String(item).trim());
         } catch (error) {
           if (error.retryAt || ['SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED', 'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CREDENTIAL_EXPIRED'].includes(error.code)) {

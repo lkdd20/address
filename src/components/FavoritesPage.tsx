@@ -177,7 +177,7 @@ function FavoriteCountrySection({ countryCode, values, locale, text, copied, rem
   remove: (id: string) => Promise<void>; copy: (favorite: FavoriteAddress) => Promise<void>; move: (id: string, position: number) => Promise<void>;
 }) {
   const country = countryByCode.get(countryCode)!;
-  return <section className="favorites-country"><header><h3><img src={`https://flagcdn.com/24x18/${countryCode.toLowerCase()}.png`} width="24" height="18" alt=""/>{localizedCountryName(countryCode, locale, country.name.en)}</h3><span>{values.length}</span></header>
+  return <section className="favorites-country"><header><h3><img src={`/flags/${countryCode.toLowerCase()}.svg`} width="24" height="18" alt="" loading="lazy" decoding="async"/>{localizedCountryName(countryCode, locale, country.name.en)}</h3><span>{values.length}</span></header>
     <SortableContext items={values.map(({ id }) => id)} strategy={verticalListSortingStrategy}>
       <div className="favorites-list" aria-busy={busy}>{values.map((favorite) => <FavoriteRow key={favorite.id} favorite={favorite} total={values.length} locale={locale} text={text} copied={copied} remove={remove} copy={copy} move={move} busy={busy}/>)}</div>
     </SortableContext>

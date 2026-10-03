@@ -49,15 +49,16 @@ describe('synchronized address registry', () => {
     expect(payload.data.every((country) => country.addressCount === null && country.generationMode === 'sync-required')).toBe(true);
   });
 
-  it('reports v2 address and residential coverage from ADDRESS_DB', async () => {
+  it('reports country coverage from the shared precomputed snapshot', async () => {
     const statements: string[] = [];
     const addressDb = {
       prepare: (sql: string) => {
         statements.push(sql);
         const statement = {
           bind: () => statement,
-          all: async () => ({ results: [{ country_code: 'US', total: 10, residential: 8 }] }),
-          first: async () => 12
+          all: async () => ({ results: sql.includes('admin_coverage_stats')
+            ? [{ country_code: 'US', total: 10, residential: 8 }, { country_code: 'CN', total: 12, residential: 12 }] : [] }),
+          first: async () => 0
         };
         return statement;
       }
@@ -70,9 +71,8 @@ describe('synchronized address registry', () => {
     expect(payload.data.find(({ code }) => code === 'CN')).toMatchObject({
       addressCount: 12, residentialCount: 12, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
-    expect(statements.some((sql) => sql.includes('FROM sync_country_state'))).toBe(true);
-    expect(statements.some((sql) => sql.includes('FROM address_generation_index'))).toBe(true);
-    expect(statements.some((sql) => sql.includes('cn_communities_v2'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('FROM admin_coverage_stats'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('address_generation_index') || sql.includes('cn_communities_v2'))).toBe(false);
     expect(statements.every((sql) => !sql.includes('address_pool_runtime'))).toBe(true);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
@@ -101,14 +101,15 @@ describe('synchronized address registry', () => {
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ residentialAvailable: true });
   });
 
-  it('reads v2 counts from the synchronized country summary', async () => {
+  it('falls back to the synchronized country summary before coverage is computed', async () => {
     const statements: string[] = [];
     const addressDb = {
       prepare: (sql: string) => {
         statements.push(sql);
         const statement = {
           bind: () => statement,
-          all: async () => ({ results: [{ country_code: 'US', total: 7, residential: 3 }] })
+          all: async () => ({ results: sql.includes('admin_coverage_stats') ? [] : [{ country_code: 'US', total: 7, residential: 3 }] }),
+          first: async () => 0
         };
         return statement;
       }
@@ -129,9 +130,10 @@ describe('synchronized address registry', () => {
         statements.push(sql);
         return {
           first: async () => 2,
-          all: async () => ({ results: [
+          all: async () => ({ results: sql.includes('admin_coverage_stats') ? [
+            { country_code: 'CN', total: 2, residential: 2 },
             { country_code: 'US', total: 8, residential: 8 }, { country_code: 'SA', total: 0, residential: 0 }
-          ] })
+          ] : [] })
         };
       }
     };
@@ -139,11 +141,10 @@ describe('synchronized address registry', () => {
     expect(await response.json()).toEqual({ data: [
       { code: 'CN', available: true, residentialAvailable: true }, { code: 'US', available: true, residentialAvailable: true }
     ] });
-    expect(statements.some((sql) => sql.includes('sync_country_state'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('admin_coverage_stats'))).toBe(true);
     expect(statements.join(' ')).not.toContain('address_datasets');
-    expect(statements.some((sql) => sql.includes('cn_communities_v2'))).toBe(true);
-    expect(statements.every((sql) => !sql.includes('address_pool_runtime'))).toBe(true);
-    expect(response.headers.get('Cache-Control')).toContain('max-age=30');
+    expect(statements.some((sql) => sql.includes('cn_communities_v2') || sql.includes('address_generation_index'))).toBe(false);
+    expect(response.headers.get('Cache-Control')).toContain('max-age=60');
   });
 
   it('lists hierarchy children and reports the three synchronization rules', async () => {

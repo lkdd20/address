@@ -462,7 +462,7 @@ describe('control database security', () => {
       expect(response.status).toBe(200);
       expect(response.headers.get('cache-control')).toBe('private, max-age=60');
       const payload = await response.json() as { data: Record<string, unknown> };
-      expect(payload.data).toMatchObject({ metrics: expect.objectContaining({ residentialTotal: 0, coverageRate: 1 }) });
+      expect(payload.data).toMatchObject({ metrics: expect.objectContaining({ addressTotal: 0, residentialTotal: 0, coverageRate: 1 }) });
       expect(JSON.stringify(payload)).not.toMatch(/database|credential|provider|quota|secret|token/iu);
       await store.setPassword('frontend', 'frontend monitor password');
       await store.setSetting('frontend_password_enabled', true);

@@ -1,6 +1,7 @@
 ---
 import App from '../components/App';
 import Layout from '../layouts/Layout.astro';
+import '../styles/public.css';
 import type { Locale } from '../domain/types';
 import { localeStaticPaths } from '../domain/locales';
 
@@ -10,5 +11,24 @@ const locale = Astro.params.locale as Locale;
 const apiBaseUrl = import.meta.env.PROD ? '/web-api' : import.meta.env.PUBLIC_API_BASE_URL || '/web-api';
 ---
 <Layout locale={locale}>
+  {/* Start the first address and availability before the app bundle arrives; App adopts these responses. */}
+  <script is:inline define:vars={{ apiBaseUrl }}>
+    (() => {
+      try {
+        const raw = new URLSearchParams(location.search).get('country') || 'us';
+        const country = /^[a-z]{2}$/i.test(raw) ? raw.toUpperCase() : 'US';
+        const id = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+        const requestId = id();
+        const params = new URLSearchParams({ requestId, country, residential: String(country === 'CN'), seed: id().slice(0, 12), strategy: 'instant' });
+        const json = (url) => fetch(url, { headers: { Accept: 'application/json' } })
+          .then((response) => response.ok && (response.headers.get('content-type') || '').includes('application/json') ? response.json() : null)
+          .catch(() => null);
+        window.__addressBoot = {
+          generate: { country, requestId, payload: json(`${apiBaseUrl}/v1/generate?${params}`) },
+          availability: json(`${apiBaseUrl}/v1/availability`)
+        };
+      } catch { /* The app falls back to its own requests. */ }
+    })();
+  </script>
   <App client:load locale={locale} apiBaseUrl={apiBaseUrl} />
 </Layout>
