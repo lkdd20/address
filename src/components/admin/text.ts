@@ -383,7 +383,10 @@ export const queueReasonText = (reason: string | null | undefined, locale: Admin
   if (providerQuotaPeriods[reason]) return interpolate(localeText[locale].ui.quotaWaitFor, { provider: providerLabel(locale, reason) });
   return reason;
 };
-export const syncHistoryStatusClass = (status: string): string => {
+export const syncInterrupted = (item: Pick<SyncHistoryItem, 'status' | 'errorCode'>): boolean =>
+  item.status === 'failed' && item.errorCode === 'SYNC_JOB_INTERRUPTED';
+export const syncHistoryStatusClass = (status: string, errorCode?: string | null): string => {
+  if (syncInterrupted({ status, errorCode: errorCode ?? null })) return 'quota_wait';
   if (status === 'succeeded') return 'ready';
   if (status === 'running') return 'running';
   if (status === 'cancelled') return 'source_limited';
@@ -428,8 +431,11 @@ export const syncHistoryGoalChange = (item: SyncHistoryItem, locale: AdminLocale
   return changes.join(' · ');
 };
 export const syncHistoryResultDetail = (item: SyncHistoryItem, locale: AdminLocale): string => {
-  if (item.errorMessage || item.errorCode) return [item.failurePhase, item.errorMessage || item.errorCode].filter(Boolean).join(' · ');
   const text = syncHistoryText[locale];
+  if (item.errorMessage || item.errorCode) {
+    const kept = item.status === 'failed' && (item.netGrowth || 0) > 0 ? interpolate(text.keptRows, { count: '+' + item.netGrowth!.toLocaleString(locale) }) : '';
+    return [kept, [item.failurePhase, item.errorMessage || item.errorCode].filter(Boolean).join(' · ')].filter(Boolean).join(' · ');
+  }
   const parts: string[] = [];
   if (item.candidateCount !== null && item.candidateCount !== undefined) parts.push(`${text.candidates} ${item.candidateCount.toLocaleString(locale)}`);
   if (item.acceptedCount !== null && item.acceptedCount !== undefined) parts.push(`${text.qualityPassed} ${item.acceptedCount.toLocaleString(locale)}`);

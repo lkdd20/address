@@ -63,7 +63,7 @@ const en = {
     source: 'Source', period: 'Time period', duration: 'Duration', growth: 'Address growth', trigger: 'Trigger',
     details: 'Details', empty: 'No synchronization history', queued: 'Queued', running: 'Running', succeeded: 'Execution succeeded',
     failed: 'Failed', paused_quota: 'Paused for quota', needs_review: 'Needs review', cancelled: 'Not executed', previous: 'Previous', next: 'Next',
-    candidates: 'Candidates', qualityPassed: 'Quality passed', rejected: 'Rejected', coveredNodes: 'Covered nodes', qualifiedNodes: 'Qualified nodes'
+    candidates: 'Candidates', qualityPassed: 'Quality passed', rejected: 'Rejected', coveredNodes: 'Covered nodes', qualifiedNodes: 'Qualified nodes', interrupted: 'Interrupted', keptRows: 'Kept {count} published rows that passed quality checks'
   }
 };
 
@@ -133,7 +133,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '占用时间段', duration: '持续时间', growth: '总量净增', trigger: '触发方式', details: '结果说明',
       empty: '暂无同步历史', queued: '排队中', running: '同步中', succeeded: '执行成功', failed: '失败',
       paused_quota: '等待额度', needs_review: '需要检查', cancelled: '未执行', previous: '上一页', next: '下一页',
-      candidates: '候选', qualityPassed: '质量通过', rejected: '拒绝', coveredNodes: '覆盖节点', qualifiedNodes: '达标节点'
+      candidates: '候选', qualityPassed: '质量通过', rejected: '拒绝', coveredNodes: '覆盖节点', qualifiedNodes: '达标节点', interrupted: '已中断', keptRows: '已保留 {count} 条已通过质量校验的地址'
     }
   },
   'zh-TW': {
@@ -198,7 +198,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '佔用時段', duration: '持續時間', growth: '總量淨增', trigger: '觸發方式', details: '結果說明',
       empty: '暫無同步歷史', queued: '排隊中', running: '同步中', succeeded: '執行成功', failed: '失敗',
       paused_quota: '等待額度', needs_review: '需要檢查', cancelled: '未執行', previous: '上一頁', next: '下一頁',
-      candidates: '候選', qualityPassed: '品質通過', rejected: '拒絕', coveredNodes: '覆蓋節點', qualifiedNodes: '達標節點'
+      candidates: '候選', qualityPassed: '品質通過', rejected: '拒絕', coveredNodes: '覆蓋節點', qualifiedNodes: '達標節點', interrupted: '已中斷', keptRows: '已保留 {count} 筆已通過品質校驗的地址'
     }
   },
   ja: {
@@ -263,7 +263,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '実行期間', duration: '所要時間', growth: '純増数', trigger: 'トリガー', details: '結果',
       empty: '同期履歴はありません', queued: '待機中', running: '実行中', succeeded: '成功', failed: '失敗',
       paused_quota: 'クォータ待ち', needs_review: '要確認', cancelled: '未実行', previous: '前へ', next: '次へ',
-      candidates: '候補', qualityPassed: '品質合格', rejected: '除外', coveredNodes: '網羅ノード', qualifiedNodes: '基準達成ノード'
+      candidates: '候補', qualityPassed: '品質合格', rejected: '除外', coveredNodes: '網羅ノード', qualifiedNodes: '基準達成ノード', interrupted: '中断', keptRows: '品質チェック済みの {count} 件を保持'
     }
   },
   ko: {
@@ -328,7 +328,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '실행 기간', duration: '소요 시간', growth: '순증가', trigger: '트리거', details: '결과',
       empty: '동기화 기록이 없습니다', queued: '대기 중', running: '실행 중', succeeded: '성공', failed: '실패',
       paused_quota: '할당량 대기', needs_review: '검토 필요', cancelled: '실행 안 됨', previous: '이전', next: '다음',
-      candidates: '후보', qualityPassed: '품질 통과', rejected: '제외', coveredNodes: '커버 노드', qualifiedNodes: '기준 충족 노드'
+      candidates: '후보', qualityPassed: '품질 통과', rejected: '제외', coveredNodes: '커버 노드', qualifiedNodes: '기준 충족 노드', interrupted: '중단됨', keptRows: '품질 검사를 통과한 {count}건 유지'
     }
   },
   de: {
@@ -393,7 +393,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Zeitraum', duration: 'Dauer', growth: 'Adresszuwachs', trigger: 'Auslöser', details: 'Ergebnis',
       empty: 'Kein Synchronisierungsverlauf', queued: 'In Warteschlange', running: 'Läuft', succeeded: 'Erfolgreich', failed: 'Fehlgeschlagen',
       paused_quota: 'Pausiert (Kontingent)', needs_review: 'Prüfung nötig', cancelled: 'Nicht ausgeführt', previous: 'Zurück', next: 'Weiter',
-      candidates: 'Kandidaten', qualityPassed: 'Qualität bestanden', rejected: 'Abgelehnt', coveredNodes: 'Abgedeckte Knoten', qualifiedNodes: 'Qualifizierte Knoten'
+      candidates: 'Kandidaten', qualityPassed: 'Qualität bestanden', rejected: 'Abgelehnt', coveredNodes: 'Abgedeckte Knoten', qualifiedNodes: 'Qualifizierte Knoten', interrupted: 'Unterbrochen', keptRows: '{count} geprüfte Adressen behalten'
     }
   },
   fr: {
@@ -458,7 +458,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Période', duration: 'Durée', growth: 'Croissance des adresses', trigger: 'Déclencheur', details: 'Résultat',
       empty: 'Aucun historique de synchronisation', queued: 'En file', running: 'En cours', succeeded: 'Réussi', failed: 'Échec',
       paused_quota: 'En pause (quota)', needs_review: 'À vérifier', cancelled: 'Non exécuté', previous: 'Précédent', next: 'Suivant',
-      candidates: 'Candidats', qualityPassed: 'Qualité validée', rejected: 'Rejetés', coveredNodes: 'Nœuds couverts', qualifiedNodes: 'Nœuds conformes'
+      candidates: 'Candidats', qualityPassed: 'Qualité validée', rejected: 'Rejetés', coveredNodes: 'Nœuds couverts', qualifiedNodes: 'Nœuds conformes', interrupted: 'Interrompu', keptRows: '{count} adresses validées conservées'
     }
   },
   es: {
@@ -523,7 +523,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Periodo', duration: 'Duración', growth: 'Crecimiento de direcciones', trigger: 'Disparador', details: 'Resultado',
       empty: 'Sin historial de sincronización', queued: 'En cola', running: 'En curso', succeeded: 'Completado', failed: 'Fallido',
       paused_quota: 'En pausa por cuota', needs_review: 'Requiere revisión', cancelled: 'No ejecutado', previous: 'Anterior', next: 'Siguiente',
-      candidates: 'Candidatos', qualityPassed: 'Calidad superada', rejected: 'Rechazados', coveredNodes: 'Nodos cubiertos', qualifiedNodes: 'Nodos que cumplen'
+      candidates: 'Candidatos', qualityPassed: 'Calidad superada', rejected: 'Rechazados', coveredNodes: 'Nodos cubiertos', qualifiedNodes: 'Nodos que cumplen', interrupted: 'Interrumpido', keptRows: 'Se conservaron {count} direcciones validadas'
     }
   },
   pt: {
@@ -588,7 +588,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Período', duration: 'Duração', growth: 'Crescimento de endereços', trigger: 'Gatilho', details: 'Resultado',
       empty: 'Sem histórico de sincronização', queued: 'Na fila', running: 'Em execução', succeeded: 'Concluído', failed: 'Falhou',
       paused_quota: 'Pausado por cota', needs_review: 'Requer revisão', cancelled: 'Não executado', previous: 'Anterior', next: 'Próximo',
-      candidates: 'Candidatos', qualityPassed: 'Qualidade aprovada', rejected: 'Rejeitados', coveredNodes: 'Nós cobertos', qualifiedNodes: 'Nós qualificados'
+      candidates: 'Candidatos', qualityPassed: 'Qualidade aprovada', rejected: 'Rejeitados', coveredNodes: 'Nós cobertos', qualifiedNodes: 'Nós qualificados', interrupted: 'Interrompido', keptRows: '{count} endereços validados mantidos'
     }
   }
 };

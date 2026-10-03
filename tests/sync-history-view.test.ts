@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { syncHistoryGoalChange, syncHistoryResultDetail } from '../src/components/SyncAdmin';
+import { syncHistoryStatusClass, syncInterrupted } from '../src/components/admin/text';
 
 const goals = (covered: number, qualified: number) => ({
   total: { current: 20_000, target: 20_000, met: true },
@@ -36,5 +37,19 @@ describe('sync history presentation', () => {
     const item = historyItem({ candidateCount: 2_500, acceptedCount: 2_000, rejectedCount: 500 });
     expect(syncHistoryResultDetail(item, 'zh-CN')).toBe('候选 2,500 · 质量通过 2,000 · 拒绝 500');
     expect(syncHistoryResultDetail(item, 'en')).toBe('Candidates 2,500 · Quality passed 2,000 · Rejected 500');
+  });
+
+  it('marks restart interruptions separately and reports rows kept before the failure', () => {
+    const item = historyItem({
+      status: 'failed', completedAt: '2026-10-03T03:39:29Z', afterCount: 19_071, netGrowth: 162, failurePhase: 'materialize',
+      errorCode: 'SYNC_JOB_INTERRUPTED', errorMessage: 'Address synchronization aborted'
+    });
+    expect(syncInterrupted(item)).toBe(true);
+    expect(syncHistoryStatusClass(item.status, item.errorCode)).toBe('quota_wait');
+    expect(syncHistoryResultDetail(item, 'zh-CN')).toBe('已保留 +162 条已通过质量校验的地址 · materialize · Address synchronization aborted');
+    const lockFailure = historyItem({ status: 'failed', netGrowth: 0, failurePhase: 'coverage', errorCode: '55P03', errorMessage: 'lock timeout' });
+    expect(syncInterrupted(lockFailure)).toBe(false);
+    expect(syncHistoryStatusClass(lockFailure.status, lockFailure.errorCode)).toBe('failed');
+    expect(syncHistoryResultDetail(lockFailure, 'zh-CN')).toBe('coverage · lock timeout');
   });
 });

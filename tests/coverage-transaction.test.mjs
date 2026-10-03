@@ -46,7 +46,7 @@ it('skips only lock-contended countries when the migration asks to', async () =>
   const lockTimeout = Object.assign(new Error('lock timeout'), { code: '55P03' });
   let calls = 0;
   const countries = { prepare: () => ({ all: async () => ({ results: [{ country_code: 'BR' }, { country_code: 'PH' }] }) }) };
-  const database = { ...countries, transaction: async () => { calls += 1; if (calls <= 6) throw lockTimeout; return 'done'; } };
+  const database = { ...countries, transaction: async () => { calls += 1; if (calls <= 12) throw lockTimeout; return 'done'; } };
   vi.useFakeTimers();
   try {
     const skipped = refreshIndexedResidentialCoverage(database, '2026-10-01T00:00:00Z', { skipLocked: true });

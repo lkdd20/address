@@ -10,6 +10,7 @@ STATE_ROOT=$ROOT/runtime/deploy
 GATEWAY_ROOT=$ROOT/runtime/gateway
 DRAIN_SECONDS=${ADDRESS_DEPLOY_DRAIN_SECONDS:-30}
 RELEASE_RETENTION=${ADDRESS_RELEASE_RETENTION:-5}
+SYNC_WAIT_SECONDS=${ADDRESS_DEPLOY_SYNC_WAIT_SECONDS:-1800}
 
 if [[ ! "$RELEASE_ID" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
   echo "Release ID is invalid" >&2
@@ -21,6 +22,10 @@ if [[ ! "$RELEASE_IMAGE" =~ ^[A-Za-z0-9._/:@-]+$ ]] || [[ "$RELEASE_IMAGE" == *:
 fi
 if [[ ! "$DRAIN_SECONDS" =~ ^[0-9]+$ ]] || (( DRAIN_SECONDS > 600 )); then
   echo "ADDRESS_DEPLOY_DRAIN_SECONDS must be between 0 and 600" >&2
+  exit 1
+fi
+if [[ ! "$SYNC_WAIT_SECONDS" =~ ^[0-9]+$ ]] || (( SYNC_WAIT_SECONDS > 7200 )); then
+  echo "ADDRESS_DEPLOY_SYNC_WAIT_SECONDS must be between 0 and 7200" >&2
   exit 1
 fi
 if [[ ! "$RELEASE_RETENTION" =~ ^[0-9]+$ ]] || (( RELEASE_RETENTION < 2 || RELEASE_RETENTION > 20 )); then
@@ -199,6 +204,15 @@ for legacy_service in api credential-broker; do
   if compose ps --status running --services | grep -Fx "$legacy_service" >/dev/null; then
     compose stop -t 30 "$legacy_service"
   fi
+done
+
+active_sync_runs() {
+  compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT COUNT(*) FROM control.sync_runs WHERE status='"'"'running'"'"'"' 2>/dev/null || echo 0
+}
+sync_wait_deadline=$((SECONDS + SYNC_WAIT_SECONDS))
+while (( SECONDS < sync_wait_deadline )) && [[ "$(active_sync_runs)" =~ ^[1-9] ]]; do
+  echo "==> waiting for the running sync job before updating sync"
+  sleep 10
 done
 
 echo "==> updating singleton sync service"

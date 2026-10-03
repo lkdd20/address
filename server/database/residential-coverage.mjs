@@ -82,8 +82,8 @@ export const refreshResidentialCoverage = async (
           return refreshResidentialCoverage(transaction, countryCode, now, signal, { useGenerationIndex, inTransaction: true });
         });
       } catch (error) {
-        if (error?.code !== '55P03' || attempt >= 5) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+        if (error?.code !== '55P03' || attempt >= 11) throw error;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(30_000, 500 * 2 ** attempt)));
         checkpoint();
       }
     }

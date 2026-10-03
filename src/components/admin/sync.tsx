@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, Database, MapPin, RefreshCw, Search } from '
 import { isCountryCode } from '../../domain/countries';
 import { localizedCountryName } from '../../domain/locales';
 import { localeText } from './locale-text';
-import { addressDataText, adminText, coverageLevels, dateTime, durationLabel, errorMessage, flagSrc, interpolate, queueBadgeClass, queueExtraStateText, queueReasonText, queueStateRank, remainingTime, syncHistoryResultDetail, syncHistoryStatusClass, syncHistoryText, syncQueueRuleText, usagePercent } from './text';
+import { addressDataText, adminText, coverageLevels, dateTime, durationLabel, errorMessage, flagSrc, interpolate, queueBadgeClass, queueExtraStateText, queueReasonText, queueStateRank, remainingTime, syncHistoryResultDetail, syncHistoryStatusClass, syncInterrupted, syncHistoryText, syncQueueRuleText, usagePercent } from './text';
 import type { AddressDataCountry, AddressDataWorkspace, AddressNodeTarget, AdminLocale, ChinaAreaListData, Mutate, RequestData, SyncHistoryData, SyncQueueData, SyncQueueEntry, SyncQueueGoalLevel, SyncQueueRules } from './types';
 import { EmptyState, usePolling } from './ui';
 
@@ -86,7 +86,7 @@ export function SyncHistoryPanel({ initialData, locale, request, fixedCountry = 
       const name = item.countryCode && isCountryCode(item.countryCode) ? localizedCountryName(item.countryCode, locale, item.countryCode) : item.countryCode || '-';
       const ended = item.completedAt || new Date().toISOString();
       return <tr key={`${item.id}-${item.countryCode || ''}-${item.sourceId}-${index}`}>
-        <td><span className={`badge address-data-status ${syncHistoryStatusClass(item.status)}`}>{statusLabel(item.status)}</span></td>
+        <td><span className={`badge address-data-status ${syncHistoryStatusClass(item.status, item.errorCode)}`}>{syncInterrupted(item) ? text.interrupted : statusLabel(item.status)}</span></td>
         <td><span className="country-cell-name"><strong>{name}</strong>{item.countryCode && <small className="country-code">{item.countryCode}</small>}</span></td>
         <td>{item.sourceId || (item.kind.startsWith('china') ? 'China map providers' : '-')}</td>
         <td><span className="history-period">{dateTime(item.startedAt || item.createdAt, locale)}<b>→</b>{dateTime(ended, locale)}</span></td>
