@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
-import { runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
+import { refreshStaleCoverage, runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from '../server/sync/translation-providers.mjs';
 import { PostgresTranslationCache } from '../server/sync/address-etl.mjs';
 import { ControlStore } from '../server/control/store.ts';
@@ -77,6 +77,42 @@ describe('source-backed translation recovery', () => {
   });
   afterEach(async () => { await database.close(); vi.restoreAllMocks(); });
 
+  it('publishes an ordinary address with its English street when the Chinese street is not translated yet', async () => {
+    const partial = vi.fn(async (url) => {
+      const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
+      const values = new URL(url).searchParams.get('q').split(`\n${boundary}\n`);
+      return Response.json([[[values.map((value) => value === native.street ? value : translations.get(value) || value)
+        .join(`\n${boundary}\n`)]]]);
+    });
+    const result = await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: partial, now });
+    expect(result.updated).toBe(1);
+    const row = await database.prepare("SELECT active,component_variants_json FROM address_pool WHERE id='street-fixture'").first();
+    expect(row.active).toBe(1);
+    expect(JSON.parse(row.component_variants_json)['zh-CN']).toMatchObject({ street: native.street, admin1: chinese.admin1 });
+    expect(await database.prepare('SELECT status,reason FROM translation_recovery').first())
+      .toEqual({ status: 'waiting', reason: 'chinese_street_fallback' });
+    expect(await database.prepare("SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1").first('total')).toBe(1);
+  });
+
+  it('publishes a backlog of ordinary addresses without first sending their streets to providers', async () => {
+    for (let index = 0; index < 200; index++) {
+      const id = `backlog-${String(index).padStart(3, '0')}`;
+      await database.exec(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,latitude,longitude,native_language,
+        component_variants_json,address_variants_json,property_type,quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
+        SELECT '${id}',country_code,admin1,admin1_code,locality,'Backlog Street ${index}',house_number,latitude,longitude,native_language,
+        replace(component_variants_json,'Main Street 21','Backlog Street ${index}'),address_variants_json,property_type,quality_score,generation,coverage,
+        ${index + 2},active,first_seen_at,last_seen_at,retired_at,match_level FROM address_pool WHERE id='street-fixture';
+        INSERT INTO address_pool_evidence(id,address_id,dataset_id,source_record_id,observed_at,evidence_type,is_primary,is_current,created_at)
+        VALUES ('evidence-${id}','${id}','dataset','way/${id}','${observedAt}','address_existence',1,1,'${observedAt}');`);
+    }
+    const result = await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: translate, now });
+    const requested = translate.mock.calls.map(([url]) => new URL(url).searchParams.get('q')).join('\n');
+    expect(requested).not.toContain('Backlog Street');
+    expect(result.updated).toBeGreaterThan(100);
+    expect(await database.prepare("SELECT COUNT(*) AS total FROM translation_recovery WHERE reason='chinese_street_fallback'").first('total'))
+      .toBeGreaterThan(100);
+  }, 120_000);
+
   it('defers a competing recovery worker without moving its cursor or dispatching requests', async () => {
     let release;
     let started;
@@ -107,7 +143,7 @@ describe('source-backed translation recovery', () => {
     expect(await database.prepare('SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1').first('total')).toBe(1);
   });
 
-  it('counts multiple source datasets in one publication scan', async () => {
+  it('updates multiple source dataset counts without recounting them', async () => {
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status)
       SELECT 'dataset-2',source_id,country_code,'v2',retrieved_at,imported_at,input_checksum,format,license_code,license_name,
@@ -127,7 +163,7 @@ describe('source-backed translation recovery', () => {
     expect((await runTranslationBackfillBatch({ database, environment: {}, cacheOnly: true, now })).updated).toBe(2);
     expect((await database.prepare('SELECT id,active_count FROM address_datasets ORDER BY id').all()).results)
       .toEqual([{ id: 'dataset', active_count: 1 }, { id: 'dataset-2', active_count: 1 }]);
-    expect(prepare.mock.calls.filter(([sql]) => sql.includes('COUNT(DISTINCT evidence.address_id)'))).toHaveLength(1);
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes('COUNT(DISTINCT evidence.address_id)'))).toHaveLength(0);
   });
 
   it('keeps discovering records while a due record repeatedly waits for provider cooldown', async () => {
@@ -215,6 +251,7 @@ describe('source-backed translation recovery', () => {
     expect(await database.prepare('SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1').first('total')).toBe(1);
     expect(await database.prepare("SELECT address_count,residential_count FROM sync_country_state WHERE country_code='US'").first())
       .toEqual({ address_count: 1, residential_count: 0 });
+    await refreshStaleCoverage(database, now, { force: true });
     expect(await database.prepare("SELECT total_count,address_count FROM residential_coverage WHERE country_code='US'").first())
       .toEqual({ total_count: 1, address_count: 0 });
     expect(await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'recovered-street'))
@@ -275,6 +312,35 @@ describe('source-backed translation recovery', () => {
     expect(await database.prepare('SELECT status,attempts FROM translation_recovery').first()).toEqual({ status: 'complete', attempts: 3 });
   });
 
+  it('publishes cached translations when the translation soft deadline stops provider calls', async () => {
+    await new PostgresTranslationCache(database).set(translations, 'zh-CN');
+    const timeout = AbortSignal.timeout;
+    const timeoutMock = vi.spyOn(AbortSignal, 'timeout')
+      .mockImplementation((duration) => duration > 200_000 && duration <= 225_000 ? AbortSignal.abort() : timeout(duration));
+    const result = await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: translate, now });
+    const deadlines = timeoutMock.mock.calls.filter(([duration]) => duration > 200_000 && duration <= 225_000);
+    timeoutMock.mockRestore();
+    expect(deadlines).toHaveLength(1);
+    expect(result).toMatchObject({ updated: 1 });
+    expect(result.interrupted).toBeUndefined();
+    expect(translate).not.toHaveBeenCalled();
+  });
+
+  it('finishes publication in its own window when the batch deadline passes after translation', async () => {
+    const controller = new AbortController();
+    const timeout = AbortSignal.timeout;
+    const timeoutMock = vi.spyOn(AbortSignal, 'timeout')
+      .mockImplementation((duration) => duration === 300_000 ? controller.signal : timeout(duration));
+    const transaction = database.transaction.bind(database);
+    vi.spyOn(database, 'transaction').mockImplementationOnce(async (work) => {
+      controller.abort();
+      return transaction(work);
+    });
+    const result = await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: translate, now });
+    timeoutMock.mockRestore();
+    expect(result.updated).toBe(1);
+  });
+
   it.each(['cancelled', 'batch_timeout'])('resumes cache-only recovery directly after %s without a fourth provider attempt', async (reason) => {
     const invalid = vi.fn(async (url) => Response.json([[[new URL(url).searchParams.get('q')]]]));
     for (let index = 0; index < 3; index++) await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: invalid,
@@ -283,7 +349,7 @@ describe('source-backed translation recovery', () => {
     const controller = new AbortController();
     const timeout = AbortSignal.timeout;
     const timeoutMock = reason === 'batch_timeout' ? vi.spyOn(AbortSignal, 'timeout')
-      .mockImplementation((duration) => duration === 180_000 ? controller.signal : timeout(duration)) : null;
+      .mockImplementation((duration) => duration === 300_000 ? controller.signal : timeout(duration)) : null;
     vi.spyOn(database, 'transaction').mockImplementationOnce(async () => {
       controller.abort();
       throw controller.signal.reason;
@@ -342,6 +408,7 @@ describe('source-backed translation recovery', () => {
     expect(JSON.parse(raw.component_variants_json).native).toEqual(source);
     expect(await pickAddressPoolV2Address(database, 'HK', false, {}, undefined, 'derived-hk'))
       .toMatchObject({ components: { admin1: '九龍', locality: '觀塘區' } });
+    await refreshStaleCoverage(database, now, { force: true });
     expect(await database.prepare("SELECT region_name,city_name,total_count FROM residential_coverage WHERE country_code='HK'").first())
       .toEqual({ region_name: 'Kowloon', city_name: 'Kwun Tong', total_count: 1 });
   });
@@ -376,7 +443,7 @@ describe('source-backed translation recovery', () => {
   it('preserves untouched attempts when the batch deadline interrupts preparation', async () => {
     const deadline = new AbortController();
     const timeout = AbortSignal.timeout.bind(AbortSignal);
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation((duration) => duration === 180_000 ? deadline.signal : timeout(duration));
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((duration) => duration === 300_000 ? deadline.signal : timeout(duration));
     const query = database.query.bind(database);
     vi.spyOn(database, 'query').mockImplementation(async (sql, values) => {
       const result = await query(sql, values);

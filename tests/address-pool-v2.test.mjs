@@ -8,6 +8,7 @@ import {
   pickNearestAddressPoolV2Address,
   repairHongKongNativeVariants,
   storedAddressPoolV2RowCanRecoverTranslations,
+  storedAddressPoolV2RowIsFullyTranslated,
   storedAddressPoolV2RowIsPublishable
 } from '../server/api/repositories/address-pool-v2';
 
@@ -116,6 +117,17 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(storedAddressPoolV2RowIsPublishable({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-19T23:59:59Z'))).toBe(true);
     expect(storedAddressPoolV2RowCanRecoverTranslations({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-19T12:00:00Z'))).toBe(true);
     expect(storedAddressPoolV2RowIsPublishable({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-20T00:00:00Z'))).toBe(false);
+  });
+
+  it('publishes an ordinary address with an untranslated Chinese street but keeps residential addresses strict', () => {
+    const variants = JSON.parse(row.component_variants_json);
+    variants['zh-CN'].street = 'Eifuku';
+    const fallback = { ...row, component_variants_json: JSON.stringify(variants) };
+    const ordinary = { ...fallback, property_type: 'unknown', residential_evidence: 0 };
+    expect(storedAddressPoolV2RowIsPublishable(ordinary)).toBe(true);
+    expect(storedAddressPoolV2RowIsFullyTranslated(ordinary)).toBe(false);
+    expect(storedAddressPoolV2RowIsPublishable(fallback)).toBe(false);
+    expect(storedAddressPoolV2RowIsFullyTranslated(row)).toBe(true);
   });
 
   it.each(['houseNumber', 'postcode', 'admin1Code', 'street'])('rejects a translated %s that changes source identifiers', (field) => {

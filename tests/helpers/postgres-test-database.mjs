@@ -125,7 +125,7 @@ export const openTestDatabase = (..._legacyArguments) => {
     ? Promise.resolve({ rows: [], rowCount: 0 }) : query(String(source)
     .replace(/EXISTS \(\s*SELECT 1 FROM address_pool_evidence residential_evidence\s+JOIN address_datasets residential_dataset([\s\S]*?)WHERE residential_evidence.address_id = address_pool.id\s+AND residential_evidence.evidence_type = 'residential_use'\s+AND residential_evidence.is_current = 1\s*\)/gu,
       "id IN (SELECT residential_evidence.address_id FROM address_pool_evidence residential_evidence JOIN address_datasets residential_dataset$1WHERE residential_evidence.evidence_type='residential_use' AND residential_evidence.is_current=1)")
-    .replace(/ROW_NUMBER\(\) OVER \(PARTITION BY ready ORDER BY random_key,id\)/giu, '1')
+    .replace(/ROW_NUMBER\(\) OVER \(PARTITION BY \w+ ORDER BY random_key,id\)/giu, '1')
     .replace(/ROW_NUMBER\(\) OVER \(ORDER BY random_key,id\)/giu, '1')
     .replace(/\(hashtextextended\(([^,]+),\s*0\)\s*&\s*2147483647\)/giu, 'hashtextextended($1,0)')
     .replace(/CREATE TEMP TABLE/giu, 'CREATE TABLE')

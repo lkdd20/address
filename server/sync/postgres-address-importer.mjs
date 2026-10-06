@@ -552,7 +552,7 @@ export class PostgresAddressImporter {
       Number(Boolean(right.residentialSourceRecordId)) - Number(Boolean(left.residentialSourceRecordId))
       || Number(right.qualityScore || 0) - Number(left.qualityScore || 0)
       || left.canonicalHash.localeCompare(right.canonicalHash));
-    const records = applyHierarchicalQuota(candidates, {
+    let records = applyHierarchicalQuota(candidates, {
       ...activePolicy,
       targetCount: sourceMaxRecords,
       maxRecords: sourceMaxRecords
@@ -575,6 +575,13 @@ export class PostgresAddressImporter {
         record.id = existingByKey.get(record.canonicalKey);
       }
     }
+    // One address row carries one primary evidence per dataset; later records resolving to the same row are duplicates.
+    const assignedIds = new Set();
+    records = records.filter((record) => {
+      if (assignedIds.has(record.id)) { reject(['duplicate']); return false; }
+      assignedIds.add(record.id);
+      return true;
+    });
     if (!records.length) {
       throw new SourceQualityError(
         shard.id,

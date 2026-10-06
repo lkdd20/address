@@ -141,7 +141,7 @@ docker compose up -d
 docker compose ps
 ```
 
-資料庫遷移會在 `migrate` 服務中自動完成。若需要固定版本，將 `.env` 中的 `ADDRESS_IMAGE` 設為具體標籤。
+資料庫遷移會在 `migrate` 服務中自動完成。正式環境藍綠啟用以 `--skip-coverage` 執行遷移，產生索引與覆蓋統計由同步服務啟動後在背景重建。若需要固定版本，將 `.env` 中的 `ADDRESS_IMAGE` 設為具體標籤。
 
 ## 備份與恢復
 

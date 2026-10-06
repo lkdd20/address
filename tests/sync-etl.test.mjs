@@ -131,7 +131,7 @@ const source = {
 describe('address source shard catalog', () => {
   it('expands independently supported country shards with explicit refresh intervals', async () => {
     const catalog = await loadSourceCatalog();
-    expect(catalog.shards).toHaveLength(156);
+    expect(catalog.shards).toHaveLength(207);
     expect(catalog.shards.filter((shard) => shard.id !== 'korea-kapt-residential')
       .every((shard) => shard.intervalDays === 30)).toBe(true);
     expect(catalog.shards.some((shard) => shard.countryCode === 'CN')).toBe(false);
@@ -162,7 +162,7 @@ describe('address source shard catalog', () => {
     });
     expect(catalog.shards.filter((shard) => shard.countryCode === 'JP')).toHaveLength(1);
     expect(catalog.shards.find((shard) => shard.id === 'japan-abr-residential')).toMatchObject({
-      countryCode: 'JP', extractId: 'japan', maxRecords: 20000,
+      countryCode: 'JP', extractId: 'japan', maxRecords: 200000,
       source: {
         adapter: 'japan-abr', postalDataUrl: expect.stringContaining('utf_ken_all.zip'),
         useOsmSupplement: true,
@@ -183,14 +183,14 @@ describe('address source shard catalog', () => {
       source: { adapter: 'korea-kapt', quotaProvider: 'geoapify' }
     });
     expect(catalog.shards.find((shard) => shard.id === 'ethekwini-za-residential')).toMatchObject({
-      countryCode: 'ZA', maxRecords: 4500,
+      countryCode: 'ZA', maxRecords: 50000,
       source: {
         adapter: 'ethekwini-residential',
         postalDataUrl: 'https://www.postoffice.co.za/Questions/postalcodes.txt'
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'cape-town-za-residential')).toMatchObject({
-      countryCode: 'ZA', maxRecords: 4500,
+      countryCode: 'ZA', maxRecords: 50000,
       source: {
         adapter: 'cape-town-residential',
         parcelUrl: expect.stringContaining('Property/FeatureServer/0'),
@@ -198,21 +198,21 @@ describe('address source shard catalog', () => {
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'thailand-dpt-residential')).toMatchObject({
-      countryCode: 'TH', maxRecords: 20000,
+      countryCode: 'TH', maxRecords: 100000,
       source: {
         adapter: 'thailand-dpt-residential',
         dataUrl: expect.stringContaining('dptc_bldg/MapServer/2')
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'canada-statcan-nar-residential')).toMatchObject({
-      countryCode: 'CA', maxRecords: 80000,
+      countryCode: 'CA', maxRecords: 300000,
       source: {
         adapter: 'canada-nar-residential', release: '202606',
         dataUrl: expect.stringContaining('/202606.zip')
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'taiwan-official-residential')).toMatchObject({
-      countryCode: 'TW', maxRecords: 10000,
+      countryCode: 'TW', maxRecords: 100000,
       source: {
         adapter: 'taiwan-residential', archives: [
           { sourceVersion: '115S2', archiveCacheName: 'tw-molit-lvr-115S2.zip' },
@@ -223,7 +223,7 @@ describe('address source shard catalog', () => {
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'inegi-mx-residential')).toMatchObject({
-      countryCode: 'MX', maxRecords: 20000,
+      countryCode: 'MX', maxRecords: 100000,
       source: {
         adapter: 'inegi-residential', normalizedArchiveMember: 'produto_final.csv',
         sha256: 'd0b51cdba97f9c04eb7e8e4c17695770d66730b895308543781729851e0bd67e'
@@ -231,7 +231,7 @@ describe('address source shard catalog', () => {
     });
     expect(catalog.shards.some((shard) => shard.id === 'openaddresses-sa-national')).toBe(false);
     expect(catalog.shards.find((shard) => shard.id === 'openaddresses-kr-juso')).toMatchObject({
-      countryCode: 'KR', maxRecords: 10000,
+      countryCode: 'KR', maxRecords: 100000,
       source: { adapter: 'openaddresses-archive', archiveMembers: expect.arrayContaining([
         'kr/11/provincewide.csv', 'kr/50/provincewide.csv'
       ]) }
@@ -239,10 +239,10 @@ describe('address source shard catalog', () => {
     expect(catalog.shards.find((shard) => shard.id === 'openaddresses-kr-juso').source.archiveMembers)
       .toHaveLength(17);
     expect(catalog.shards.find((shard) => shard.id === 'hong-kong-official-residential'))
-      .toMatchObject({ countryCode: 'HK', maxRecords: 20000 });
+      .toMatchObject({ countryCode: 'HK', maxRecords: 100000 });
     expect(catalog.shards.find((shard) => shard.id === 'taiwan-official-residential'))
       .toMatchObject({
-        countryCode: 'TW', maxRecords: 10000,
+        countryCode: 'TW', maxRecords: 100000,
         source: { dataUrl: 'https://plvr.land.moi.gov.tw/DownloadSeason?season=115S2&type=zip&fileName=lvr_landcsv.zip' }
       });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-au')).toMatchObject({
@@ -254,18 +254,18 @@ describe('address source shard catalog', () => {
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-es')).toMatchObject({
       countryCode: 'ES', extractId: 'spain'
     });
-    expect(catalog.shards.filter((shard) => shard.countryCode === 'US')).toHaveLength(54);
+    expect(catalog.shards.filter((shard) => shard.countryCode === 'US')).toHaveLength(105);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'DE')).toHaveLength(17);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'FR')).toHaveLength(32);
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-us-ca')).toMatchObject({
-      extractId: 'us/california', maxRecords: 3000,
+      extractId: 'us/california', maxRecords: 50000,
       source: { id: 'geofabrik-osm-us-ca' }
     });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-de-hb')).toMatchObject({
-      extractId: 'bremen', maxRecords: 3000, source: { id: 'geofabrik-osm-de-hb' }
+      extractId: 'bremen', maxRecords: 50000, source: { id: 'geofabrik-osm-de-hb' }
     });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-fr-corse')).toMatchObject({
-      extractId: 'corse', maxRecords: 2000,
+      extractId: 'corse', maxRecords: 50000,
       qualityGate: expect.objectContaining({ minimumRecords: 10, minimumAdmin1: 0 })
     });
     expect(catalog.shards.find((shard) => shard.countryCode === 'MY')).toMatchObject({ extractId: 'malaysia-singapore-brunei', boundaryIso3: 'MYS' });
@@ -593,7 +593,7 @@ describe('address source shard catalog', () => {
   });
 
   it('enables Overture residential classification by default and allows an explicit opt-out', async () => {
-    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v6');
+    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v6+capacity-20261003');
     const fetchImpl = async (input) => {
       const url = String(input);
       if (url.endsWith('/catalog.json')) return Response.json({ latest: '2026-06-17.0' });
@@ -613,6 +613,35 @@ describe('address source shard catalog', () => {
       url: 'https://example.test/address.parquet', bbox: [-180, -90, 180, 90]
     }]);
     expect(disabled.buildingAssets).toEqual([]);
+  });
+
+  it('pairs each US state partition with its USA Structures archive instead of Overture buildings', async () => {
+    const fetchImpl = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/catalog.json')) return Response.json({ latest: '2026-09-23.1' });
+      if (url.endsWith('/collection.json')) return Response.json({ links: [{ rel: 'item', href: './00000.json' }] });
+      if (url.startsWith('https://fema-femadata.s3.amazonaws.com/')) {
+        const key = (value) => `<Key>Partners/ORNL/USA_Structures/${value}</Key>`;
+        return new Response(new URL(url).searchParams.has('continuation-token')
+          ? key('Mississippi/MS_Structures_20260913.zip') + key('Tennessee/Deliverable20250606TN.zip')
+          : key('Mississippi/Deliverable20250606MS.zip') + key('Mississippi/Deliverable202496MS.zip')
+            + '<NextContinuationToken>next</NextContinuationToken>');
+      }
+      return Response.json({ bbox: [-92, 30, -88, 35], assets: { aws: { href: 'https://example.test/address.parquet' } } });
+    };
+    const catalog = await loadSourceCatalog(undefined, {});
+    const shard = catalog.shards.find((value) => value.id === 'overture-usa-structures-ms');
+    expect(shard).toMatchObject({ countryCode: 'US', admin1: 'MS', maxRecords: 200000, source: { id: 'overture-usa-structures-ms' } });
+    const discovery = await createSourceAdapters({ fetchImpl, environment: {} }).discover(shard);
+    expect(discovery).toMatchObject({
+      version: '2026-09-23.1+usa-structures-20260913',
+      structuresUrl: 'https://fema-femadata.s3.amazonaws.com/Partners/ORNL/USA_Structures/Mississippi/MS_Structures_20260913.zip',
+      residentialBuildingAvailable: true,
+      buildingAssets: []
+    });
+    const exporter = (await readFile('server/sync/overture-export.py', 'utf8')).replace(/\r\n/g, '\n');
+    expect(exporter).toContain("WHERE building_rank = 1 AND occupancy = 'Residential'");
+    expect(exporter).toContain('ST_DWithin(address_candidates.geometry, structures.geometry, 0.0003)');
   });
 
   it('reads one or many OpenAddresses archive members with cross-member deduplication', async () => {
@@ -786,16 +815,16 @@ describe('address source shard catalog', () => {
     }
     const materialized = await adapters.materialize(shard, discovery, options);
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m20000-p200.jsonl');
+    expect(materialized.file).toContain('-m60000-p200.jsonl');
     expect(calls.filter(({ phase }) => phase.startsWith('extract:'))).toHaveLength(1);
     const materializeCall = calls.find(({ args }) => args.includes('plateau'));
     expect(materializeCall).toMatchObject({ file: 'python-fixture' });
-    expect(materializeCall.timeoutMs).toBe(75 * 60_000);
+    expect(materializeCall.timeoutMs).toBe(120 * 60_000);
     expect(materializeCall.args).toEqual(expect.arrayContaining([
       expect.stringContaining('japan-abr-export.py'), '--abr-url', shard.source.dataUrl,
       '--checkpoint-file', expect.stringContaining('checkpoint.json'),
       '--store-file', expect.stringContaining('candidates.duckdb'),
-      '--max-records', '20000', '--per-locality', '200', '--plateau-parquet',
+      '--max-records', '60000', '--per-locality', '200', '--plateau-parquet',
       expect.stringContaining('buildings.parquet')
     ]));
     expect(materializeCall.args).toEqual(expect.arrayContaining(['--plateau-city-code', '13113']));
@@ -1179,13 +1208,13 @@ describe('address source shard catalog', () => {
       cacheDir, maxRecords: 8000, perLocality: 1500, maxBytes: 1024, retainRaw: false
     });
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m4500-p1500.jsonl');
+    expect(materialized.file).toContain('-m8000-p1500.jsonl');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ file: 'python-fixture', phase: 'materialize:ethekwini-za-residential' });
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('south-africa-ethekwini-export.py'), '--postal-file',
       expect.stringContaining('ethekwini-za-residential-postalcodes.txt'),
-      '--max-records', '4500', '--per-locality', '1500', '--concurrency', '16'
+      '--max-records', '8000', '--per-locality', '1500', '--concurrency', '16'
     ]));
   });
 
@@ -1220,14 +1249,14 @@ describe('address source shard catalog', () => {
       cacheDir, maxRecords: 8000, perLocality: 1500, maxBytes: 1024, retainRaw: false
     });
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m4500-p1500.jsonl');
+    expect(materialized.file).toContain('-m8000-p1500.jsonl');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ file: 'python-fixture', phase: 'materialize:cape-town-za-residential' });
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('south-africa-cape-town-export.py'), '--parcel-url',
       expect.stringContaining('Property/FeatureServer/0'), '--postal-file',
       expect.stringContaining('cape-town-za-residential-postalcodes.txt'),
-      '--max-records', '4500', '--per-locality', '1500'
+      '--max-records', '8000', '--per-locality', '1500'
     ]));
   });
 
@@ -1395,7 +1424,7 @@ describe('address source shard catalog', () => {
       cacheDir, maxRecords: 30000, perLocality: 1000, maxBytes: 1024, retainRaw: false
     });
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m10000-p1000.jsonl');
+    expect(materialized.file).toContain('-m30000-p1000.jsonl');
     const retried = await adapters.materialize(checksumShard, checksumDiscovery, {
       cacheDir, maxRecords: 30000, perLocality: 1000, maxBytes: 1024, retainRaw: false
     });
@@ -1405,7 +1434,7 @@ describe('address source shard catalog', () => {
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('taiwan-residential-export.py'), '--molit-archive', '--openaddresses-archive',
       '--postcode-cache', expect.stringContaining('taiwan-postcode-cache.jsonl'),
-      '--max-records', '10000', '--per-locality', '1000', '--request-interval', '0.2',
+      '--max-records', '30000', '--per-locality', '1000', '--request-interval', '0.2',
       '--postcode-concurrency', '6'
     ]));
     expect(calls[0].args.filter((value) => value === '--molit-archive')).toHaveLength(2);
@@ -1446,12 +1475,12 @@ describe('address source shard catalog', () => {
       cacheDir, maxRecords: 60000, perLocality: 10000, maxBytes: 1024, retainRaw: false
     });
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m20000-p10000.jsonl');
+    expect(materialized.file).toContain('-m60000-p10000.jsonl');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ file: 'python-fixture', phase: 'materialize:hong-kong-official-residential' });
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('hong-kong-residential-export.py'), '--building-information', '--offline',
-      '--max-records', '20000', '--per-district', '10000'
+      '--max-records', '60000', '--per-district', '10000'
     ]));
   });
 

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createPostgresPool, PostgresDatabase } from '../database/postgres.mjs';
 import { translateValues, translateNumberedValues, localizedFormattedAddress, usableTranslation, PostgresTranslationCache } from './address-etl.mjs';
-import { semanticAddressFields as localizedFields } from '../../src/domain/address-localization.mjs';
-import { diagnoseStoredAddressPoolV2Row, storedAddressPoolV2RowCanRecoverTranslations, storedAddressPoolV2RowIsPublishable } from '../api/repositories/address-pool-v2';
+import { componentLooksLocalized, semanticAddressFields as localizedFields } from '../../src/domain/address-localization.mjs';
+import { chineseStreetFallbackAllowed, diagnoseStoredAddressPoolV2Row, storedAddressPoolV2RowCanRecoverTranslations, storedAddressPoolV2RowIsFullyTranslated, storedAddressPoolV2RowIsPublishable } from '../api/repositories/address-pool-v2';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
@@ -124,28 +124,81 @@ const localizedRow = (row, variants) => ({ ...row, component_variants_json: JSON
     'zh-CN': localizedFormattedAddress(variants['zh-CN'], row.country_code, 'zh-CN') }) });
 const translationDiagnostics = (row, variants) => Object.entries(pendingTranslationFields(variants, row.native_language, row))
   .flatMap(([language, fields]) => fields.map((field) => ({ stage: 'translation', language, field, code: 'invalid_or_missing_translation' })));
-const readyToPublish = (row, variants, now) => !translationDiagnostics(row, variants).length
-  && storedAddressPoolV2RowIsPublishable(localizedRow(row, variants), now);
+// An ordinary address whose Chinese street is still untranslated publishes with the English street name;
+// the row stays queued so the Chinese name replaces it once translated.
+const chineseStreetPending = (row, variants) => pendingTranslationFields(variants, row.native_language, row)['zh-CN'].includes('street');
+const applyChineseStreetFallback = (row, variants) => {
+  if (!chineseStreetFallbackAllowed(row.property_type) || !chineseStreetPending(row, variants)) return false;
+  const fallback = [clean(variants.en?.street), clean(variants.native?.street)]
+    .find((value) => value && componentLooksLocalized(value, 'zh-CN'));
+  if (!fallback) return false;
+  variants['zh-CN'] = { ...variants['zh-CN'], street: fallback };
+  return true;
+};
+const readyToPublish = (row, variants, now) => {
+  applyChineseStreetFallback(row, variants);
+  const issues = translationDiagnostics(row, variants).filter((issue) => !(issue.language === 'zh-CN' && issue.field === 'street'
+    && chineseStreetFallbackAllowed(row.property_type) && componentLooksLocalized(clean(variants['zh-CN']?.street), 'zh-CN')));
+  return !issues.length && storedAddressPoolV2RowIsPublishable(localizedRow(row, variants), now);
+};
+
+// Node-level coverage is rebuilt at most once per interval per country; publication itself only takes row locks.
+const COVERAGE_REFRESH_INTERVAL_MS = 10 * 60_000;
+const PUBLICATION_WINDOW_MS = 120_000;
+const CHINESE_FALLBACK_RETRY_MS = 6 * 60 * 60_000;
+const DEFERRED_STREET_BACKLOG = 200;
+const coverageRefreshedAt = new Map();
+const staleCoverage = new Set();
+export const refreshStaleCoverage = async (database, now, { force = false } = {}) => {
+  // One country per cycle keeps the table lock short and leaves the rest of the cycle to publication.
+  const due = [...staleCoverage]
+    .filter((country) => force || Date.now() - (coverageRefreshedAt.get(country) || 0) >= COVERAGE_REFRESH_INTERVAL_MS)
+    .sort((left, right) => (coverageRefreshedAt.get(left) || 0) - (coverageRefreshedAt.get(right) || 0));
+  for (const country of force ? due : due.slice(0, 1)) {
+    try {
+      await database.transaction(async (transaction) => {
+        await transaction.exec("SET LOCAL lock_timeout TO '250ms'");
+        await transaction.exec("SET LOCAL statement_timeout TO '120s'");
+        await transaction.exec(`LOCK TABLE address_pool,address_pool_evidence,address_datasets,address_sources,
+          address_generation_index,admin_coverage_stats,residential_coverage,sync_country_state
+          IN SHARE ROW EXCLUSIVE MODE`);
+        await refreshResidentialCoverage(transaction, country, now().toISOString(), undefined,
+          { useGenerationIndex: true, inTransaction: true });
+      });
+      staleCoverage.delete(country);
+      coverageRefreshedAt.set(country, Date.now());
+    } catch (error) {
+      if (!['55P03', '57014', '40001', '40P01'].includes(error.code)) throw error;
+    }
+  }
+};
 
 const publish = async (database, candidates, revision, now, signal, outcome, countries, startBefore = Infinity) => {
-  const { published, busy, failed, started, deferred } = outcome;
+  const { published, busy, failed, started, deferred, timings } = outcome;
+  let mark = Date.now();
+  const lap = (stage) => { const at = Date.now(); timings[stage] = (timings[stage] || 0) + at - mark; mark = at; };
   for (const country of countries) {
     signal.throwIfAborted();
-    // Each country refreshes its coverage on publication; later countries wait for the next batch near the deadline.
+    // Countries that would start past the deadline wait for the next batch.
     if (published.size && Date.now() >= startBefore) {
       candidates.filter(({ row }) => row.country_code === country).forEach(({ row }) => deferred.add(row.id));
       continue;
     }
     try {
     const completed = await database.transaction(async (transaction) => {
-      await transaction.exec("SET LOCAL lock_timeout TO '250ms'");
+      await transaction.exec("SET LOCAL lock_timeout TO '2s'");
       await transaction.exec("SET LOCAL statement_timeout TO '60s'");
-      await transaction.exec(`LOCK TABLE address_pool,address_pool_evidence,address_datasets,address_sources,
-        address_generation_index,admin_coverage_stats,residential_coverage,sync_country_state
-        IN SHARE ROW EXCLUSIVE MODE`);
-      candidates.filter(({ row }) => row.country_code === country).forEach(({ row }) => started.add(row.id));
-      const currentRows = await sourceRows(transaction, candidates.filter(({ row }) => row.country_code === country).map(({ row }) => row.id));
+      mark = Date.now();
+      const ids = candidates.filter(({ row }) => row.country_code === country).map(({ row }) => row.id).sort();
+      // Row locks serialize with imports touching the same addresses; the reread below sees their committed state.
+      await transaction.prepare(`SELECT id FROM address_pool WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY id FOR UPDATE`)
+        .bind(...ids).all();
+      ids.forEach((id) => started.add(id));
+      lap('lock');
+      const currentRows = await sourceRows(transaction, ids);
+      lap('read');
       const updates = [];
+      const activated = new Map();
       for (const { row, variants } of candidates.filter((item) => item.row.country_code === country)) {
         signal.throwIfAborted();
         const current = currentRows.get(row.id);
@@ -156,36 +209,38 @@ const publish = async (database, candidates, revision, now, signal, outcome, cou
         if (current.administrative_patch_json && stored.native) candidate.component_variants_json = JSON.stringify({ ...variants, native: stored.native });
         await transaction.prepare(`UPDATE address_pool SET component_variants_json=?,address_variants_json=?,active=1,retired_at=NULL WHERE id=?`)
           .bind(candidate.component_variants_json, candidate.address_variants_json, row.id).run();
+        if (Number(current.active) !== 1) activated.set(current.dataset_id, (activated.get(current.dataset_id) || 0) + 1);
         updates.push(row);
       }
+      lap('write');
       if (!updates.length) return [];
       signal.throwIfAborted();
       await refreshAddressGenerationIndex(transaction, country, { addressIds: updates.map((row) => row.id) });
+      lap('index');
       signal.throwIfAborted();
       await refreshCountryCounts(transaction, country, now().toISOString(), { useGenerationIndex: true });
-      await refreshResidentialCoverage(transaction, country, now().toISOString(), signal,
-        { useGenerationIndex: true, inTransaction: true });
-      const datasets = [...new Set(updates.map((row) => row.dataset_id))];
-      const counts = (await transaction.prepare(`SELECT evidence.dataset_id,COUNT(DISTINCT evidence.address_id) AS total
-          FROM address_pool_evidence evidence JOIN address_pool address ON address.id=evidence.address_id AND address.active=1
-          WHERE evidence.dataset_id IN (${datasets.map(() => '?').join(',')}) AND evidence.is_current=1
-          GROUP BY evidence.dataset_id`).bind(...datasets).all()).results;
-      const countsByDataset = new Map(counts.map((row) => [row.dataset_id, Number(row.total)]));
-      for (const dataset of datasets) {
-        await transaction.prepare('UPDATE address_datasets SET active_count=? WHERE id=?').bind(countsByDataset.get(dataset) || 0, dataset).run();
+      lap('counts');
+      // Only reactivated rows change a dataset's active count; recounting large datasets per batch is too slow.
+      for (const [dataset, count] of activated) {
+        await transaction.prepare('UPDATE address_datasets SET active_count=active_count+? WHERE id=?').bind(count, dataset).run();
       }
       await transaction.prepare(`INSERT INTO address_pool_revisions(kind,version) VALUES ('translation',?)
         ON CONFLICT(kind) DO UPDATE SET version=excluded.version`).bind(now().toISOString()).run();
       const publishedRows = await sourceRows(transaction, updates.map((row) => row.id));
       for (const row of updates) {
         const current = publishedRows.get(row.id);
-        const attempts = candidates.find((item) => item.row.id === row.id).attempts;
-        await saveState(transaction, current, revision, 'complete', attempts, null, null, now());
+        const { attempts, variants } = candidates.find((item) => item.row.id === row.id);
+        if (chineseStreetPending(row, variants)) {
+          await saveState(transaction, current, revision, 'waiting', attempts, new Date(now().getTime() + CHINESE_FALLBACK_RETRY_MS).toISOString(),
+            'chinese_street_fallback', now());
+        } else await saveState(transaction, current, revision, 'complete', attempts, null, null, now());
       }
+      lap('state');
       signal.throwIfAborted();
       return updates.map((row) => row.id);
     });
     completed.forEach((id) => published.add(id));
+    if (completed.length) staleCoverage.add(country);
     } catch (error) {
       if (!['55P03', '57014', '40001', '40P01'].includes(error.code)) throw error;
       for (const { row } of candidates.filter(({ row }) => row.country_code === country)) {
@@ -197,16 +252,16 @@ const publish = async (database, candidates, revision, now, signal, outcome, cou
 };
 
 const runTranslationBatch = async ({ database, environment = process.env, fetchImpl = fetch,
-  pendingLimit = integer(environment.TRANSLATION_BACKFILL_BATCH, 150, 300),
+  pendingLimit = integer(environment.TRANSLATION_BACKFILL_BATCH, 1_000, 2_000),
   scanLimit = integer(environment.TRANSLATION_BACKFILL_SCAN, 2000, 20_000),
   now = () => new Date(), signal: parentSignal, brokerClient, cacheOnly: onlyCached = false, countryCodes = [] }) => {
   const countries = [...new Set(countryCodes.map((country) => String(country).toUpperCase()))];
   if (countries.some((country) => !/^[A-Z]{2}$/u.test(country) || country === 'CN')) throw new Error('INVALID_RECOVERY_COUNTRY');
   const countryScope = countries.length ? ` AND address.country_code IN (${countries.map(() => '?').join(',')})` : '';
   const progressKey = onlyCached || countries.length ? `scan:${onlyCached ? 'cache' : 'online'}:${countries.sort().join(',') || 'all'}` : 'scan';
-  const timeoutMs = integer(environment.TRANSLATION_BACKFILL_TIMEOUT_MS, 180_000, 300_000);
-  const publicationStartBefore = Date.now() + timeoutMs * 0.6;
+  const timeoutMs = integer(environment.TRANSLATION_BACKFILL_TIMEOUT_MS, 300_000, 600_000);
   const timeout = AbortSignal.timeout(timeoutMs);
+  const translationDeadlineAt = Date.now() + timeoutMs * 0.75;
   const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   const services = await createBackfillProviders({ database, environment, fetchImpl, signal, now, brokerClient });
   if (!services.enabled && !onlyCached) return { scanned: 0, updated: 0, done: true };
@@ -244,10 +299,11 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
     .bind(progress.cursor, ...countries, scanLimit).all()).results;
   let scanned = 0;
   const pending = [];
-  const outcome = { published: new Set(), busy: new Set(), failed: new Map(), started: new Set() };
+  const outcome = { published: new Set(), busy: new Set(), failed: new Map(), started: new Set(), timings: {} };
   const deferred = new Set();
   let ready = [];
   let interrupted = null;
+  let publicationSignal;
   let phase = 'preparation';
   const cache = new PostgresTranslationCache(database);
   const catalogs = new Map();
@@ -300,7 +356,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
         continue;
       }
       const previous = recoveryStates.get(row.id);
-      if (row.active === 1 && storedAddressPoolV2RowIsPublishable(row, now())) {
+      if (row.active === 1 && storedAddressPoolV2RowIsFullyTranslated(row, now())) {
         if (previous && previous.status !== 'complete') await saveState(database, row, services.revision, 'complete', previous.attempts, null, null, now());
         continue;
       }
@@ -311,7 +367,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
         || previous.status === 'waiting' && previous.attempts >= 3
           && ['publication_busy', 'publication_deferred', 'cancelled', 'batch_timeout'].includes(previous.reason));
       if (unchanged && !onlyCached && (previous.status === 'rejected'
-        || previous.status === 'complete' && storedAddressPoolV2RowIsPublishable(row, now())
+        || previous.status === 'complete' && storedAddressPoolV2RowIsFullyTranslated(row, now())
         || previous.status === 'failed' && !cacheOnly
         || previous.next_attempt_at && previous.next_attempt_at > now().toISOString())) continue;
       if (!storedAddressPoolV2RowCanRecoverTranslations(row, now())) {
@@ -345,24 +401,45 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
             if (usableTranslation(value, language, original) && safeTranslatedField(row, field, value)) variants[language][field] = value;
           }
         }
+        if (row.active === 1 && chineseStreetPending(row, variants) && storedAddressPoolV2RowIsPublishable(row, now())) continue;
         if (!readyToPublish(row, variants, now())) continue;
         fields = { en: [], 'zh-CN': [] };
+      }
+      // Under a backlog, an ordinary address first uses a cached Chinese street if present, otherwise publishes with
+      // the English street now and sends the street to providers on the later fallback retry.
+      if (!cacheOnly && candidates.length >= DEFERRED_STREET_BACKLOG && chineseStreetFallbackAllowed(row.property_type)
+        && previous?.reason !== 'chinese_street_fallback'
+        && fields['zh-CN'].includes('street')) {
+        const original = clean(variants.native.street);
+        const cachedStreet = (await cache.get([original], 'zh-CN', signal)).get(original);
+        if (usableTranslation(cachedStreet, 'zh-CN', original) && safeTranslatedField(row, 'street', cachedStreet)) {
+          variants['zh-CN'].street = cachedStreet;
+        }
+        fields = { ...fields, 'zh-CN': fields['zh-CN'].filter((field) => field !== 'street') };
       }
       pending.push({ row, variants, attempts, retryAt, fields, cacheOnly });
       if (!cacheOnly) await saveState(database, row, services.revision, 'pending', attempts, retryAt, 'in_progress', now());
     }
     signal.throwIfAborted();
     phase = 'translation';
+    // Provider calls stop at a soft deadline; chunks finished by then are cached and still publish this batch.
+    const translationSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, translationDeadlineAt - Date.now()))]);
     for (const language of ['en', 'zh-CN']) {
       const values = [...new Set(pending.flatMap(({ variants, fields }) => fields[language].map((field) => clean(variants.native[field]))))];
       const accepts = (value, target, original) => usableTranslation(value, target, original)
           && pending.every(({ row, variants, fields }) => fields[target].every((field) => clean(variants.native[field]) !== original
             || safeTranslatedField(row, field, value)));
       const providerEnvironment = { ...environment, GOOGLE_TRANSLATION_ENABLED: String(services.googleEnabled) };
-      const translations = await translateValues(values, language, providerEnvironment, fetchImpl, cache, signal, services.providers, accepts);
-      const repaired = await translateNumberedValues(values.filter((value) => !accepts(translations.get(value), language, value)),
-        language, providerEnvironment, fetchImpl, cache, signal, services.providers, accepts);
-      for (const [value, translated] of repaired) translations.set(value, translated);
+      let translations;
+      try {
+        translations = await translateValues(values, language, providerEnvironment, fetchImpl, cache, translationSignal, services.providers, accepts);
+        const repaired = await translateNumberedValues(values.filter((value) => !accepts(translations.get(value), language, value)),
+          language, providerEnvironment, fetchImpl, cache, translationSignal, services.providers, accepts);
+        for (const [value, translated] of repaired) translations.set(value, translated);
+      } catch (error) {
+        if (signal.aborted || !translationSignal.aborted) throw error;
+        translations = await cache.get(values, language, signal);
+      }
       for (const { row, variants, fields } of pending) {
         for (const field of fields[language]) {
           const original = clean(variants.native[field]);
@@ -378,9 +455,13 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
     const publicationOrder = [...readyByCountry].sort((left, right) => Number(belowTarget.has(right[0])) - Number(belowTarget.has(left[0]))
       || right[1] - left[1]).map(([country]) => country);
     phase = 'publication';
-    await publish(database, ready, services.revision, now, signal, { ...outcome, deferred }, publicationOrder, publicationStartBefore);
+    // Publication has its own window so a slow translation phase cannot abort it halfway.
+    const publicationTimeout = AbortSignal.timeout(PUBLICATION_WINDOW_MS);
+    publicationSignal = parentSignal ? AbortSignal.any([parentSignal, publicationTimeout]) : publicationTimeout;
+    await publish(database, ready, services.revision, now, publicationSignal, { ...outcome, deferred }, publicationOrder,
+      Date.now() + PUBLICATION_WINDOW_MS * 0.85);
   } catch (error) {
-    if (!signal.aborted) throw error;
+    if (!signal.aborted && !publicationSignal?.aborted) throw error;
     interrupted = parentSignal?.aborted ? 'cancelled' : 'batch_timeout';
   }
   const readyIds = new Set(ready.map(({ row }) => row.id));
@@ -418,6 +499,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
   }
   return { scanned, updated: outcome.published.size, attempted: pending.length, requests: services.requests, done: onlyCached && completed,
     ...(outcome.busy.size ? { publicationBusy: outcome.busy.size } : {}),
+    ...(Object.keys(outcome.timings).length ? { publicationMs: outcome.timings } : {}),
     ...(interrupted ? { interrupted, phase } : {}) };
 };
 
@@ -449,22 +531,28 @@ export const startTranslationBackfill = ({ database, environment = process.env, 
   const controller = new AbortController();
   let timer;
   let running = Promise.resolve();
+  // A non-empty batch means a backlog; keep draining it instead of idling a full interval.
+  let backlog = false;
   const schedule = () => {
     if (controller.signal.aborted) return;
     timer = setTimer(() => {
       running = runTranslationBackfillBatch({ database: workerDatabase, environment, now, fetchImpl, signal: controller.signal })
-        .then((result) => { if (result.attempted) console.log(JSON.stringify({ event: 'translation_backfill', ...result, duringSync: isBusy() })); })
+        .then((result) => {
+          backlog = Number(result.attempted || 0) > 0;
+          if (result.attempted) console.log(JSON.stringify({ event: 'translation_backfill', ...result, duringSync: isBusy() }));
+        })
         .then(async () => {
           controller.signal.throwIfAborted();
           const result = await runTranslationBackfillBatch({ database: workerDatabase, environment, now, fetchImpl,
             signal: controller.signal, cacheOnly: true, pendingLimit: 300 });
           if (result.updated) console.log(JSON.stringify({ event: 'translation_cache_recovery', ...result }));
+          await refreshStaleCoverage(workerDatabase, now);
         })
         .catch((error) => { if (!controller.signal.aborted) console.error('Translation backfill failed',
           error.name, typeof error.code === 'string' ? error.code : ''); })
         .finally(schedule);
       return running;
-    }, intervalMs);
+    }, backlog ? 1_000 : intervalMs);
     timer.unref?.();
   };
   schedule();

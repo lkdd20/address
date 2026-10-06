@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { createSyncApi } from '../server/sync/api.mjs';
 import { sourceAdapterRevisions } from '../server/sync/source-adapters.mjs';
+import { CHINA_PRIORITY_TARGET } from '../server/sync/address-policy.mjs';
 import {
   computeQueueSnapshot, countryFingerprint, createQueueSources, createSyncQueue, evaluateAttempt,
   estimateDuration, executionFailureFingerprint, legacyCountryFingerprint, nextQuotaResetTime, nextWakeAt, orderRunnable,
@@ -117,6 +118,13 @@ describe('attempt evaluation and latching', () => {
     const result = evaluateAttempt({ ...base, jobSucceeded: true, netGrowth: 0,
       goalDeficitBefore: 25, goalDeficitAfter: 23 });
     expect(result.action).toBe('checked');
+  });
+
+  it('reruns a growing source soon only when its per-run growth step capped the import', () => {
+    const capped = evaluateAttempt({ ...base, jobSucceeded: true, netGrowth: 50_000, growthCapped: true, probeIntervalMs: 30 * 86_400_000 });
+    const finished = evaluateAttempt({ ...base, jobSucceeded: true, netGrowth: 50_000, probeIntervalMs: 30 * 86_400_000 });
+    expect(capped).toMatchObject({ action: 'checked', nextAttemptAt: '2026-08-02T10:01:00.000Z' });
+    expect(finished).toMatchObject({ action: 'checked', nextAttemptAt: '2026-09-01T10:00:00.000Z' });
   });
 
   it('continues a successful checkpointed source until its full scan is complete', () => {
@@ -1548,6 +1556,32 @@ describe('queue engine', () => {
     expect(coordinator.calls).toHaveLength(2);
   });
 
+  it('defers a country whose imported rows are still waiting for publication', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['NL']);
+    const coordinator = fakeCoordinator();
+    let backlog = 20_001;
+    const log = { log: vi.fn(), error: () => {} };
+    const queue = createSyncQueue({
+      environment: {}, coordinator, stateDir: stateDir(),
+      sources: { ...stubSources(facts, {}), unpublishedBacklog: async () => backlog },
+      loadCatalog: async () => ({ shards: stubCatalogShards }), cooldownMs: 0, log, backlogDeferMs: 60_000
+    });
+    await queue.tick();
+    expect(coordinator.calls).toEqual([]);
+    expect(log.log).toHaveBeenCalledWith('[sync-queue] NL deferred unpublished=20001');
+    backlog = 20_000;
+    await queue.tick();
+    expect(coordinator.calls).toEqual([]);
+    const later = createSyncQueue({
+      environment: {}, coordinator, stateDir: stateDir(),
+      sources: { ...stubSources(facts, {}), unpublishedBacklog: async () => backlog },
+      loadCatalog: async () => ({ shards: stubCatalogShards }), cooldownMs: 0, log: { log: () => {}, error: () => {} }
+    });
+    await later.tick();
+    expect(coordinator.calls).toEqual([{ trigger: 'queue', shards: ['oa-nl'] }]);
+  });
+
   it('backs off after a transient failure and checks the current source after growth', async () => {
     const facts = stubFacts();
     facts.deficits.belowTarget = new Set(['US']);
@@ -1697,6 +1731,22 @@ describe('China queue priority', () => {
       blocksQueue: false,
       executionState: 'uninitialized'
     });
+    database.close();
+  });
+
+  it('rotates China with other countries once its original volume goal and coverage are met', async () => {
+    const database = openTestDatabase();
+    await database.prepare(`INSERT INTO sync_country_policies(
+      country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,coverage_ratio,updated_at
+    ) VALUES ('CN',1,1000000000,0,0,0,0,0,'2026-08-02T00:00:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_country_state(country_code,address_count,updated_at)
+      VALUES ('CN',?,'2026-08-02T00:00:00Z')`).bind(CHINA_PRIORITY_TARGET).run();
+    await database.prepare(`INSERT INTO sync_country_runtime(country_code,goal_state,execution_state,updated_at)
+      VALUES ('CN','incomplete','below_target','2026-08-02T00:00:00Z')`).run();
+    const sources = createQueueSources({ addressDatabase: database });
+    await expect(sources.chinaPriority(new Date('2026-08-02T10:00:00Z'))).resolves.toMatchObject({ blocksQueue: false });
+    await database.prepare("UPDATE sync_country_state SET address_count=? WHERE country_code='CN'").bind(CHINA_PRIORITY_TARGET - 1).run();
+    await expect(sources.chinaPriority(new Date('2026-08-02T10:00:00Z'))).resolves.toMatchObject({ blocksQueue: true });
     database.close();
   });
 });

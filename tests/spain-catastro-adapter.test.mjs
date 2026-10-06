@@ -16,7 +16,7 @@ describe('Spanish Catastro INSPIRE adapter', () => {
   it('expands the three audited municipalities into independent shards', async () => {
     const catalog = await loadSourceCatalog();
     const shards = catalog.shards.filter((shard) => shard.source.adapter === 'spain-catastro-residential');
-    expect(sourceAdapterRevisions['spain-catastro-residential']).toBe('inspire-residential-join-v2');
+    expect(sourceAdapterRevisions['spain-catastro-residential']).toBe('inspire-residential-join-v2+capacity-20261003');
     expect(shards.map((shard) => shard.id)).toEqual([
       'spain-catastro-residential-28900',
       'spain-catastro-residential-37900',
@@ -61,7 +61,7 @@ describe('Spanish Catastro INSPIRE adapter', () => {
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('spain-catastro-export.py'),
       '--province', 'Aragón', '--province-code', 'AR',
-      '--municipality', 'Albarracín', '--municipality-code', '44009', '--max-records', '500'
+      '--municipality', 'Albarracín', '--municipality-code', '44009', '--max-records', '1000'
     ]));
   });
 });

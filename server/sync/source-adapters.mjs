@@ -59,25 +59,27 @@ const taiwanResidentialExportRevision = 'molit-lvr-oa-post-v2';
 const hongKongResidentialExportRevision = 'bd-building-information-v1';
 const mapplsResidentialRevision = 'osm-source-address-street-mappls-reverse-v5-city-level';
 const pdokBagRevision = 'strict-active-residential-coverage-round-robin-v2';
+// Raised per-run record caps change what file-based sources can extract.
+const capacityRevision = 'capacity-20261003';
 export const sourceAdapterRevisions = Object.freeze({
-  overture: overtureResidentialRevision,
-  geofabrik: geofabrikExportRevision,
+  overture: `${overtureResidentialRevision}+${capacityRevision}`,
+  geofabrik: `${geofabrikExportRevision}+${capacityRevision}`,
   'google-residential-enrichment': googleResidentialRevision,
-  'japan-abr': japanAbrExportRevision,
+  'japan-abr': `${japanAbrExportRevision}+${capacityRevision}`,
   'singapore-hdb': singaporeHdbExportRevision,
   'korea-kapt': koreaKaptExportRevision,
-  'openaddresses-archive': openAddressesExportRevision,
-  'inegi-residential': inegiResidentialExportRevision,
-  'ethekwini-residential': ethekwiniResidentialExportRevision,
-  'cape-town-residential': capeTownResidentialExportRevision,
-  'thailand-dpt-residential': thailandDptResidentialExportRevision,
+  'openaddresses-archive': `${openAddressesExportRevision}+${capacityRevision}`,
+  'inegi-residential': `${inegiResidentialExportRevision}+${capacityRevision}`,
+  'ethekwini-residential': `${ethekwiniResidentialExportRevision}+${capacityRevision}`,
+  'cape-town-residential': `${capeTownResidentialExportRevision}+${capacityRevision}`,
+  'thailand-dpt-residential': `${thailandDptResidentialExportRevision}+${capacityRevision}`,
   'canada-nar-residential': canadaNarExportRevision,
-  'france-bdnb-residential': franceBdnbExportRevision,
-  'spain-catastro-residential': spainCatastroExportRevision,
-  'taiwan-residential': taiwanResidentialExportRevision,
-  'hong-kong-residential': hongKongResidentialExportRevision,
+  'france-bdnb-residential': `${franceBdnbExportRevision}+${capacityRevision}`,
+  'spain-catastro-residential': `${spainCatastroExportRevision}+${capacityRevision}`,
+  'taiwan-residential': `${taiwanResidentialExportRevision}+${capacityRevision}`,
+  'hong-kong-residential': `${hongKongResidentialExportRevision}+${capacityRevision}`,
   'mappls-residential': mapplsResidentialRevision,
-  'pdok-bag': pdokBagRevision
+  'pdok-bag': `${pdokBagRevision}+${capacityRevision}`
 });
 
 export const adminBoundaryRevision = (countryCode) => {
@@ -549,7 +551,19 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
       else source.configurationError = `missing_source_configuration:${source.dataUrlEnvironment}`;
     }
     const intervalDays = source.intervalDays || catalog.defaultIntervalDays;
-    if (source.adapter === 'overture') {
+    if (source.adapter === 'overture' && source.partitions) {
+      for (const partition of source.partitions) shards.push({
+        id: `${source.id}-${partition.shardId}`,
+        countryCode: partition.countryCode,
+        admin1: partition.admin1,
+        partitionName: partition.name,
+        bounds: partition.bounds,
+        maxRecords: partition.maxRecords ?? source.partitionDefaults?.maxRecords,
+        qualityGate: partition.qualityGate ?? source.partitionDefaults?.qualityGate,
+        intervalDays,
+        source: { ...source, id: `${source.id}-${partition.shardId}`, name: `${source.name} (${partition.name})` }
+      });
+    } else if (source.adapter === 'overture') {
       for (const countryCode of source.countries || []) shards.push({
         id: `${source.id}-${countryCode.toLowerCase()}`, countryCode, intervalDays, source
       });
@@ -755,7 +769,7 @@ export const createSourceAdapters = ({
   environment = process.env,
   execute = runProcess,
   processConcurrency = 3,
-  processTimeoutMs = Number(environment.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 30 * 60_000),
+  processTimeoutMs = Number(environment.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 75 * 60_000),
   signal,
   pythonBin = environment.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
   enableOvertureResidential = environment.ADDRESS_SYNC_OVERTURE_BUILDINGS !== 'false',
@@ -784,8 +798,8 @@ export const createSourceAdapters = ({
   const processLimit = Number.isSafeInteger(processConcurrency) ? Math.max(1, processConcurrency) : 3;
   const configuredJapanTimeout = Number(environment.ADDRESS_SYNC_JAPAN_PROCESS_TIMEOUT_MS);
   const japanProcessTimeoutMs = Number.isInteger(configuredJapanTimeout)
-    ? Math.min(Math.max(configuredJapanTimeout, processTimeoutMs), 85 * 60_000)
-    : Math.min(Math.max(processTimeoutMs, 75 * 60_000), 85 * 60_000);
+    ? Math.min(Math.max(configuredJapanTimeout, processTimeoutMs), 140 * 60_000)
+    : Math.min(Math.max(processTimeoutMs, 120 * 60_000), 140 * 60_000);
   const timeoutForPhase = (phase) => String(phase || '').startsWith('materialize:japan-abr-')
     ? japanProcessTimeoutMs : processTimeoutMs;
   const acquireProcessSlot = (runSignal) => {
@@ -954,6 +968,38 @@ export const createSourceAdapters = ({
     return resolvedGeofabrikUrls.get(url);
   };
 
+  let usaStructuresIndexPromise;
+  // FEMA/ORNL USA Structures publishes per-state FileGDB archives in a public S3 bucket; the newest dated archive wins.
+  const usaStructuresArchive = async (shard) => {
+    const { bucketUrl, prefix } = shard.source.residentialStructures;
+    if (!usaStructuresIndexPromise) usaStructuresIndexPromise = (async () => {
+      const archives = new Map();
+      let token = '';
+      do {
+        const url = new URL(bucketUrl);
+        url.searchParams.set('list-type', '2');
+        url.searchParams.set('prefix', prefix);
+        if (token) url.searchParams.set('continuation-token', token);
+        const response = await fetchImpl(url, { signal });
+        if (!response.ok) throw new SourceMetadataError('USA Structures listing unavailable', { url: url.href, status: response.status });
+        const body = await response.text();
+        for (const [, key] of body.matchAll(/<Key>([^<]+)<\/Key>/gu)) {
+          const match = key.slice(prefix.length).match(/^([^/]+)\/(?:Deliverable(\d{8})[A-Z]{2}|[A-Z]{2}_Structures_(\d{8}))\.zip$/u);
+          const version = match?.[2] || match?.[3];
+          if (!version || !/^20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/u.test(version)) continue;
+          const folder = match[1].replace(/&amp;/gu, '&');
+          if ((archives.get(folder)?.version || '') >= version) continue;
+          archives.set(folder, { url: new URL(key.split('/').map(encodeURIComponent).join('/'), bucketUrl).href, version });
+        }
+        token = body.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/u)?.[1] || '';
+      } while (token);
+      return archives;
+    })().catch((error) => { usaStructuresIndexPromise = null; throw error; });
+    const archive = (await usaStructuresIndexPromise).get(shard.partitionName);
+    if (!archive) throw new Error(`USA Structures has no archive for ${shard.admin1}`);
+    return archive;
+  };
+
   const discoverOverture = async (shard, { includeAssetSizes = false } = {}) => {
     const catalog = await overtureCatalog();
     const bounds = shard.bounds || countryBounds[shard.countryCode];
@@ -971,7 +1017,8 @@ export const createSourceAdapters = ({
     if (!assets.length) throw new Error(`Overture STAC has no intersecting address assets for ${shard.countryCode}`);
     let buildingAssets = [];
     let buildingAssetEntries = [];
-    if (enableOvertureResidential) {
+    const structures = shard.source.residentialStructures ? await usaStructuresArchive(shard) : null;
+    if (enableOvertureResidential && !structures) {
       try {
         const buildingCatalog = await overtureBuildingCatalog();
         buildingAssetEntries = buildingCatalog.items
@@ -994,7 +1041,9 @@ export const createSourceAdapters = ({
     }
     return {
       adapter: 'overture',
-      version: catalog.version,
+      version: structures ? `${catalog.version}+usa-structures-${structures.version}` : catalog.version,
+      structuresUrl: structures?.url || null,
+      residentialBuildingAvailable: structures ? true : undefined,
       publishedAt: `${catalog.version.slice(0, 10)}T00:00:00.000Z`,
       dataUrl: catalog.collectionUrl,
       assets,
@@ -1840,13 +1889,18 @@ export const createSourceAdapters = ({
     const buildingAssetsFile = `${temporary}.building-assets.json`;
     await writeFile(assetsFile, JSON.stringify(discovery.assets), 'utf8');
     await writeFile(buildingAssetsFile, JSON.stringify(discovery.buildingAssetEntries || discovery.buildingAssets || []), 'utf8');
+    const structuresZip = discovery.structuresUrl
+      ? resolve(options.cacheDir, 'raw', `usa-structures-${shard.admin1}-${safeVersion(discovery.version)}.zip`) : null;
     try {
+      if (structuresZip) await download(discovery.structuresUrl, structuresZip, { expectedBytes: null, maxBytes: options.maxBytes });
       await runExecute({
         file: pythonBin,
         args: [overtureExporter, '--country', shard.countryCode, '--release', discovery.version,
           '--output', temporary, '--max-records', String(options.maxRecords),
           '--per-locality', String(options.perLocality), '--assets-file', assetsFile,
           '--building-assets-file', buildingAssetsFile,
+          ...(shard.admin1 ? ['--admin1', shard.admin1] : []),
+          ...(structuresZip ? ['--structures-zip', structuresZip] : []),
           ...overtureBoundsArgs(countryBoundBoxes(shard))],
         phase: `materialize:${shard.id}`
       });
@@ -1855,6 +1909,7 @@ export const createSourceAdapters = ({
       await rm(assetsFile, { force: true });
       await rm(buildingAssetsFile, { force: true });
       await rm(temporary, { force: true });
+      if (structuresZip && !options.retainRaw) await rm(structuresZip, { force: true });
     }
     const size = (await stat(output)).size;
     return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: false };

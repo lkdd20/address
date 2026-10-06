@@ -12,6 +12,9 @@ import { startDailyScheduler } from './scheduler.mjs';
 import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
 import { ensureAddressPolicies } from './address-policy.mjs';
 import { reconcilePublishedPoolProjections, validatePublishedPoolBatch } from '../database/published-pool.mjs';
+import { refreshStaleAddressGenerationIndexes } from '../database/generation-index.mjs';
+import { refreshIndexedResidentialCoverage } from '../database/residential-coverage.mjs';
+import { refreshAddressCoverage } from '../control/coverage';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
 import { ChinaDataService } from '../china/service';
@@ -115,7 +118,15 @@ export const createSyncRuntime = async ({
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   await ensureAddressPolicies(database);
-  await reconcilePublishedPoolProjections(database);
+  // A full projection check scans every published address; it must not delay the health endpoint.
+  const startupReconciliation = (async () => {
+    await reconcilePublishedPoolProjections(database);
+    if (environment.NODE_ENV === 'test') return;
+    await refreshStaleAddressGenerationIndexes(database);
+    await refreshIndexedResidentialCoverage(database, undefined, { skipLocked: true });
+    await refreshAddressCoverage(database, { useGenerationIndex: true });
+    console.log(JSON.stringify({ event: 'startup_coverage_ready', at: new Date().toISOString() }));
+  })().catch((error) => console.error('[address-sync] startup consistency refresh failed', error?.code || error?.message || error));
   await ensureChinaTargets(database, environment, environment.POSTGRES_URL || environment.DATABASE_URL || '');
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;
@@ -137,7 +148,7 @@ export const createSyncRuntime = async ({
     stateDir,
     now,
     history,
-    jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 90 * 60_000, 60_000, 24 * 60 * 60_000),
+    jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 150 * 60_000, 60_000, 24 * 60 * 60_000),
     cancelGraceMs: integer(environment.SYNC_CANCEL_GRACE_MS, 30_000, 5_000, 10 * 60_000),
     runSync: ({ id, trigger, shards, signal, onProgress }) => runSync({
       releaseId: id,
@@ -195,6 +206,7 @@ export const createSyncRuntime = async ({
   let stopScheduler;
   let stopQueue;
   return {
+    startupReconciliation,
     api,
     database,
     coordinator,

@@ -1,6 +1,8 @@
 const DEFAULT_PREPARE_CONCURRENCY = 1;
 const DEFAULT_CPU_CONCURRENCY = 1;
 export const LOWEST_NODE_BASE_TARGET = 5;
+export const MAX_COUNTRY_TARGET = 1_000_000_000;
+export const CHINA_PRIORITY_TARGET = 60_000;
 
 const DEFAULT_MIN_PER_NODE = 5;
 const DEFAULT_COVERAGE_RATIO = 1;
@@ -92,7 +94,7 @@ export const validateCountryPolicy = (countryCode, input) => {
   return {
     countryCode: code,
     enabled: input.enabled === undefined ? true : Boolean(input.enabled),
-    targetCount: integer(input.targetCount ?? defaults.target, 1, 2_000_000, 'INVALID_POLICY_TARGET'),
+    targetCount: integer(input.targetCount ?? defaults.target, 1, MAX_COUNTRY_TARGET, 'INVALID_POLICY_TARGET'),
     limits,
     minPerNode: integer(input.minPerNode ?? defaults.minPerNode, 1, 100, 'INVALID_POLICY_MIN_PER_NODE'),
     coverageRatio: decimal(input.coverageRatio ?? defaults.coverageRatio, 0, 1, 'INVALID_POLICY_COVERAGE_RATIO'),

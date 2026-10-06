@@ -141,7 +141,7 @@ docker compose up -d
 docker compose ps
 ```
 
-数据库迁移会在 `migrate` 服务中自动完成。若需要固定版本，将 `.env` 中的 `ADDRESS_IMAGE` 设为具体标签。
+数据库迁移会在 `migrate` 服务中自动完成。生产蓝绿激活以 `--skip-coverage` 运行迁移，生成索引与覆盖统计由同步服务启动后在后台重建。若需要固定版本，将 `.env` 中的 `ADDRESS_IMAGE` 设为具体标签。
 
 ## 备份与恢复
 

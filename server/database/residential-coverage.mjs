@@ -100,7 +100,7 @@ export const refreshResidentialCoverage = async (
         ${cityColumn('generation')} AS city_name,COUNT(*) AS address_count,
         SUM(generation.residential_ready) AS residential_count
       FROM address_generation_index generation
-      JOIN address_pool address ON address.id=generation.address_id AND address.active=1
+      JOIN address_pool address ON address.id=generation.address_id AND address.active=1 AND address.country_code=?
       WHERE generation.country_code=? AND generation.active=1
       GROUP BY generation.admin1_key,generation.admin1_code_key,${cityColumn('generation')}` : `SELECT ${admin1} AS admin1,${admin1Code} AS admin1_code,
         ${cityColumn('address')} AS city_name,COUNT(*) AS address_count,
@@ -116,7 +116,7 @@ export const refreshResidentialCoverage = async (
     database.prepare(`SELECT id,region_id,name,native_name,zh_name FROM catalog_cities
       WHERE country_code=?`).bind(country).all(),
     database.prepare(groupsQuery)
-      .bind(country).all()
+      .bind(...(useGenerationIndex ? [country, country] : [country])).all()
   ]);
   checkpoint();
   const regions = regionsResult.results || [];

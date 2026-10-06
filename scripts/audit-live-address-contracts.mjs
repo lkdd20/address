@@ -21,8 +21,10 @@ const adminCodes = new Set(['US', 'CA', 'MX', 'IT', 'AU', 'BR']);
 const minimumUniqueRatio = Math.max(0, Math.min(1, Number(process.env.MIN_UNIQUE_RATIO || '0.9')));
 const hongKongTraditional = createTraditionalizer({ from: 'cn', to: 'hk' });
 // 涌 (chung, stream) is the official Hong Kong place-name character, e.g. 葵涌 and 蠔涌; OpenCC rewrites it to 湧.
+// Official Hong Kong names keep 涌 (e.g. 鰂魚涌) and 咸 (e.g. 般咸道, 雲咸街); OpenCC would rewrite them.
+const hongKongOfficialCharacters = new Set(['涌', '咸']);
 const keepHongKongChung = (value) => Array.from(hongKongTraditional(value))
-  .map((character, index) => Array.from(value)[index] === '涌' ? '涌' : character).join('');
+  .map((character, index) => hongKongOfficialCharacters.has(Array.from(value)[index]) ? Array.from(value)[index] : character).join('');
 const toTraditional = {
   HK: keepHongKongChung,
   TW: createTraditionalizer({ from: 'cn', to: 'tw' })

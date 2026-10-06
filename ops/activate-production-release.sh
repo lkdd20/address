@@ -154,7 +154,7 @@ trap rollback_cutover ERR INT TERM
 
 echo "==> preparing PostgreSQL and migration"
 compose up -d --wait --wait-timeout 180 postgres
-compose run --rm --no-deps -T migrate
+compose run --rm --no-deps -T migrate node node_modules/tsx/dist/cli.mjs server/database/migrate.ts --skip-coverage
 
 echo "==> starting $TARGET_SLOT release $RELEASE_ID"
 compose --profile "production-$TARGET_SLOT" up -d --no-deps --wait --wait-timeout 180 \

@@ -20,6 +20,84 @@
       "countries": ["US", "CA", "MX", "DE", "FR", "IT", "ES", "NL", "TW", "HK", "AU", "BR", "SG"]
     },
     {
+      "id": "overture-usa-structures",
+      "adapter": "overture",
+      "name": "Overture Maps addresses with USA Structures occupancy",
+      "homepageUrl": "https://overturemaps.org/",
+      "dataUrl": "https://stac.overturemaps.org/catalog.json",
+      "licenseCode": "mixed-open",
+      "licenseName": "Overture address source licences; FEMA/ORNL USA Structures public federal data",
+      "licenseUrl": "https://docs.overturemaps.org/attribution/#addresses",
+      "attributionText": "Overture Maps Foundation and the source named in each record; FEMA and Oak Ridge National Laboratory USA Structures",
+      "attributionUrl": "https://docs.overturemaps.org/attribution/#addresses",
+      "termsUrl": "https://docs.overturemaps.org/attribution/#addresses",
+      "shareAlike": false,
+      "redistributionAllowed": true,
+      "updateCadence": "monthly",
+      "residentialStructures": { "bucketUrl": "https://fema-femadata.s3.amazonaws.com/", "prefix": "Partners/ORNL/USA_Structures/" },
+      "capabilityInputs": { "residentialEvidence": "usa-structures-nearest-30m-v1", "selection": "state-partition-locality-round-robin-v1" },
+      "recordSources": {
+        "usa-structures": { "name": "FEMA/ORNL USA Structures", "url": "https://disasters.geoplatform.gov/USA_Structures/" }
+      },
+      "partitionDefaults": {
+        "maxRecords": 200000,
+        "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
+      },
+      "partitions": [
+        { "countryCode": "US", "shardId": "ak", "admin1": "AK", "name": "Alaska", "bounds": [-180, 51, -129.9, 71.6] },
+        { "countryCode": "US", "shardId": "al", "admin1": "AL", "name": "Alabama", "bounds": [-88.4731, 30.1434, -84.8883, 35.0081] },
+        { "countryCode": "US", "shardId": "ar", "admin1": "AR", "name": "Arkansas", "bounds": [-94.6179, 33.0042, -89.6425, 36.4996] },
+        { "countryCode": "US", "shardId": "az", "admin1": "AZ", "name": "Arizona", "bounds": [-114.8184, 31.3322, -109.0449, 37.0039] },
+        { "countryCode": "US", "shardId": "ca", "admin1": "CA", "name": "California", "bounds": [-124.482, 32.5295, -114.1308, 42.0095] },
+        { "countryCode": "US", "shardId": "co", "admin1": "CO", "name": "Colorado", "bounds": [-109.0602, 36.9925, -102.0416, 41.0034] },
+        { "countryCode": "US", "shardId": "ct", "admin1": "CT", "name": "Connecticut", "bounds": [-73.7278, 40.951, -71.7872, 42.0506] },
+        { "countryCode": "US", "shardId": "dc", "admin1": "DC", "name": "District of Columbia", "bounds": [-77.1198, 38.7916, -76.9094, 38.996] },
+        { "countryCode": "US", "shardId": "de", "admin1": "DE", "name": "Delaware", "bounds": [-75.789, 38.4512, -74.9849, 39.8395] },
+        { "countryCode": "US", "shardId": "fl", "admin1": "FL", "name": "Florida", "bounds": [-87.6349, 24.3963, -79.9743, 31.0008] },
+        { "countryCode": "US", "shardId": "ga", "admin1": "GA", "name": "Georgia", "bounds": [-85.6052, 30.3557, -80.7514, 35.0007] },
+        { "countryCode": "US", "shardId": "hi", "admin1": "HI", "name": "Hawaii", "bounds": [-178.4436, 18.8655, -154.7558, 28.5173] },
+        { "countryCode": "US", "shardId": "ia", "admin1": "IA", "name": "Iowa", "bounds": [-96.6397, 40.3756, -90.1401, 43.5012] },
+        { "countryCode": "US", "shardId": "id", "admin1": "ID", "name": "Idaho", "bounds": [-117.243, 41.9888, -111.0436, 49.0009] },
+        { "countryCode": "US", "shardId": "il", "admin1": "IL", "name": "Illinois", "bounds": [-91.5131, 36.9701, -87.0199, 42.5084] },
+        { "countryCode": "US", "shardId": "in", "admin1": "IN", "name": "Indiana", "bounds": [-88.0972, 37.7717, -84.7846, 41.7614] },
+        { "countryCode": "US", "shardId": "ks", "admin1": "KS", "name": "Kansas", "bounds": [-102.0518, 36.9931, -94.5882, 40.0032] },
+        { "countryCode": "US", "shardId": "ky", "admin1": "KY", "name": "Kentucky", "bounds": [-89.5715, 36.4971, -81.9645, 39.1478] },
+        { "countryCode": "US", "shardId": "la", "admin1": "LA", "name": "Louisiana", "bounds": [-94.0432, 28.8543, -88.7583, 33.0196] },
+        { "countryCode": "US", "shardId": "ma", "admin1": "MA", "name": "Massachusetts", "bounds": [-73.5082, 41.1889, -69.8601, 42.8868] },
+        { "countryCode": "US", "shardId": "md", "admin1": "MD", "name": "Maryland", "bounds": [-79.4873, 37.8865, -74.9852, 39.723] },
+        { "countryCode": "US", "shardId": "me", "admin1": "ME", "name": "Maine", "bounds": [-71.0842, 42.9222, -66.8854, 47.4598] },
+        { "countryCode": "US", "shardId": "mi", "admin1": "MI", "name": "Michigan", "bounds": [-90.4185, 41.6961, -82.1228, 48.3061] },
+        { "countryCode": "US", "shardId": "mn", "admin1": "MN", "name": "Minnesota", "bounds": [-97.2393, 43.4994, -89.4833, 49.3845] },
+        { "countryCode": "US", "shardId": "mo", "admin1": "MO", "name": "Missouri", "bounds": [-95.7741, 35.9957, -89.0988, 40.6136] },
+        { "countryCode": "US", "shardId": "ms", "admin1": "MS", "name": "Mississippi", "bounds": [-91.655, 30.1437, -88.0978, 34.996] },
+        { "countryCode": "US", "shardId": "mt", "admin1": "MT", "name": "Montana", "bounds": [-116.0492, 44.3579, -104.0396, 49.0011] },
+        { "countryCode": "US", "shardId": "nc", "admin1": "NC", "name": "North Carolina", "bounds": [-84.3218, 33.7529, -75.4001, 36.5882] },
+        { "countryCode": "US", "shardId": "nd", "admin1": "ND", "name": "North Dakota", "bounds": [-104.049, 45.935, -96.5544, 49.0006] },
+        { "countryCode": "US", "shardId": "ne", "admin1": "NE", "name": "Nebraska", "bounds": [-104.0534, 39.9999, -95.3081, 43.0015] },
+        { "countryCode": "US", "shardId": "nh", "admin1": "NH", "name": "New Hampshire", "bounds": [-72.5572, 42.6972, -70.5614, 45.3058] },
+        { "countryCode": "US", "shardId": "nj", "admin1": "NJ", "name": "New Jersey", "bounds": [-75.5634, 38.7911, -73.8936, 41.3573] },
+        { "countryCode": "US", "shardId": "nm", "admin1": "NM", "name": "New Mexico", "bounds": [-109.0502, 31.3322, -103.0022, 37.0002] },
+        { "countryCode": "US", "shardId": "nv", "admin1": "NV", "name": "Nevada", "bounds": [-120.0065, 35.0019, -114.0403, 42.0003] },
+        { "countryCode": "US", "shardId": "ny", "admin1": "NY", "name": "New York", "bounds": [-79.762, 40.4766, -71.791, 45.0159] },
+        { "countryCode": "US", "shardId": "oh", "admin1": "OH", "name": "Ohio", "bounds": [-84.8203, 38.4031, -80.519, 42.3247] },
+        { "countryCode": "US", "shardId": "ok", "admin1": "OK", "name": "Oklahoma", "bounds": [-103.0024, 33.6192, -94.4312, 37.0023] },
+        { "countryCode": "US", "shardId": "or", "admin1": "OR", "name": "Oregon", "bounds": [-124.7035, 41.9926, -116.4631, 46.2924] },
+        { "countryCode": "US", "shardId": "pa", "admin1": "PA", "name": "Pennsylvania", "bounds": [-80.5211, 39.7198, -74.6897, 42.5161] },
+        { "countryCode": "US", "shardId": "ri", "admin1": "RI", "name": "Rhode Island", "bounds": [-71.9074, 41.0958, -71.0886, 42.0189] },
+        { "countryCode": "US", "shardId": "sc", "admin1": "SC", "name": "South Carolina", "bounds": [-83.354, 32.0335, -78.5414, 35.2155] },
+        { "countryCode": "US", "shardId": "sd", "admin1": "SD", "name": "South Dakota", "bounds": [-104.0578, 42.4799, -96.4363, 45.9453] },
+        { "countryCode": "US", "shardId": "tn", "admin1": "TN", "name": "Tennessee", "bounds": [-90.3103, 34.9832, -81.6472, 36.6781] },
+        { "countryCode": "US", "shardId": "tx", "admin1": "TX", "name": "Texas", "bounds": [-106.6459, 25.8371, -93.5078, 36.5005] },
+        { "countryCode": "US", "shardId": "ut", "admin1": "UT", "name": "Utah", "bounds": [-114.0529, 36.9978, -109.0416, 42.002] },
+        { "countryCode": "US", "shardId": "va", "admin1": "VA", "name": "Virginia", "bounds": [-83.6754, 36.5408, -75.1664, 39.466] },
+        { "countryCode": "US", "shardId": "vt", "admin1": "VT", "name": "Vermont", "bounds": [-73.4378, 42.727, -71.4654, 45.0167] },
+        { "countryCode": "US", "shardId": "wa", "admin1": "WA", "name": "Washington", "bounds": [-124.8361, 45.5437, -116.916, 49.0024] },
+        { "countryCode": "US", "shardId": "wi", "admin1": "WI", "name": "Wisconsin", "bounds": [-92.8893, 42.492, -86.2495, 47.3097] },
+        { "countryCode": "US", "shardId": "wv", "admin1": "WV", "name": "West Virginia", "bounds": [-82.6448, 37.2014, -77.719, 40.6388] },
+        { "countryCode": "US", "shardId": "wy", "admin1": "WY", "name": "Wyoming", "bounds": [-111.0553, 40.9948, -104.0522, 45.0058] }
+      ]
+    },
+    {
       "id": "france-bdnb-creuse-residential",
       "adapter": "france-bdnb-residential",
       "countryCode": "FR",
@@ -40,7 +118,7 @@
       "redistributionAllowed": true,
       "updateCadence": "on official BDNB millesime change",
       "intervalDays": 30,
-      "maxRecords": 50000,
+      "maxRecords": 200000,
       "qualityGate": { "minimumRecords": 30000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 1 }
     },
     {
@@ -52,7 +130,7 @@
       "dataUrl": "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_dep33/open_data_millesime_2026-02-a_dep33_csv.zip",
       "archiveCacheName": "bdnb-2026-02-a-dep33.zip",
       "sourceVersion": "2026-02.a-schema-0.7.11-dep33",
-      "capabilityInputs": { "maxRecords": 50000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
+      "capabilityInputs": { "maxRecords": 200000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
       "minimumFiability": 17,
       "licenseCode": "etalab-2.0",
       "licenseName": "Licence Ouverte / Open Licence 2.0",
@@ -64,7 +142,7 @@
       "redistributionAllowed": true,
       "updateCadence": "on official BDNB millesime change",
       "intervalDays": 30,
-      "maxRecords": 50000,
+      "maxRecords": 200000,
       "qualityGate": { "minimumRecords": 1000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -76,7 +154,7 @@
       "dataUrl": "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_dep69/open_data_millesime_2026-02-a_dep69_csv.zip",
       "archiveCacheName": "bdnb-2026-02-a-dep69.zip",
       "sourceVersion": "2026-02.a-schema-0.7.11-dep69",
-      "capabilityInputs": { "maxRecords": 50000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
+      "capabilityInputs": { "maxRecords": 200000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
       "minimumFiability": 17,
       "licenseCode": "etalab-2.0",
       "licenseName": "Licence Ouverte / Open Licence 2.0",
@@ -88,7 +166,7 @@
       "redistributionAllowed": true,
       "updateCadence": "on official BDNB millesime change",
       "intervalDays": 30,
-      "maxRecords": 50000,
+      "maxRecords": 200000,
       "qualityGate": { "minimumRecords": 1000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -100,7 +178,7 @@
       "dataUrl": "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_dep75/open_data_millesime_2026-02-a_dep75_csv.zip",
       "archiveCacheName": "bdnb-2026-02-a-dep75.zip",
       "sourceVersion": "2026-02.a-schema-0.7.11-dep75",
-      "capabilityInputs": { "maxRecords": 50000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
+      "capabilityInputs": { "maxRecords": 200000, "minimumFiability": 17, "exporter": "bdnb-ban-fiabilite17-v2" },
       "minimumFiability": 17,
       "licenseCode": "etalab-2.0",
       "licenseName": "Licence Ouverte / Open Licence 2.0",
@@ -112,7 +190,7 @@
       "redistributionAllowed": true,
       "updateCadence": "on official BDNB millesime change",
       "intervalDays": 30,
-      "maxRecords": 50000,
+      "maxRecords": 200000,
       "qualityGate": { "minimumRecords": 1000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -132,7 +210,7 @@
       "redistributionAllowed": true,
       "updateCadence": "initialization-focused; monthly metadata check",
       "intervalDays": 30,
-      "maxRecords": 50000,
+      "maxRecords": 200000,
       "qualityGate": { "minimumRecords": 50000, "minimumAdmin1": 12, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 1 }
     },
     {
@@ -153,21 +231,21 @@
       "municipalities": [
         {
           "code": "28900", "name": "Madrid", "province": "Comunidad de Madrid", "provinceCode": "MD",
-          "sourceVersion": "2026-02-21", "maxRecords": 70000,
+          "sourceVersion": "2026-02-21", "maxRecords": 200000,
           "addressesUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Addresses/28/28900-MADRID/A.ES.SDGC.AD.28900.zip",
           "buildingsUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Buildings/28/28900-MADRID/A.ES.SDGC.BU.28900.zip",
           "qualityGate": { "minimumRecords": 65000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 1 }
         },
         {
           "code": "37900", "name": "Salamanca", "province": "Castilla y León", "provinceCode": "CL",
-          "sourceVersion": "2026-02-21", "maxRecords": 10000,
+          "sourceVersion": "2026-02-21", "maxRecords": 30000,
           "addressesUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Addresses/37/37900-SALAMANCA/A.ES.SDGC.AD.37900.zip",
           "buildingsUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Buildings/37/37900-SALAMANCA/A.ES.SDGC.BU.37900.zip",
           "qualityGate": { "minimumRecords": 8000, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 1 }
         },
         {
           "code": "44009", "name": "Albarracín", "province": "Aragón", "provinceCode": "AR",
-          "sourceVersion": "2026-02-21", "maxRecords": 500,
+          "sourceVersion": "2026-02-21", "maxRecords": 2000,
           "addressesUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Addresses/44/44009-ALBARRACIN/A.ES.SDGC.AD.44009.zip",
           "buildingsUrl": "https://www.catastro.hacienda.gob.es/INSPIRE/Buildings/44/44009-ALBARRACIN/A.ES.SDGC.BU.44009.zip",
           "qualityGate": { "minimumRecords": 400, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 1 }
@@ -197,7 +275,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "on preserved INEGI source change",
-      "maxRecords": 20000,
+      "maxRecords": 100000,
       "qualityGate": { "minimumRecords": 200, "minimumAdmin1": 2, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -226,7 +304,7 @@
       "shareAlike": false,
       "redistributionAllowed": false,
       "updateCadence": "monthly",
-      "maxRecords": 5000,
+      "maxRecords": 50000,
       "qualityGate": { "minimumRecords": 7, "minimumAdmin1": 1, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -259,7 +337,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "manual initialization",
-      "maxRecords": 10000,
+      "maxRecords": 100000,
       "qualityGate": { "minimumRecords": 500, "minimumAdmin1": 5, "minimumCountRatio": 0.7, "minimumAdmin1Ratio": 0.7 }
     },
     {
@@ -486,7 +564,7 @@
       "shareAlike": true,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
-      "maxRecords": 20000,
+      "maxRecords": 200000,
       "qualityGate": {
         "minimumRecords": 1,
         "minimumAdmin1": 1,
@@ -512,7 +590,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "yearly",
-      "maxRecords": 20000,
+      "maxRecords": 100000,
       "qualityGate": {
         "minimumRecords": 5000,
         "minimumAdmin1": 3,
@@ -618,7 +696,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "quarterly",
-      "maxRecords": 10000,
+      "maxRecords": 100000,
       "qualityGate": {
         "minimumRecords": 4000,
         "minimumAdmin1": 5,
@@ -643,7 +721,7 @@
       "redistributionAllowed": true,
       "updateCadence": "monthly",
       "intervalDays": 30,
-      "maxRecords": 20000,
+      "maxRecords": 100000,
       "qualityGate": {
         "minimumRecords": 50,
         "minimumAdmin1": 2,
@@ -659,7 +737,7 @@
       "homepageUrl": "https://www150.statcan.gc.ca/n1/en/catalogue/46260002",
       "dataUrl": "https://www150.statcan.gc.ca/n1/pub/46-26-0002/2022001/202606.zip",
       "release": "202606",
-      "capabilityInputs": { "maxRecords": 80000, "exporter": "province-balanced-range-v2" },
+      "capabilityInputs": { "maxRecords": 300000, "exporter": "province-balanced-range-v2" },
       "licenseCode": "statistics-canada-open-licence",
       "licenseName": "Statistics Canada Open Licence (Yukon data also under Open Government Licence - Yukon)",
       "licenseUrl": "https://www.statcan.gc.ca/en/reference/licence",
@@ -670,7 +748,7 @@
       "redistributionAllowed": true,
       "updateCadence": "semi-annual",
       "intervalDays": 30,
-      "maxRecords": 80000,
+      "maxRecords": 300000,
       "qualityGate": {
         "minimumRecords": 300,
         "minimumAdmin1": 5,
@@ -697,7 +775,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
-      "maxRecords": 4500,
+      "maxRecords": 50000,
       "queryConcurrency": 16,
       "qualityGate": {
         "minimumRecords": 1000,
@@ -724,7 +802,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
-      "maxRecords": 4500,
+      "maxRecords": 50000,
       "qualityGate": {
         "minimumRecords": 1000,
         "minimumAdmin1": 1,
@@ -888,7 +966,7 @@
       "redistributionAllowed": true,
       "updateCadence": "daily",
       "extractDefaults": {
-        "maxRecords": 3000,
+        "maxRecords": 50000,
         "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
       },
       "extracts": [
@@ -926,7 +1004,7 @@
       "redistributionAllowed": true,
       "updateCadence": "daily",
       "extractDefaults": {
-        "maxRecords": 2000,
+        "maxRecords": 50000,
         "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 0, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
       },
       "extracts": [
@@ -975,7 +1053,7 @@
       "redistributionAllowed": true,
       "updateCadence": "daily",
       "extractDefaults": {
-        "maxRecords": 3000,
+        "maxRecords": 50000,
         "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
       },
       "extracts": [

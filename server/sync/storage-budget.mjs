@@ -2,8 +2,10 @@ import { lstat, readdir } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 
 export const GIBIBYTE = 1024 ** 3;
-export const DEFAULT_SOFT_LIMIT_BYTES = 40 * GIBIBYTE;
-export const DEFAULT_HARD_LIMIT_BYTES = 45 * GIBIBYTE;
+export const DEFAULT_SOFT_LIMIT_BYTES = 55 * GIBIBYTE;
+export const DEFAULT_HARD_LIMIT_BYTES = 60 * GIBIBYTE;
+export const DEFAULT_MIN_FREE_DISK_BYTES = 10 * GIBIBYTE;
+export const DEFAULT_STORAGE_BYTES_PER_RECORD = 12 * 1024;
 
 export class StorageBudgetExceededError extends Error {
   constructor({ projectedBytes, hardLimitBytes }) {

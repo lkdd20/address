@@ -141,7 +141,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Migrations run automatically in the `migrate` service. To pin a version, set `ADDRESS_IMAGE` in `.env` to a specific tag.
+Migrations run automatically in the `migrate` service. Blue/green production activation runs it with `--skip-coverage`; the sync service then rebuilds the generation index and coverage statistics in the background after it starts. To pin a version, set `ADDRESS_IMAGE` in `.env` to a specific tag.
 
 ## Backup and restore
 

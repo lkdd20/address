@@ -33,6 +33,19 @@ describe('catalog reverse geocoder', () => {
     expect(filled.admin1).toBe('福建省');
   });
 
+  it('fills a missing city only from the region the source already names', () => {
+    const geocoder = new CatalogReverseGeocoder('US', [
+      { id: 10, code: 'TN', name: 'Tennessee', native_name: 'Tennessee', type: 'state', latitude: 35.86, longitude: -86.35 },
+      { id: 11, code: 'MS', name: 'Mississippi', native_name: 'Mississippi', type: 'state', latitude: 32.74, longitude: -89.68 }
+    ], [
+      { name: 'Olive Branch', native_name: 'Olive Branch', region_id: 11, type: 'city', latitude: 34.96, longitude: -89.83 },
+      { name: 'Memphis', native_name: 'Memphis', region_id: 10, type: 'city', latitude: 35.15, longitude: -90.05 }
+    ]);
+    const filled = geocoder.lookup({ latitude: 34.9974, longitude: -89.8412, components: { admin1: 'TN', locality: '', postalLocality: '' } });
+    expect(filled.locality).toBe('Memphis');
+    expect(filled.admin1).toBeUndefined();
+  });
+
   it('returns nothing for points far outside the catalog radius', () => {
     const geocoder = new CatalogReverseGeocoder('CN', regions, cities);
     const filled = geocoder.lookup({ latitude: 48.8, longitude: 2.35, components: { admin1: '', locality: '' } });

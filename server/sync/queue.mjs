@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { loadSourceCatalog, sourceAdapterRevisions, sourceCapabilityRevision } from './source-adapters.mjs';
 import { evaluateCountryGoals } from './country-goals.mjs';
+import { CHINA_PRIORITY_TARGET } from './address-policy.mjs';
 import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 
@@ -258,7 +259,8 @@ export const evaluateAttempt = ({
   partialWorkCount = 0,
   partialMinimumWorkCount = 1,
   partialProgressEvaluationReady = false,
-  maxPartialStalls = 3
+  maxPartialStalls = 3,
+  growthCapped = false
 }) => {
   const progressed = netGrowth > 0 || (goalDeficitBefore != null && goalDeficitAfter != null
     && Number(goalDeficitAfter) < Number(goalDeficitBefore));
@@ -323,12 +325,13 @@ export const evaluateAttempt = ({
     };
   }
   if (jobSucceeded && progressed) {
+    // A run stopped only by its per-run growth step continues shortly instead of waiting a full interval.
     return {
       action: 'checked',
       reason: CHECKED_REASON,
       fingerprint: fingerprintAfter,
       consecutiveFailures: 0,
-      nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, probeIntervalMs)).toISOString()
+      nextAttemptAt: new Date(timestamp(completedAt) + (growthCapped ? 60_000 : Math.max(60_000, probeIntervalMs))).toISOString()
     };
   }
   if (jobSucceeded || deterministicFailure) {
@@ -888,7 +891,9 @@ export const createQueueSources = ({
     blocksQueue: false, executionState: null, nextAttemptAt: null
   }, async (database) => {
     const goal = (await evaluateCountryGoals(database)).get('CN');
-    if (!goal?.enabled || goal.complete) return { blocksQueue: false, executionState: 'ready', nextAttemptAt: null };
+    // Beyond its original volume goal China rotates with other countries instead of holding the queue.
+    const priorityComplete = goal?.coverageMet && goal.overrideMet && goal.current >= CHINA_PRIORITY_TARGET;
+    if (!goal?.enabled || goal.complete || priorityComplete) return { blocksQueue: false, executionState: 'ready', nextAttemptAt: null };
     const runtime = await database.prepare(`SELECT execution_state,next_attempt_at
       FROM sync_country_runtime WHERE country_code='CN'`).first();
     if (!runtime) return { blocksQueue: false, executionState: 'uninitialized', nextAttemptAt: null };
@@ -903,7 +908,15 @@ export const createQueueSources = ({
     };
   });
 
-  return { addressFacts, quotaStatus, chinaPriority };
+  // Active rows still waiting for translation or publication; permanently rejected rows do not count.
+  const unpublishedBacklog = (countryCode) => withDatabase(addressDatabase, 0, async (database) => Number(
+    await database.prepare(`SELECT COUNT(*) AS total FROM address_pool pool
+      LEFT JOIN address_generation_index generation ON generation.address_id=pool.id AND generation.active=1
+      LEFT JOIN translation_recovery recovery ON recovery.address_id=pool.id AND recovery.status IN ('failed','rejected')
+      WHERE pool.country_code=? AND pool.active=1 AND generation.address_id IS NULL AND recovery.address_id IS NULL`).bind(countryCode).first('total')
+  ) || 0);
+
+  return { addressFacts, quotaStatus, chinaPriority, unpublishedBacklog };
 };
 
 const runningJobCountries = (job, shards) => {
@@ -1255,8 +1268,12 @@ export const createSyncQueue = ({
   cooldownMs = integer(environment.SYNC_QUEUE_COOLDOWN_MS, 10_000, 0, 60 * 60_000),
   backoffBaseMs = integer(environment.SYNC_QUEUE_BACKOFF_BASE_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
   backoffCapMs = integer(environment.SYNC_QUEUE_BACKOFF_CAP_MS, 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
-  enableSourceProbes = environment.ADDRESS_SYNC_ENABLE_SOURCE_PROBES === 'true'
+  enableSourceProbes = environment.ADDRESS_SYNC_ENABLE_SOURCE_PROBES === 'true',
+  maxUnpublishedBacklog = integer(environment.SYNC_QUEUE_MAX_UNPUBLISHED_BACKLOG, 20_000, 0, 100_000_000),
+  backlogDeferMs = integer(environment.SYNC_QUEUE_BACKLOG_DEFER_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000)
 }) => {
+  // A country whose imported rows still await publication is not imported again until they drain.
+  const backlogDeferredUntil = new Map();
   const legacyStateFile = resolve(stateDir, 'queue-state.json');
   const store = addressDatabase
     ? new PostgresQueueStateStore(addressDatabase, legacyStateFile)
@@ -1566,8 +1583,22 @@ export const createSyncQueue = ({
     }
     const currentTime = now();
     if (await chinaBlocked()) return Math.min(rescanMs, 5_000);
-    const pick = snap.entries.find((entry) => entry.state === 'queued'
-      && (!entry.nextAttemptAt || timestamp(entry.nextAttemptAt) <= currentTime.getTime()));
+    const backlogDeferred = (entry) => (backlogDeferredUntil.get(entry.countryCode) || 0) > currentTime.getTime();
+    let pick;
+    for (const entry of snap.entries) {
+      if (entry.state !== 'queued' || backlogDeferred(entry)
+        || (entry.nextAttemptAt && timestamp(entry.nextAttemptAt) > currentTime.getTime())) continue;
+      if (maxUnpublishedBacklog && entry.countryCode !== 'CN' && sources.unpublishedBacklog) {
+        const backlog = await sources.unpublishedBacklog(entry.countryCode);
+        if (backlog > maxUnpublishedBacklog) {
+          backlogDeferredUntil.set(entry.countryCode, currentTime.getTime() + backlogDeferMs);
+          log.log?.(`[sync-queue] ${entry.countryCode} deferred unpublished=${backlog}`);
+          continue;
+        }
+      }
+      pick = entry;
+      break;
+    }
     const probePick = !pick && probeSource
       ? snap.entries.find((entry) => entry.state !== 'done' && entry.probeShardIds?.length)
       : null;
@@ -1670,6 +1701,7 @@ export const createSyncQueue = ({
       partialWorkCount: Number(sourceOutcome?.metrics?.runRequestCount || 0),
       partialMinimumWorkCount: Number(sourceOutcome?.metrics?.progressEvaluationMinimum || 1),
       partialProgressEvaluationReady: sourceOutcome?.metrics?.progressEvaluationReady === true,
+      growthCapped: sourceOutcome?.metrics?.growthCapped === true,
       netGrowth: (after?.current ?? pick.current) - pick.current,
       goalDeficitBefore: goalDeficit(pick.rules),
       goalDeficitAfter: goalDeficit(after?.rules),

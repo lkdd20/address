@@ -278,6 +278,31 @@ describe('address storage budget', () => {
       .toThrow(StorageBudgetExceededError);
   });
 
+  it('limits one run to an equal country share of the headroom and treats a nearly full disk as full', async () => {
+    const run = async (options) => {
+      const cacheDir = resolve('.data-cache', 'storage-budget-tests', randomUUID());
+      directories.push(cacheDir);
+      let persistedState;
+      let imported = 0;
+      await runAddressEtl({
+        cacheDir, dataRoot: cacheDir, syncMode: 'manual', maxRecords: 1_000, bytesPerRecord: 10,
+        softLimitBytes: 27 * 10 * 50, hardLimitBytes: 27 * 10 * 50 + 100_000,
+        catalog: { schemaVersion: 1, shards: [{ ...shards[0], source: { id: 'fixture' } }] },
+        measureStorage: async () => 0,
+        stateStore: { load: async () => ({ schemaVersion: 1, shards: {} }), save: async (value) => { persistedState = value; } },
+        adapters: {
+          discover: async () => ({ adapter: 'overture', version: 'fixture', sourceBytes: 0 }),
+          materialize: async () => ({ file: resolve(cacheDir, 'fixture.jsonl'), format: 'overture-jsonl', checksum: 'a'.repeat(64), cacheBytes: 0 })
+        },
+        importer: { importShard: async () => { imported += 1; return { datasetId: 'fixture', acceptedCount: 1, rejectedCount: 0, skipped: false }; } },
+        ...options
+      });
+      return { report: persistedState?.shards['fixture-us'], imported };
+    };
+    expect((await run({ freeDiskBytes: async () => 100 * 1024 ** 3 })).report).toMatchObject({ targetCount: 50 });
+    await expect(run({ freeDiskBytes: async () => 1024 })).rejects.toMatchObject({ code: 'ADDRESS_STORAGE_HARD_LIMIT' });
+  });
+
   it('passes the soft-limit shadow policy into the importer contract', async () => {
     const cacheDir = resolve('.data-cache', 'storage-budget-tests', randomUUID());
     directories.push(cacheDir);
@@ -291,6 +316,7 @@ describe('address storage budget', () => {
       softLimitBytes: 40,
       hardLimitBytes: 5000,
       maxRecords: 1,
+      bytesPerRecord: 1,
       measureStorage: async () => 40,
       stateStore: {
         load: async () => ({ schemaVersion: 1, shards: {} }),

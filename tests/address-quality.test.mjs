@@ -104,6 +104,8 @@ describe('country address quality gate', () => {
       expect(validateAddressQuality({ countryCode, components: { ...base, district: '', postcode: '' } }).reasons).not.toContain('missing_district');
     }
     expect(validateAddressQuality({ countryCode: 'US', components: { ...base, district: '', postcode: '19103' } }).valid).toBe(true);
+    expect(validateAddressQuality({ countryCode: 'US', components: { ...base, district: '', postcode: '39466', houseNumber: 'PINE ST' } }).reasons)
+      .toContain('invalid_house_number');
   });
 
   it('rejects a postal locality that is only the street name', () => {

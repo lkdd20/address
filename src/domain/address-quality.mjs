@@ -85,6 +85,8 @@ const addCountryReasons = (country, components, reasons) => {
   if (country === 'US' && !/^(?:[A-Z]{2}|[\p{L} .'-]+)$/u.test(clean(components.admin1Code || admin1))) {
     reasons.push('invalid_us_admin1');
   }
+  // US house numbers always carry digits; a digit-free value is a misplaced street name.
+  if (country === 'US' && clean(components.houseNumber) && !/\d/u.test(components.houseNumber)) reasons.push('invalid_house_number');
   if (country === 'JP') {
     if (!japanese.test(`${admin1}${locality}${district}${street}`)) reasons.push('invalid_japanese_script');
     if (admin1 && !/[都道府県]$/u.test(admin1)) reasons.push('invalid_japanese_prefecture');

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
@@ -16,7 +16,9 @@ import { PostgresCountryStateStore } from './postgres-country-state.mjs';
 import {
   assertStorageBudget,
   DEFAULT_HARD_LIMIT_BYTES,
+  DEFAULT_MIN_FREE_DISK_BYTES,
   DEFAULT_SOFT_LIMIT_BYTES,
+  DEFAULT_STORAGE_BYTES_PER_RECORD,
   measureStorageBytes
 } from './storage-budget.mjs';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
@@ -750,7 +752,10 @@ export const runAddressEtl = async ({
   syncMode = process.env.ADDRESS_SYNC_MODE || (process.env.ADDRESS_SYNC_TRIGGER === 'initial' ? 'initial' : force ? 'manual' : 'daily'),
   softLimitBytes = integer(process.env.ADDRESS_STORAGE_SOFT_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES),
   hardLimitBytes = integer(process.env.ADDRESS_STORAGE_HARD_LIMIT_BYTES, DEFAULT_HARD_LIMIT_BYTES),
-  maxRecords = integer(process.env.ADDRESS_SYNC_MAX_RECORDS_PER_SHARD, 50_000),
+  minFreeDiskBytes = integer(process.env.ADDRESS_STORAGE_MIN_FREE_BYTES, DEFAULT_MIN_FREE_DISK_BYTES),
+  bytesPerRecord = integer(process.env.ADDRESS_STORAGE_BYTES_PER_RECORD, DEFAULT_STORAGE_BYTES_PER_RECORD),
+  maxRecords = integer(process.env.ADDRESS_SYNC_MAX_RECORDS_PER_SHARD, 200_000),
+  maxGrowthPerRun = integer(process.env.ADDRESS_SYNC_MAX_GROWTH_PER_RUN, 50_000),
   perLocality = integer(process.env.ADDRESS_SYNC_RECORDS_PER_LOCALITY, 64),
   maxShardsPerRun = integer(process.env.ADDRESS_SYNC_MAX_SHARDS_PER_RUN, !estimate && syncMode === 'daily' ? 1 : Number.MAX_SAFE_INTEGER),
   requireResidential = boolean(process.env.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
@@ -769,7 +774,8 @@ export const runAddressEtl = async ({
   importer: providedImporter,
   localizeRecords = localizeAddressRecords,
   stateStore: providedStateStore,
-  measureStorage = measureStorageBytes
+  measureStorage = measureStorageBytes,
+  freeDiskBytes = (path) => statfs(path).then((stats) => Number(stats.bavail) * Number(stats.bsize))
 } = {}) => {
   const checkpoint = () => signal?.throwIfAborted();
   const reportProgress = async (progress) => {
@@ -782,6 +788,22 @@ export const runAddressEtl = async ({
   const activeRun = !dryRun && !estimate;
   const database = providedDatabase;
   if (activeRun && !providedImporter && !database) throw new Error('PostgreSQL database is required for address synchronization');
+  // Storage covers cache files and the database; a low-disk host counts as full.
+  const measureUsage = async () => {
+    const [files, databaseBytes, free] = await Promise.all([
+      measureStorage([dataRoot]),
+      (async () => database
+        ? Number(await database.prepare('SELECT pg_database_size(current_database()) AS size').first('size')) : 0)()
+        .catch(() => 0),
+      Promise.resolve().then(() => freeDiskBytes(dataRoot)).catch(() => null)
+    ]);
+    const used = files + (Number.isSafeInteger(databaseBytes) ? databaseBytes : 0);
+    return Number.isFinite(free) && free < minFreeDiskBytes ? Math.max(used, hardLimitBytes) : used;
+  };
+  const enabledCountries = database && activeRun
+    ? Number(await database.prepare('SELECT COUNT(*) AS total FROM sync_country_policies WHERE enabled=1').first('total')
+      .catch(() => 0)) || Object.keys(ADDRESS_POLICY_DEFAULTS).length
+    : Object.keys(ADDRESS_POLICY_DEFAULTS).length;
   const runtimePolicy = database && activeRun
     ? await getRuntimePolicy(database)
     : { prepareConcurrency: Math.min(10, prepareConcurrency), cpuConcurrency: Math.min(4, cpuConcurrency) };
@@ -842,7 +864,7 @@ export const runAddressEtl = async ({
   if (syncMode === 'initial' && selected.length > 1) selected = await prioritizeCachedShards(selected, cacheDir);
   const cacheBytesBefore = await directorySize(cacheDir);
   let plannedCacheBytes = cacheBytesBefore;
-  const storageBytesBefore = await measureStorage([dataRoot]);
+  const storageBytesBefore = await measureUsage();
   let plannedStorageBytes = storageBytesBefore;
   let storageBudget = assertStorageBudget({ currentBytes: storageBytesBefore, softLimitBytes, hardLimitBytes });
   const selectedIds = new Set(selected.map((shard) => shard.id));
@@ -973,9 +995,13 @@ export const runAddressEtl = async ({
         });
         continue;
       }
-      const sourceTarget = integer(task.shard.maxRecords, maxRecords);
+      // One run grows by at most a bounded step and an equal per-country share of the remaining
+      // headroom, and never shrinks below what the source already published.
+      const previousCount = Math.max(0, Number(task.previous?.acceptedCount) || 0);
+      const shareRecords = Math.floor(Math.max(0, softLimitBytes - plannedStorageBytes) / (bytesPerRecord * enabledCountries));
+      const sourceTarget = Math.min(integer(task.shard.maxRecords, maxRecords), Math.max(1, previousCount + Math.min(shareRecords, maxGrowthPerRun)));
       const estimatedOutputBytes = sourceTarget * 2048;
-      const estimatedDatabaseBytes = sourceTarget * 2048;
+      const estimatedDatabaseBytes = Math.max(0, sourceTarget - previousCount) * bytesPerRecord;
       const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.rawVersion || task.discovery.version || ''}`;
       const downloadsGeofabrik = ['geofabrik', 'google-residential-enrichment'].includes(task.discovery.adapter);
       const temporarySourceBytes = downloadsGeofabrik && !plannedRawArtifacts.has(rawKey)
@@ -1035,7 +1061,7 @@ export const runAddressEtl = async ({
         return;
       }
       try {
-        const materializedStorageBytes = await measureStorage([dataRoot]);
+        const materializedStorageBytes = await measureUsage();
         storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
         await reportProgress({ phase: 'import', countryCode: task.shard.countryCode, sourceId: task.shard.id });
         console.log(`[address-sync] ${task.shard.countryCode} import`);
@@ -1046,7 +1072,7 @@ export const runAddressEtl = async ({
           signal
         });
         checkpoint();
-        const storageBytesAfterImport = await measureStorage([dataRoot]);
+        const storageBytesAfterImport = await measureUsage();
         storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
         const sourceComplete = task.materialized.sourceComplete !== false;
         Object.assign(task.report, {
@@ -1059,7 +1085,9 @@ export const runAddressEtl = async ({
             ...(imported.metrics || {}),
             ...(task.materialized.metrics || {}),
             checkpointStage: task.materialized.checkpointStage || null,
-            nextAttemptAt: task.materialized.nextAttemptAt || null
+            nextAttemptAt: task.materialized.nextAttemptAt || null,
+            growthCapped: task.report.targetCount < integer(task.shard.maxRecords, maxRecords)
+              && imported.acceptedCount >= task.report.targetCount
           },
           localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
           sourceComplete,
@@ -1073,7 +1101,7 @@ export const runAddressEtl = async ({
         if (sourceComplete) await pruneShardCache(cacheDir, task.shard, task.materialized.cacheFile || task.materialized.file);
         if (task.materialized.cacheFile) await rm(task.materialized.file, { force: true });
         plannedCacheBytes = await directorySize(cacheDir);
-        plannedStorageBytes = await measureStorage([dataRoot]);
+        plannedStorageBytes = await measureUsage();
         changed ||= !imported.skipped;
         if (!imported.skipped) changedCountries.add(task.shard.countryCode);
         reports.push(task.report);
@@ -1091,7 +1119,7 @@ export const runAddressEtl = async ({
             Number(task.discovery.sourceBytes || 0));
         }
       }
-      const currentStorage = await measureStorage([dataRoot]);
+      const currentStorage = await measureUsage();
       try {
         assertStorageBudget({
           currentBytes: currentStorage,
@@ -1111,7 +1139,8 @@ export const runAddressEtl = async ({
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
           const shardTarget = task.report.targetCount;
           const candidateLimit = Math.min(300_000, Math.max(shardTarget + 1_000, shardTarget * 3));
-          const candidatePerLocality = Math.max(perLocality, ...task.policy.levelLimits);
+          const candidatePerLocality = task.policy.levelLimits[1] === 0
+            ? candidateLimit : Math.max(perLocality, ...task.policy.levelLimits);
           const materialized = await adapters.materialize(task.shard, task.discovery, {
             cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
             maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1,

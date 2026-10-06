@@ -227,8 +227,12 @@ export interface AddressPublicationIssue {
   category?: string;
 }
 
+// Ordinary addresses may publish before the Chinese street name is translated (it stays in Latin script);
+// residential addresses and the recovery scan still require the full Chinese variant.
+export const chineseStreetFallbackAllowed = (propertyType: string): boolean => !['residential', 'apartment'].includes(propertyType);
+
 const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = true,
-  issues?: AddressPublicationIssue[]): VerifiedAddress | undefined => {
+  issues?: AddressPublicationIssue[], requireChineseStreet = false): VerifiedAddress | undefined => {
   row = projectAdministrativeRow(row);
   const reject = (stage: AddressPublicationIssue['stage'], code: string, details = {}): undefined => {
     issues?.push({ stage, code, ...details });
@@ -298,6 +302,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
       }
       if (language === 'zh-CN') {
         for (const field of translatedSemanticFields(row.country_code) as Array<keyof AddressComponents>) {
+          if (field === 'street' && !requireChineseStreet && chineseStreetFallbackAllowed(row.property_type)) continue;
           const original = String(componentVariants.native[field] || '');
           const value = String(translated[field] || '');
           if (original && /\p{L}/u.test(original) && !hanScript.test(value) && !unchangedIdentifier.test(original)) {
@@ -411,6 +416,9 @@ export const storedAddressPoolV2RowIsPublishable = (
   row: AddressPoolV2Row,
   now = new Date()
 ): boolean => Boolean(rowToAddress(row, now));
+
+export const storedAddressPoolV2RowIsFullyTranslated = (row: AddressPoolV2Row, now = new Date()): boolean =>
+  Boolean(rowToAddress(row, now, true, undefined, true));
 
 export const storedAddressPoolV2RowCanRecoverTranslations = (row: AddressPoolV2Row, now = new Date()): boolean =>
   row.country_code !== 'CN' && row.quality_score >= 0.7 && Boolean(rowToAddress(row, now, false));

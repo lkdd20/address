@@ -386,7 +386,7 @@ function CountryPolicyForm({ value, locale, busy, mutate, request }: {
   };
   return <form className="admin-form address-data-form" onSubmit={save}>
     <div className="policy-grid">
-      <label><span>{text.target}</span><input name="targetCount" type="number" min="1" max="2000000" required value={target} onChange={(event) => setTarget(event.target.value)} /></label>
+      <label><span>{text.target}</span><input name="targetCount" type="number" min="1" max="1000000000" required value={target} onChange={(event) => setTarget(event.target.value)} /></label>
       <label><span>{text.minPerNodeLabel}</span><input name="minPerNode" type="number" min="1" max="100" required value={minPerNode} onChange={(event) => setMinPerNode(event.target.value)} /></label>
       <label><span>{text.coverageGoal}</span><div className="percent-input"><input name="coveragePercent" type="number" min="0" max="100" step="1" required value={coveragePercent} onChange={(event) => setCoveragePercent(event.target.value)} /><b>%</b></div></label>
       <label><span>{text.level1MinLabel}</span><input name="level1Min" type="number" min="0" max="50000" required value={level1Min} onChange={(event) => setLevel1Min(event.target.value)} /></label>

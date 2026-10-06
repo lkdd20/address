@@ -274,7 +274,9 @@ export class CatalogReverseGeocoder {
     const missingRegion = !((components.admin1 || '').trim()) || regionLatin;
 
     if (missingCity) {
-      const city = this.nearestCity(latitude, longitude);
+      const sourceRegion = missingRegion ? null : this.regionByName(components.admin1);
+      const city = this.nearestFrom(this.cities, latitude, longitude, 1.5, sourceRegion
+        ? (entry) => entry.region_id == null || entry.region_id === sourceRegion.id : undefined);
       if (city) {
         filled.locality = city.native_name || city.name || '';
         filled.localityEn = city.name || '';

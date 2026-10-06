@@ -1,8 +1,11 @@
 import argparse
+import atexit
 import json
 import math
 import pathlib
+import shutil
 import sys
+import zipfile
 
 import duckdb
 
@@ -28,12 +31,21 @@ parser.add_argument("--building-assets-file", required=True)
 parser.add_argument("--bounds", type=float, nargs=4, required=True)
 parser.add_argument("--bounds-extra", type=float, nargs=4, action="append", default=[])
 parser.add_argument("--candidate-jsonl")
+parser.add_argument("--admin1")
+parser.add_argument("--structures-zip")
+parser.add_argument("--structures-provider", default="usa-structures")
 args = parser.parse_args()
 
 if not args.country.isalpha() or len(args.country) != 2:
     raise ValueError("country must be an ISO alpha-2 code")
 if args.max_records < 1 or args.per_locality < 1:
     raise ValueError("record limits must be positive")
+if args.admin1 is not None and (not args.admin1.isalnum() or len(args.admin1) > 8):
+    raise ValueError("admin1 must be a short alphanumeric code")
+if args.structures_zip and not pathlib.Path(args.structures_zip).is_file():
+    raise ValueError("structures-zip must be an existing ZIP archive")
+if not args.structures_provider.replace("-", "").isalnum():
+    raise ValueError("structures-provider must be a simple identifier")
 
 assets = json.loads(pathlib.Path(args.assets_file).read_text(encoding="utf-8"))
 if (not isinstance(assets, list)
@@ -104,6 +116,9 @@ def bbox_predicate(longitude_min_column, longitude_max_column, latitude_min_colu
     ) + ")"
 candidate_multiplier = 12 if args.candidate_jsonl else 4
 candidate_limit = min(max(args.max_records, args.max_records * candidate_multiplier), 250000)
+# A single-region partition classifies every address of the region before sampling.
+partition_mode = args.admin1 is not None and not args.candidate_jsonl
+admin1_predicate = f"AND address_levels[1].value = {sql_string(args.admin1)}" if args.admin1 else ""
 residential_grid_scale = 4
 
 if args.candidate_jsonl:
@@ -140,7 +155,8 @@ else:
       coalesce(address_levels[1].value, '') AS admin1,
       coalesce(
         nullif(trim(postal_city), ''),
-        CASE WHEN len(address_levels) >= 3 THEN address_levels[-2].value ELSE address_levels[-1].value END,
+        CASE WHEN len(address_levels) >= 3 THEN address_levels[-2].value
+          WHEN len(address_levels) = 2 THEN address_levels[-1].value ELSE '' END,
         ''
       ) AS locality,
       coalesce(postal_city, '') AS postal_city,
@@ -162,7 +178,8 @@ else:
       AND nullif(trim(street), '') IS NOT NULL
       AND (country <> 'CN' OR nullif(trim(number), '') IS NOT NULL)
       AND geometry IS NOT NULL
-    LIMIT {per_asset_limit}
+      {admin1_predicate}
+    {'' if partition_mode else f'LIMIT {per_asset_limit}'}
     )
 """)
     candidate_sources = "\nUNION ALL\n".join(asset_queries)
@@ -173,7 +190,7 @@ CREATE TEMP TABLE address_candidates AS
   )
   SELECT 0 AS priority, *
   FROM source
-  LIMIT {candidate_limit};
+  {'' if partition_mode else f'LIMIT {candidate_limit}'};
 """
 connection.execute(candidate_query)
 connection.execute("""
@@ -225,8 +242,48 @@ selected_building_assets = [
     )
 ]
 
-if not selected_building_assets or not residential_grids:
-    connection.execute(fallback_query)
+structures_directory = None
+if args.structures_zip:
+    structures_directory = output_path.parent / f"{output_path.name}.structures"
+    shutil.rmtree(structures_directory, ignore_errors=True)
+    atexit.register(shutil.rmtree, structures_directory, ignore_errors=True)
+    with zipfile.ZipFile(args.structures_zip) as archive:
+        for member in archive.namelist():
+            target = (structures_directory / member).resolve()
+            if structures_directory.resolve() not in target.parents:
+                raise ValueError("structures-zip contains an unsafe path")
+        archive.extractall(structures_directory)
+    geodatabases = sorted(path for path in structures_directory.rglob("*.gdb") if path.is_dir())
+    if not geodatabases:
+        raise ValueError("structures-zip does not contain a FileGDB")
+    structures_gdb = str(geodatabases[0])
+    # USA Structures: the nearest structure within ~30 m decides the use; only dwellings count as residential.
+    connection.execute(f"""
+CREATE TEMP TABLE structures AS
+SELECT UUID AS id, OCC_CLS AS occupancy, PRIM_OCC AS primary_occupancy, Shape::GEOMETRY AS geometry
+FROM st_read({sql_string(structures_gdb)})
+WHERE Shape IS NOT NULL;
+""")
+    classification_ctes = """
+  WITH nearby AS (
+    SELECT address_candidates.id AS address_id, structures.id AS building_id,
+      structures.occupancy, structures.primary_occupancy,
+      row_number() OVER (
+        PARTITION BY address_candidates.id
+        ORDER BY ST_Distance(address_candidates.geometry, structures.geometry), structures.id
+      ) AS building_rank
+    FROM address_candidates
+    JOIN structures ON ST_DWithin(address_candidates.geometry, structures.geometry, 0.0003)
+    WHERE address_candidates.match_level <> 'street'
+  ), classified AS (
+    SELECT address_id, building_id,
+      CASE WHEN primary_occupancy = 'Multi - Family Dwelling' THEN 'apartments' ELSE 'house' END AS building_class
+    FROM nearby
+    WHERE building_rank = 1 AND occupancy = 'Residential'
+      AND primary_occupancy IN ('Single Family Dwelling', 'Multi - Family Dwelling', 'Manufactured Home')
+  )"""
+elif not selected_building_assets or not residential_grids:
+    classification_ctes = None
 else:
     building_asset_list = parquet_input(selected_building_assets)
     residential_classes = "(" + ",".join(sql_string(value) for value in (
@@ -234,8 +291,7 @@ else:
         "dwelling_house", "ger", "house", "houseboat", "residential", "semi",
         "semidetached_house", "static_caravan", "stilt_house", "terrace", "trullo"
     )) + ")"
-    classified_query = f"""
-COPY (
+    classification_ctes = f"""
   WITH residential_buildings AS (
     SELECT DISTINCT buildings.id, buildings.class, buildings.geometry
     FROM read_parquet({building_asset_list}, union_by_name=true) AS buildings
@@ -264,13 +320,24 @@ COPY (
     SELECT address_id, building_id, building_class
     FROM matches
     WHERE building_rank = 1
-  ), residential_candidates AS (
+  )"""
+
+if classification_ctes is None:
+    connection.execute(fallback_query)
+else:
+    provider_column = f", {sql_string(args.structures_provider)} AS residential_source_provider" if args.structures_zip else ""
+    selection_order = ("CASE WHEN property_type = 'unknown' THEN 1 ELSE 0 END, residential_locality_rank, hash(id)"
+                       if partition_mode else
+                       "residential_priority, hash(coalesce(nullif(trim(admin1), ''), '*')), hash(id)")
+    classified_query = f"""
+COPY (
+{classification_ctes}, residential_candidates AS (
     SELECT
       address_candidates.*,
       CASE WHEN classified.building_class = 'apartments' THEN 'apartment'
         WHEN classified.building_id IS NOT NULL THEN 'residential' ELSE 'unknown' END AS property_type,
       coalesce(classified.building_id, '') AS residential_building_id,
-      coalesce(classified.building_class, '') AS residential_building_class,
+      coalesce(classified.building_class, '') AS residential_building_class{provider_column},
       row_number() OVER (
         PARTITION BY coalesce(nullif(trim(address_candidates.admin1), ''), '*')
         ORDER BY hash(address_candidates.id)
@@ -285,14 +352,14 @@ COPY (
     LEFT JOIN classified ON classified.address_id = address_candidates.id
   ), balanced AS (
     SELECT CASE WHEN residential_region_rank = 1 THEN 0 ELSE 1 END AS residential_priority,
-      * EXCLUDE (residential_region_rank, residential_locality_rank)
+      * EXCLUDE (residential_region_rank)
     FROM residential_candidates
     WHERE residential_region_rank = 1 OR residential_locality_rank <= {args.per_locality}
   )
   SELECT
-    balanced.* EXCLUDE (priority, residential_priority, geometry)
+    balanced.* EXCLUDE (priority, residential_priority, residential_locality_rank, geometry)
   FROM balanced
-  ORDER BY residential_priority, hash(coalesce(nullif(trim(admin1), ''), '*')), hash(id)
+  ORDER BY {selection_order}
   LIMIT {args.max_records}
 ) TO {output} (FORMAT JSON, ARRAY false);
 """

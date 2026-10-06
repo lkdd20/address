@@ -17,8 +17,9 @@ const localizedHanClause = (prefix = '') => {
   const unchangedIdentifier = (field) => `${value('native', field)} ~ '^[A-Z]{1,6}[-./ ]{0,1}[0-9]+([-./ ]{0,1}[A-Z0-9]+)*$'`;
   const translated = semanticAddressFields.filter((field) => field !== 'buildingName').map((field) => {
     const original = value('native', field);
+    const ordinaryStreet = field === 'street' ? ` OR ${prefix}property_type NOT IN ('residential','apartment')` : '';
     return `(${requiredCountryPredicate(field)} OR trim(${original})='' OR ${value('zh-CN', field)} ~ '[一-龥]'
-      OR NOT (${original} ~ '[^0-9[:punct:][:space:]]') OR ${unchangedIdentifier(field)})`;
+      OR NOT (${original} ~ '[^0-9[:punct:][:space:]]') OR ${unchangedIdentifier(field)}${ordinaryStreet})`;
   });
   return [anyHan, ...translated].join(' AND ');
 };
@@ -50,8 +51,45 @@ export const refreshAddressGenerationIndex = async (database, countryCode, { add
   const updatedAt = new Date().toISOString();
   const source = 'address_pool_runtime runtime';
   const eligible = addressPublicationSqlClause('runtime.');
+  // The current maxima come from the rank indexes once; inlined as a subquery the planner re-evaluated them per row.
+  const maximumRank = async (column, readiness) => Number(await database.prepare(`SELECT ${column} AS value FROM address_generation_index
+    WHERE country_code=? AND active=1${readiness} AND ${column} IS NOT NULL ORDER BY ${column} DESC LIMIT 1`).bind(scope).first('value') || 0);
+  const base = ids ? [await maximumRank('country_rank', ''), await maximumRank('residential_rank', ' AND residential_ready=1')] : [];
+  // A targeted refresh keeps existing ranks and appends new rows after the current maximum, so publishing a
+  // batch never renumbers the whole country; random selection tolerates the rare gap left by a deactivation.
+  const rankedRows = ids ? `
+      SELECT numbered.*,
+        COALESCE(numbered.current_country_rank, base.country_rank + numbered.country_seq) AS country_rank,
+        CASE WHEN numbered.ready=1 THEN COALESCE(numbered.current_residential_rank, base.residential_rank + numbered.residential_seq) END
+          AS residential_rank
+      FROM (
+        SELECT eligible_runtime.*,
+          ROW_NUMBER() OVER (PARTITION BY new_country ORDER BY random_key,id) AS country_seq,
+          CASE WHEN new_residential=1 THEN ROW_NUMBER() OVER (PARTITION BY new_residential ORDER BY random_key,id) END AS residential_seq
+        FROM (
+          SELECT runtime.*,
+            CASE WHEN runtime.property_type IN ('residential','apartment') AND runtime.residential_evidence=1 THEN 1 ELSE 0 END AS ready,
+            current_index.country_rank AS current_country_rank,current_index.residential_rank AS current_residential_rank,
+            CASE WHEN current_index.country_rank IS NULL THEN 1 ELSE 0 END AS new_country,
+            CASE WHEN runtime.property_type IN ('residential','apartment') AND runtime.residential_evidence=1
+              AND current_index.residential_rank IS NULL THEN 1 ELSE 0 END AS new_residential
+          FROM ${source}
+          LEFT JOIN address_generation_index current_index ON current_index.address_id=runtime.id AND current_index.active=1
+          WHERE runtime.country_code=? AND runtime.id IN (${placeholders}) AND runtime.active=1 AND ${eligible}
+        ) eligible_runtime
+      ) numbered,
+      (SELECT CAST(? AS bigint) AS country_rank,CAST(? AS bigint) AS residential_rank) base` : `
+      SELECT eligible_runtime.*,
+        ROW_NUMBER() OVER (ORDER BY random_key,id) AS country_rank,
+        CASE WHEN ready=1 THEN ROW_NUMBER() OVER (PARTITION BY ready ORDER BY random_key,id) END AS residential_rank
+      FROM (
+        SELECT runtime.*,
+          CASE WHEN runtime.property_type IN ('residential','apartment') AND runtime.residential_evidence=1 THEN 1 ELSE 0 END AS ready
+        FROM ${source}
+        WHERE runtime.country_code=? AND runtime.active=1 AND ${eligible}
+      ) eligible_runtime`;
   await database.batch([
-    database.prepare(`UPDATE address_generation_index SET active=0 WHERE country_code=?${ids ? ` AND address_id IN (${placeholders})` : ''}`).bind(scope, ...(ids || [])),
+    ...(ids ? [] : [database.prepare('UPDATE address_generation_index SET active=0 WHERE country_code=?').bind(scope)]),
     database.prepare(`
     INSERT INTO address_generation_index(
       address_id,country_code,admin1_key,admin1_code_key,locality_key,postal_locality_key,
@@ -66,16 +104,7 @@ export const refreshAddressGenerationIndex = async (database, countryCode, { add
         ${administrativeValueSql('admin1_code', 'ranked')},ranked.postcode)),
       ranked.random_key,ranked.country_rank,ranked.residential_rank,ranked.ready,
       1,concat_ws(':',ranked.dataset_id,ranked.dataset_version),?
-    FROM (
-      SELECT eligible_runtime.*,
-        ROW_NUMBER() OVER (ORDER BY random_key,id) AS country_rank,
-        CASE WHEN ready=1 THEN ROW_NUMBER() OVER (PARTITION BY ready ORDER BY random_key,id) END AS residential_rank
-      FROM (
-        SELECT runtime.*,
-          CASE WHEN runtime.property_type IN ('residential','apartment') AND runtime.residential_evidence=1 THEN 1 ELSE 0 END AS ready
-        FROM ${source}
-        WHERE runtime.country_code=?${ids ? ` AND runtime.id IN (${placeholders})` : ''} AND runtime.active=1 AND ${eligible}
-      ) eligible_runtime
+    FROM (${rankedRows}
     ) ranked
     ON CONFLICT(address_id) DO UPDATE SET
       country_code=excluded.country_code,admin1_key=excluded.admin1_key,admin1_code_key=excluded.admin1_code_key,
@@ -86,18 +115,12 @@ export const refreshAddressGenerationIndex = async (database, countryCode, { add
       search_text=excluded.search_text,random_key=excluded.random_key,country_rank=excluded.country_rank,
       residential_rank=excluded.residential_rank,residential_ready=excluded.residential_ready,
       active=1,source_revision=excluded.source_revision,updated_at=excluded.updated_at
-  `).bind(updatedAt, scope, ...(ids || [])),
+  `).bind(updatedAt, scope, ...(ids ? [...ids, ...base] : [])),
+    ...(ids ? [database.prepare(`UPDATE address_generation_index SET active=0
+      WHERE country_code=? AND address_id IN (${placeholders}) AND updated_at<>?`).bind(scope, ...ids, updatedAt)] : []),
     database.prepare(`INSERT INTO address_pool_revisions(kind,version) VALUES (?,?)
       ON CONFLICT(kind) DO UPDATE SET version=excluded.version`).bind(`generation:${scope}`, randomUUID())
   ]);
-  if (ids) await database.prepare(`UPDATE address_generation_index
-    SET country_rank=ranked.country_rank,residential_rank=ranked.residential_rank
-    FROM (SELECT id,ROW_NUMBER() OVER (ORDER BY random_key,id) AS country_rank,
-      CASE WHEN ready=1 THEN ROW_NUMBER() OVER (PARTITION BY ready ORDER BY random_key,id) END AS residential_rank
-      FROM (SELECT address_id AS id,random_key,residential_ready AS ready FROM address_generation_index
-        WHERE country_code=? AND active=1) indexed) ranked
-    WHERE address_generation_index.address_id=ranked.id AND (COALESCE(address_generation_index.country_rank,0)<>ranked.country_rank
-      OR COALESCE(address_generation_index.residential_rank,0)<>COALESCE(ranked.residential_rank,0))`).bind(scope).run();
   return generationIndexRowCountForCountry(database, scope);
 };
 

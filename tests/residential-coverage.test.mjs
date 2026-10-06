@@ -182,6 +182,7 @@ describe('published residential coverage', () => {
       runtime = await createSyncRuntime({
         database, stateDir, environment: { NODE_ENV: 'test', SYNC_ADMIN_TOKEN: 'fixture-token' }
       });
+      await runtime.startupReconciliation;
       expect(await database.prepare(`SELECT total_count,residential_count FROM admin_coverage_stats
         WHERE node_key='US'`).first()).toEqual({ total_count: expected, residential_count: expected });
       expect(await database.prepare(`SELECT COALESCE(SUM(total_count),0) AS total,COALESCE(SUM(address_count),0) AS residential
