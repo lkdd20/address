@@ -722,8 +722,10 @@ export class PostgresAddressImporter {
           ))`).bind(shard.source.id, shard.countryCode, datasetId, Number(authoritativeReplacement), datasetId),
         this.database.prepare(`UPDATE address_datasets SET status='retired',active_count=0
           WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')
-            AND id NOT IN (SELECT DISTINCT dataset_id FROM address_pool_evidence WHERE is_current=1)`)
-          .bind(shard.source.id, shard.countryCode, datasetId),
+            AND id NOT IN (SELECT DISTINCT evidence.dataset_id FROM address_pool_evidence evidence
+              JOIN address_datasets current ON current.id=evidence.dataset_id
+              WHERE evidence.is_current=1 AND current.source_id=? AND current.country_code=?)`)
+          .bind(shard.source.id, shard.countryCode, datasetId, shard.source.id, shard.countryCode),
         this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=?,source_complete=? WHERE id=?")
           .bind(localized.length, rejectedCount, Number(sourceComplete), datasetId),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id IN (
@@ -732,25 +734,14 @@ export class PostgresAddressImporter {
             SELECT DISTINCT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
             JOIN address_sources source ON source.id=dataset.source_id
-            WHERE evidence.is_current=1 AND dataset.status IN ('pending','active')
+            WHERE evidence.is_current=1 AND dataset.status IN ('pending','active') AND dataset.country_code=?
               AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
           ) retained ON retained.address_id=target.id
           WHERE target.country_code=? AND target.active=1 AND retained.address_id IS NULL
-        )`).bind(observedAt, shard.countryCode),
-        this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0
-          WHERE evidence_type='address_existence' AND address_id IN (
-            SELECT id FROM address_pool WHERE country_code=?
-          )`).bind(shard.countryCode),
+        )`).bind(observedAt, shard.countryCode, shard.countryCode),
+        // Rows retired by publication validation stay out of the pool even while their evidence is current.
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
-          WHERE country_code=?
-            AND (active=1 OR retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%')
-            AND id IN (
-            SELECT evidence.address_id FROM address_pool_evidence evidence
-            JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-            JOIN address_sources source ON source.id=dataset.source_id
-            WHERE evidence.is_current=1 AND dataset.status='active'
-              AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
-          )`).bind(observedAt, shard.countryCode)
+          WHERE country_code=? AND active=1 AND retired_at LIKE 'publication-validation:%'`).bind(observedAt, shard.countryCode)
       ]);
       checkpoint();
       const primaryEvidenceRows = (await this.database.prepare(`SELECT candidate.id,candidate.address_id
@@ -763,18 +754,28 @@ export class PostgresAddressImporter {
           AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
         ORDER BY candidate.address_id,dataset.imported_at DESC,candidate.id`).bind(shard.countryCode).all()).results;
       checkpoint();
-      const primaryEvidenceIds = [];
+      const primaryEvidenceIds = new Set();
       const primaryAddresses = new Set();
       for (const row of primaryEvidenceRows) {
         if (primaryAddresses.has(row.address_id)) continue;
         primaryAddresses.add(row.address_id);
-        primaryEvidenceIds.push(row.id);
+        primaryEvidenceIds.add(row.id);
       }
-      for (let offset = 0; offset < primaryEvidenceIds.length; offset += batchSize) {
-        checkpoint();
-        const ids = primaryEvidenceIds.slice(offset, offset + batchSize);
-        await this.database.prepare(`UPDATE address_pool_evidence SET is_primary=1
-          WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+      // Only flags that change are written; rewriting every evidence row of the country made large imports time out.
+      const currentPrimaryIds = new Set((await this.database.prepare(`SELECT evidence.id FROM address_pool_evidence evidence
+        JOIN address_pool address ON address.id=evidence.address_id
+        WHERE address.country_code=? AND evidence.evidence_type='address_existence' AND evidence.is_primary=1`)
+        .bind(shard.countryCode).all()).results.map((row) => row.id));
+      for (const [flag, changed] of [
+        [0, [...currentPrimaryIds].filter((id) => !primaryEvidenceIds.has(id))],
+        [1, [...primaryEvidenceIds].filter((id) => !currentPrimaryIds.has(id))]
+      ]) {
+        for (let offset = 0; offset < changed.length; offset += batchSize) {
+          checkpoint();
+          const ids = changed.slice(offset, offset + batchSize);
+          await this.database.prepare(`UPDATE address_pool_evidence SET is_primary=?
+            WHERE id IN (${ids.map(() => '?').join(',')})`).bind(flag, ...ids).run();
+        }
       }
       checkpoint();
       const countryCandidates = (await this.database.prepare(`SELECT id,country_code,admin1,locality,postal_locality,district,
@@ -783,15 +784,15 @@ export class PostgresAddressImporter {
           SELECT evidence.address_id FROM address_pool_evidence evidence
           JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
           JOIN address_sources source ON source.id=dataset.source_id
-          WHERE evidence.is_current=1 AND dataset.status='active'
+          WHERE evidence.is_current=1 AND dataset.status='active' AND dataset.country_code=?
             AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
-        ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode).all()).results;
+        ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode, shard.countryCode).all()).results;
       checkpoint();
       for (let offset = 0; offset < countryCandidates.length; offset += batchSize) {
         checkpoint();
         const ids = countryCandidates.slice(offset, offset + batchSize).map(({ id }) => String(id));
         await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
-          WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%')
+          WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%') AND (active=0 OR retired_at IS NOT NULL)
             AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
       }
       const activeDatasets = (await this.database.prepare(`SELECT id FROM address_datasets

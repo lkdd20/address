@@ -452,7 +452,13 @@ const centroid = (geometry) => {
   return count ? [longitude / count, latitude / count] : null;
 };
 
-const normalizeTaiwanHierarchy = (levels, postalCity, fallbackAdmin1, fallbackLocality, fallbackDistrict) => {
+// Taiwan's official names write 臺 (臺北市, 臺東縣, 臺西鄉); sources also use the common variant 台.
+export const taiwanOfficialName = (value) => clean(value).replace(/^台/u, '臺');
+const normalizeTaiwanHierarchy = (...args) => {
+  const hierarchy = taiwanHierarchy(...args);
+  return { ...hierarchy, admin1: taiwanOfficialName(hierarchy.admin1), locality: taiwanOfficialName(hierarchy.locality) };
+};
+const taiwanHierarchy = (levels, postalCity, fallbackAdmin1, fallbackLocality, fallbackDistrict) => {
   const values = [...new Set(levels.map((value) => clean(value)).filter(Boolean))];
   const preferredAdmin1 = clean(postalCity);
   const adminIndex = preferredAdmin1 && /[縣市]$/u.test(preferredAdmin1)

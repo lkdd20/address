@@ -17,7 +17,7 @@ import {
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
 import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
-import { componentLooksLocalized, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
+import { componentLooksLocalized, implausibleChineseTranslation, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
 
@@ -309,6 +309,14 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
             return reject('translation', 'incomplete_target_translation', { language, field });
           }
         }
+        for (const field of semanticAddressFields as Array<keyof AddressComponents>) {
+          const value = String(translated[field] || '');
+          // An ordinary address may still carry its untranslated street; only Chinese renderings are judged.
+          if (field === 'street' && !hanScript.test(value)) continue;
+          if (implausibleChineseTranslation(componentVariants.native[field], value)) {
+            return reject('translation', 'implausible_target_translation', { language, field });
+          }
+        }
       }
       if (language === 'zh-CN' && !hasHanSemanticContent(translated)) return reject('translation', 'missing_target_script', { language });
     }
@@ -507,7 +515,8 @@ const lookupCityZhName = async (db: Database, country: CountryCode, locality: st
         ${regionId ? 'AND region_id=?' : ''} ORDER BY id LIMIT 2`)
       .bind(country, locality, locality, ...(regionId ? [regionId] : [])).all<{ zh_name: string }>()).results;
     const row = matches.length === 1 ? matches[0] : null;
-    zhName = typeof row?.zh_name === 'string' && han.test(row.zh_name) ? row.zh_name : null;
+    zhName = typeof row?.zh_name === 'string' && han.test(row.zh_name) && !implausibleChineseTranslation(locality, row.zh_name)
+      ? row.zh_name : null;
   } catch {
     zhName = null;
   }
@@ -557,7 +566,10 @@ export const enrichPickedAddress = async (db: Database, address: VerifiedAddress
       };
       assign('native', names.native_name || names.name);
       assign('en', names.name);
-      assign('zh-CN', names.zh_name || names.native_name || names.name);
+      // Only a Chinese catalog name replaces the stored translation; a missing or literal one (Bursa → 囊) keeps it.
+      if (han.test(names.zh_name || '') && !implausibleChineseTranslation(names.native_name || names.name, names.zh_name)) {
+        assign('zh-CN', names.zh_name);
+      }
     } else if (!addressContracts[address.countryCode]?.required.includes('admin1')
       && (samePlaceKey(native.admin1) === samePlaceKey(native.locality)
       || samePlaceKey(native.admin1) === samePlaceKey(native.postalLocality))

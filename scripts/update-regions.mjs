@@ -7,6 +7,9 @@ const countryCodes = new Set([
   'CN', 'TH', 'PH', 'VN', 'TR', 'SA', 'IN', 'AU', 'BR', 'NG', 'ZA'
 ]);
 
+// Upstream Chinese names that are literal translations rather than place names.
+const chineseNameCorrections = new Map([['TR:16', '布尔萨']]);
+
 const response = await fetch(sourceUrl);
 if (!response.ok) throw new Error(`Region source returned ${response.status}`);
 const states = await response.json();
@@ -16,7 +19,7 @@ const regions = states
     countryCode: state.country_code,
     name: state.name,
     native: state.native || state.name,
-    zh: state.translations?.['zh-CN'] || state.name,
+    zh: chineseNameCorrections.get(`${state.country_code}:${state.iso2}`) || state.translations?.['zh-CN'] || state.name,
     code: state.iso2
   }))
   .concat(hongKongRegions.map((region) => ({

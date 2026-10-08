@@ -141,7 +141,7 @@ docker compose up -d
 docker compose ps
 ```
 
-数据库迁移会在 `migrate` 服务中自动完成。生产蓝绿激活以 `--skip-coverage` 运行迁移，生成索引与覆盖统计由同步服务启动后在后台重建。激活在服务器端脱离会话运行并记录到 `runtime/deploy/activation-<release>.log`（退出码写入 `.exit`），SSH 断开不会中断切换。若需要固定版本，将 `.env` 中的 `ADDRESS_IMAGE` 设为具体标签。
+数据库迁移会在 `migrate` 服务中自动完成。生产蓝绿激活以 `--skip-coverage` 运行迁移，生成索引与覆盖统计由同步服务启动后在后台重建。激活在服务器端脱离会话运行并记录到 `runtime/deploy/activation-<release>.log`（退出码写入 `.exit`），SSH 断开不会中断切换。迁移仅在行政目录修正实际改动了香港地址时才重建香港生成索引并复核。激活成功后，自动删除不在保留版本内且没有容器使用的旧镜像，以及 24 小时前的构建缓存。若需要固定版本，将 `.env` 中的 `ADDRESS_IMAGE` 设为具体标签。
 
 ## 备份与恢复
 

@@ -89,6 +89,27 @@ describe('Hong Kong administrative catalog', () => {
     });
   });
 
+  it('corrects literal catalog Chinese names without reporting a Hong Kong change', async () => {
+    const database = openTestDatabase(':memory:');
+    try {
+      await database.batch([
+        database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+          VALUES (10,'TR','16','Bursa','Bursa','囊','province',NULL,'/10/'),(11,'AU','QLD','Queensland','Queensland','昆士兰州','state',NULL,'/11/')`),
+        database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+          VALUES (12,'AU',11,'Emerald','Emerald','翠','city',NULL),(13,'AU',11,'Brisbane','Brisbane','布里斯班','city',NULL),
+            (14,'JP',NULL,'Tsu','津','津','city',NULL)`)
+      ]);
+      await applyAdministrativeCatalogOverrides(database);
+      expect(await applyAdministrativeCatalogOverrides(database)).toBe(false);
+      expect(await database.prepare('SELECT zh_name FROM catalog_regions WHERE id=10').first('zh_name')).toBe('布尔萨');
+      expect(await database.prepare('SELECT zh_name FROM catalog_regions WHERE id=11').first('zh_name')).toBe('昆士兰州');
+      expect((await database.prepare('SELECT id,zh_name FROM catalog_cities WHERE id IN (12,13,14) ORDER BY id').all()).results)
+        .toEqual([{ id: 12, zh_name: 'Emerald' }, { id: 13, zh_name: '布里斯班' }, { id: 14, zh_name: '津' }]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it('replaces a legacy catalog and scopes filters and coverage to the official hierarchy', async () => {
     const database = openTestDatabase(':memory:');
     const now = new Date().toISOString();

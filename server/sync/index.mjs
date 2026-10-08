@@ -17,9 +17,12 @@ import { refreshIndexedResidentialCoverage } from '../database/residential-cover
 import { refreshAddressCoverage } from '../control/coverage';
 import { runPostcodeInference } from './postcode-inference.mjs';
 import { repairChineseAddressStrings } from './chinese-address-repair.mjs';
+import { repairTaiwanOfficialNames } from './taiwan-name-repair.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
 import { ChinaDataService } from '../china/service';
+
+const POOL_CLOSE_GRACE_MS = 10_000;
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -122,7 +125,9 @@ export const createSyncRuntime = async ({
   await ensureAddressPolicies(database);
   // A full projection check scans every published address; it must not delay the health endpoint.
   // Each startup step is independent: one timeout must not skip the others.
-  const startupStep = (name, task) => task().catch((error) => {
+  let closing = false;
+  // Startup checks stop at the next step once the service is closing instead of holding database connections.
+  const startupStep = (name, task) => (closing ? Promise.resolve() : task()).catch((error) => {
     console.error(`[address-sync] startup ${name} failed`, error?.code || error?.message || error);
   });
   const startupReconciliation = (async () => {
@@ -144,6 +149,10 @@ export const createSyncRuntime = async ({
         const summary = await repairChineseAddressStrings({ database, countryCode });
         if (summary.repaired) console.log(JSON.stringify({ event: 'chinese_address_repair', ...summary }));
       }
+    });
+    await startupStep('taiwan official names', async () => {
+      const summary = await repairTaiwanOfficialNames({ database });
+      if (summary.renamed || summary.duplicates) console.log(JSON.stringify({ event: 'taiwan_official_name_repair', ...summary }));
     });
     await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
     await startupStep('generation index refresh', () => refreshStaleAddressGenerationIndexes(database));
@@ -259,6 +268,7 @@ export const createSyncRuntime = async ({
       };
     },
     close: async () => {
+      closing = true;
       stopScheduler?.();
       stopScheduler = undefined;
       stopQueue = undefined;
@@ -268,7 +278,9 @@ export const createSyncRuntime = async ({
       await queueStop;
       await publicationValidationWorker.stop();
       testDatabase?.close();
-      await postgresPool?.end();
+      // A long consistency query still holding a client must not keep the service from stopping; the process exit
+      // closes that connection and PostgreSQL rolls back its work.
+      if (postgresPool) await Promise.race([postgresPool.end(), new Promise((done) => setTimeout(done, POOL_CLOSE_GRACE_MS).unref())]);
     }
   };
 };
@@ -320,9 +332,15 @@ if (invokedDirectly) {
     console.log('Translation backfill worker enabled');
   }
   const shutdown = async () => {
-    await stopBackfill();
-    await new Promise((done) => server.close(done));
-    await runtime.close();
+    try {
+      await stopBackfill();
+      await new Promise((done) => server.close(done));
+      await runtime.close();
+      process.exit(0);
+    } catch (error) {
+      console.error('[address-sync] shutdown failed', error);
+      process.exit(1);
+    }
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());

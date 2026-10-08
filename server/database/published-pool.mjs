@@ -1,9 +1,9 @@
 import { storedAddressPoolV2RowIsPublishable } from '../api/repositories/address-pool-v2';
 import { countries } from '../../src/domain/countries';
 import { refreshResidentialCoverage } from './residential-coverage.mjs';
-import { addressPublicationSqlClause, refreshAddressGenerationIndex } from './generation-index.mjs';
+import { activePoolCountries, addressPublicationSqlClause, refreshAddressGenerationIndex } from './generation-index.mjs';
 
-const PUBLICATION_VALIDATION_REVISION = 'address-reader-v4-index-consistency';
+const PUBLICATION_VALIDATION_REVISION = 'address-reader-v5-implausible-chinese';
 
 const requestedCountries = (countryCodes) => [...new Set((countryCodes || [])
   .map((value) => String(value || '').toUpperCase()).filter((value) => /^[A-Z]{2}$/u.test(value)))];
@@ -27,7 +27,7 @@ const retireInvalidRows = async (database, rows, checkedAt) => {
       WHERE id IN (${batch.map(() => '?').join(',')})`)
       .bind(`publication-validation:${PUBLICATION_VALIDATION_REVISION}:${checkedAt}`, ...batch).run();
   }
-  return invalidIds.length;
+  return invalidIds;
 };
 
 const retireInvalidCountryRows = async (database, countryCode, checkedAt, limit = 2000) => {
@@ -37,7 +37,7 @@ const retireInvalidCountryRows = async (database, countryCode, checkedAt, limit 
     const rows = (await database.prepare(`SELECT * FROM address_pool_runtime
       WHERE country_code=? AND id>? ORDER BY id LIMIT ?`).bind(countryCode, lastId, limit).all()).results;
     if (!rows.length) return retired;
-    retired += await retireInvalidRows(database, rows, checkedAt);
+    retired += (await retireInvalidRows(database, rows, checkedAt)).length;
     lastId = rows.at(-1).id;
   }
 };
@@ -68,33 +68,39 @@ export const refreshCountryCounts = async (database, countryCode, checkedAt, { u
   await database.batch(statements);
 };
 
+// Each country is reconciled on its own so one large country cannot push a whole-pool scan past the statement timeout.
 export const reconcilePublishedPoolProjections = async (database, checkedAt = new Date().toISOString()) => {
-  const rows = (await database.prepare(`WITH published AS (
-      SELECT country_code,COUNT(DISTINCT id) AS total,
-        COUNT(DISTINCT id) FILTER (WHERE property_type IN ('residential','apartment') AND residential_evidence=1) AS residential
-      FROM address_pool_runtime WHERE country_code<>'CN' AND ${addressPublicationSqlClause()} GROUP BY country_code
-    ), indexed AS (
-      SELECT country_code,COUNT(*) AS total,SUM(residential_ready) AS residential
-      FROM address_generation_index WHERE active=1 GROUP BY country_code
-    ) SELECT policy.country_code FROM sync_country_policies policy
-      LEFT JOIN published ON published.country_code=policy.country_code
-      LEFT JOIN indexed ON indexed.country_code=policy.country_code
-      LEFT JOIN admin_coverage_stats coverage ON coverage.node_key=policy.country_code AND coverage.level=0
-      LEFT JOIN sync_country_state state ON state.country_code=policy.country_code
-    WHERE policy.country_code<>'CN' AND (
-      COALESCE(published.total,0)<>COALESCE(indexed.total,0)
-      OR COALESCE(published.residential,0)<>COALESCE(indexed.residential,0)
-      OR COALESCE(published.total,0)<>COALESCE(coverage.total_count,0)
-      OR COALESCE(published.residential,0)<>COALESCE(coverage.residential_count,0)
-      OR COALESCE(published.total,0)<>COALESCE(state.address_count,0)
-      OR COALESCE(published.residential,0)<>COALESCE(state.residential_count,0)
-    ) ORDER BY policy.country_code`).all()).results;
-  for (const { country_code: countryCode } of rows) {
-    await refreshAddressGenerationIndex(database, countryCode);
-    await refreshResidentialCoverage(database, countryCode, checkedAt);
-    await refreshCountryCounts(database, countryCode, checkedAt);
+  const countries = (await database.prepare(`SELECT country_code FROM sync_country_policies
+    WHERE country_code<>'CN' ORDER BY country_code`).all()).results;
+  const populated = await activePoolCountries(database);
+  const reconciled = [];
+  const failed = [];
+  for (const { country_code: countryCode } of countries) {
+    try {
+      const published = !populated.has(countryCode) ? null : await database.prepare(`SELECT COUNT(DISTINCT id) AS total,
+          COUNT(DISTINCT id) FILTER (WHERE property_type IN ('residential','apartment') AND residential_evidence=1) AS residential
+        FROM address_pool_runtime WHERE country_code=? AND ${addressPublicationSqlClause()}`).bind(countryCode).first();
+      const indexed = await database.prepare(`SELECT COUNT(*) AS total,SUM(residential_ready) AS residential
+        FROM address_generation_index WHERE country_code=? AND active=1`).bind(countryCode).first();
+      const coverage = await database.prepare(`SELECT total_count,residential_count FROM admin_coverage_stats
+        WHERE node_key=? AND level=0`).bind(countryCode).first();
+      const state = await database.prepare(`SELECT address_count,residential_count FROM sync_country_state
+        WHERE country_code=?`).bind(countryCode).first();
+      const total = Number(published?.total || 0);
+      const residential = Number(published?.residential || 0);
+      if ([indexed?.total, coverage?.total_count, state?.address_count].every((value) => Number(value || 0) === total)
+        && [indexed?.residential, coverage?.residential_count, state?.residential_count]
+          .every((value) => Number(value || 0) === residential)) continue;
+      await refreshAddressGenerationIndex(database, countryCode);
+      await refreshResidentialCoverage(database, countryCode, checkedAt);
+      await refreshCountryCounts(database, countryCode, checkedAt);
+      reconciled.push(countryCode);
+    } catch (error) {
+      failed.push(`${countryCode}:${error?.code || error?.message || error}`);
+    }
   }
-  return rows.map((row) => row.country_code);
+  if (failed.length) throw Object.assign(new Error(`Projection reconciliation failed for ${failed.join(', ')}`), { reconciled });
+  return reconciled;
 };
 
 export const reconcilePublishedPool = async (database, countryCodes, checkedAt = new Date().toISOString()) => {
@@ -127,7 +133,7 @@ export const reconcilePublishedPool = async (database, countryCodes, checkedAt =
           const batch = activatedIds.slice(offset, offset + 500);
           const rows = (await transaction.prepare(`SELECT * FROM address_pool_runtime
             WHERE id IN (${batch.map(() => '?').join(',')})`).bind(...batch).all()).results;
-          retired += await retireInvalidRows(transaction, rows, checkedAt);
+          retired += (await retireInvalidRows(transaction, rows, checkedAt)).length;
         }
       }
       const datasets = (await transaction.prepare(`SELECT id FROM address_datasets
@@ -185,18 +191,19 @@ export const validatePublishedPoolBatch = async (
   const rows = (await database.prepare(`SELECT * FROM address_pool_runtime
     WHERE country_code=? AND id>? ORDER BY id LIMIT ?`).bind(countryCode, lastId, limit).all()).results;
   if (!rows.length) {
-    await refreshAddressGenerationIndex(database, countryCode);
+    // Retired rows already left the index batch by batch, so a finished country only needs its counts refreshed.
     await refreshResidentialCoverage(database, countryCode, checkedAt);
     await refreshCountryCounts(database, countryCode, checkedAt);
     await database.prepare(`UPDATE publication_validation_state SET country_code=?,last_id='',updated_at=? WHERE id=1`)
       .bind(countryCode, checkedAt).run();
     return { completed: false, countryCode, countryCompleted: true, scanned: 0, retired: 0 };
   }
-  const retired = await database.transaction(async (transaction) => {
-    const retired = await retireInvalidRows(transaction, rows, checkedAt);
+  const retiredIds = await database.transaction(async (transaction) => {
+    const retiredIds = await retireInvalidRows(transaction, rows, checkedAt);
     await transaction.prepare(`UPDATE publication_validation_state SET country_code=?,last_id=?,updated_at=? WHERE id=1`)
       .bind(countryCode, rows.at(-1).id, checkedAt).run();
-    return retired;
+    return retiredIds;
   });
-  return { completed: false, countryCode, scanned: rows.length, retired };
+  if (retiredIds.length) await refreshAddressGenerationIndex(database, countryCode, { addressIds: retiredIds });
+  return { completed: false, countryCode, scanned: rows.length, retired: retiredIds.length };
 };

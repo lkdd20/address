@@ -1,6 +1,26 @@
 import { hongKongDistricts, hongKongRegions } from '../../src/domain/hk-administrative-divisions.mjs';
 import { catalogHierarchyPaths, correctSpanishProvinceParents } from './catalog-hierarchy.mjs';
 import type { PostgresDatabase } from './postgres.mjs';
+import { implausibleChineseTranslation } from '../../src/domain/address-localization.mjs';
+
+const chineseRegionCorrections = [{ countryCode: 'TR', code: '16', zh: '布尔萨' }];
+// Upstream catalog Chinese names that are literal translations (Emerald → 翠) fall back to the source name, as for
+// entries without a translation, so address translation supplies the Chinese name instead.
+const repairCatalogChineseNames = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
+  for (const { countryCode, code, zh } of chineseRegionCorrections) {
+    await transaction.prepare("UPDATE catalog_regions SET zh_name=? WHERE country_code=? AND code=? AND zh_name<>?")
+      .bind(zh, countryCode, code, zh).run();
+  }
+  for (const table of ['catalog_regions', 'catalog_cities']) {
+    const rows = (await transaction.prepare(`SELECT id,name,native_name,zh_name FROM ${table}
+      WHERE country_code<>'CN' AND zh_name<>''`).all<{ id: number; name: string; native_name: string; zh_name: string }>()).results || [];
+    const implausible = rows.filter((row) => !/\p{Script=Han}/u.test(row.native_name || '')
+      && implausibleChineseTranslation(row.native_name || row.name, row.zh_name));
+    for (const row of implausible) {
+      await transaction.prepare(`UPDATE ${table} SET zh_name=? WHERE id=?`).bind(row.native_name || row.name, row.id).run();
+    }
+  }
+};
 
 const canonicalHongKongCatalog = async (database: PostgresDatabase): Promise<boolean> => {
   const [regions, districts, postcodes] = await Promise.all([
@@ -51,6 +71,7 @@ export const applyAdministrativeCatalogOverrides = async (database: PostgresData
         OR component_variants_json LIKE '%中西區 &%' OR address_variants_json LIKE '%中西區 &%'
       )`).run();
     changed ||= Number(cleanup.meta?.changes || 0) > 0;
+    await repairCatalogChineseNames(transaction);
     if (catalogIsCanonical) return;
     changed = true;
     await transaction.prepare("DELETE FROM residential_coverage WHERE country_code='HK'").run();

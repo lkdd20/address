@@ -2140,7 +2140,8 @@ describe('source record normalization', () => {
   it.each([
     ['JP', ['東京都', '杉並区', '永福'], '東京都', '杉並区', '永福'],
     ['MX', ['México', 'Texcoco', 'San Mateo'], 'México', 'Texcoco', 'San Mateo'],
-    ['TW', ['臺北市', '中正區', '幸福里'], '臺北市', '中正區', '幸福里']
+    ['TW', ['臺北市', '中正區', '幸福里'], '臺北市', '中正區', '幸福里'],
+    ['TW', ['台東縣', '台東市', '中正里'], '臺東縣', '臺東市', '中正里']
   ])('maps Overture address levels into complete %s administration', (countryCode, addressLevels, admin1, locality, district) => {
     const record = normalizeSourceRecord({
       id: `overture-${countryCode}`, country: countryCode, address_levels: addressLevels,
@@ -2879,12 +2880,18 @@ describe('built-in ETL planning and publishing', () => {
       houseNumber: '1', street: language === 'zh-CN' ? '市场街' : 'Market Street',
       admin1: language === 'zh-CN' ? '宾夕法尼亚州' : 'Pennsylvania', postcode: '19103'
     }])));
+    await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,residential_ready,random_key,updated_at)
+      SELECT id,country_code,1,1,'2026-08-16' FROM address_pool WHERE country_code='US'`).run();
+    expect(await database.prepare(`SELECT COUNT(*) count FROM address_generation_index
+      WHERE country_code='US' AND active=1`).first('count')).toBe(1);
     await database.prepare(`UPDATE address_pool SET locality='',postal_locality='',component_variants_json=?,expires_at=NULL
       WHERE country_code='US'`).bind(invalidVariants).run();
     await expect(validatePublishedPoolBatch(database, {
       checkedAt: '2026-08-17T00:00:00.000Z', limit: 100
     })).resolves.toMatchObject({ countryCode: 'US', scanned: 1, retired: 1, completed: false });
     expect(await database.prepare('SELECT COUNT(*) count FROM address_pool_runtime').first('count')).toBe(0);
+    expect(await database.prepare(`SELECT COUNT(*) count FROM address_generation_index
+      WHERE country_code='US' AND active=1`).first('count')).toBe(0);
     await expect(validatePublishedPoolBatch(database, {
       checkedAt: '2026-08-17T00:01:00.000Z', limit: 100
     })).resolves.toMatchObject({ countryCode: 'US', countryCompleted: true, scanned: 0 });

@@ -169,6 +169,7 @@ export const addressCanonicalKey = (countryCode, components = {}, matchLevel = '
   ].map((value) => clean(value).toLocaleLowerCase('und')).join('\u001f');
 };
 
+const corruptedText = /�|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}][?？]|[?？][\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 export const validateAddressQuality = ({ countryCode, components, latitude, longitude, matchLevel = 'premise' } = {}) => {
   const country = clean(countryCode).toUpperCase();
   const policy = policies[country];
@@ -197,6 +198,9 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   if (clean(normalizedComponents.buildingName) && /^\d+[\p{L}\p{N}./-]*$/u.test(clean(normalizedComponents.buildingName))) {
     reasons.push('numeric_building_name');
   }
+  // A "?" or U+FFFD next to CJK text is a character the source lost in an encoding step (e.g. ?榔路 for 檳榔路).
+  if (['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit']
+    .some((field) => corruptedText.test(String(normalizedComponents[field] ?? '')))) reasons.push('corrupted_text');
   addDuplicateReasons(country, normalizedComponents, reasons);
   addCountryReasons(country, normalizedComponents, reasons);
   addCoordinateReasons(country, latitude, longitude, reasons);

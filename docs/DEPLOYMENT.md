@@ -141,7 +141,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Migrations run automatically in the `migrate` service. Blue/green production activation runs it with `--skip-coverage`; the sync service then rebuilds the generation index and coverage statistics in the background after it starts. Activation runs detached on the server and logs to `runtime/deploy/activation-<release>.log` (exit status in `.exit`), so a dropped SSH session cannot interrupt a cutover. To pin a version, set `ADDRESS_IMAGE` in `.env` to a specific tag.
+Migrations run automatically in the `migrate` service. Blue/green production activation runs it with `--skip-coverage`; the sync service then rebuilds the generation index and coverage statistics in the background after it starts. Activation runs detached on the server and logs to `runtime/deploy/activation-<release>.log` (exit status in `.exit`), so a dropped SSH session cannot interrupt a cutover. Migration reindexes and revalidates Hong Kong only when the administrative catalog overrides changed its rows. After a successful activation, images of releases outside the retained set that no container uses, and build cache older than 24 hours, are removed. To pin a version, set `ADDRESS_IMAGE` in `.env` to a specific tag.
 
 ## Backup and restore
 

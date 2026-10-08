@@ -31,15 +31,27 @@ describe('migration coverage recovery', () => {
     vi.restoreAllMocks();
   });
 
-  it('refreshes every relevant country even when this attempt retired no records', async () => {
+  it('reindexes and revalidates Hong Kong when the catalog overrides changed it', async () => {
+    mocks.overrides.mockResolvedValueOnce(true);
     mocks.reconcile.mockResolvedValueOnce([{ countryCode: 'HK', before: 2, after: 2 }]);
     await import('../server/database/migrate.ts');
     expect(mocks.regions).toHaveBeenCalledOnce();
-    expect(mocks.projection.mock.calls.map(([, country]) => country)).toEqual(['HK', 'SG']);
+    expect(mocks.projection.mock.calls.map(([, country]) => country)).toEqual(['HK']);
     expect(mocks.reconcile).toHaveBeenCalledWith(expect.anything(), ['HK']);
     expect(mocks.prepare).not.toHaveBeenCalled();
     expect(mocks.admin).toHaveBeenCalledWith(expect.anything(), { useGenerationIndex: true });
     expect(mocks.regions.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.reconcile.mock.invocationCallOrder[0]);
+    expect(mocks.close).toHaveBeenCalledOnce();
+  });
+
+  it('skips the Hong Kong reindex and revalidation when the catalog overrides changed nothing', async () => {
+    process.argv.push('--skip-coverage');
+    mocks.overrides.mockResolvedValueOnce(false);
+    await import('../server/database/migrate.ts');
+    expect(mocks.catalog).toHaveBeenCalledOnce();
+    expect(mocks.projection).not.toHaveBeenCalled();
+    expect(mocks.reconcile).not.toHaveBeenCalled();
+    expect(mocks.index).not.toHaveBeenCalled();
     expect(mocks.close).toHaveBeenCalledOnce();
   });
 

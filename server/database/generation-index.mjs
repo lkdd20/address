@@ -124,38 +124,40 @@ export const refreshAddressGenerationIndex = async (database, countryCode, { add
   return generationIndexRowCountForCountry(database, scope);
 };
 
+export const activePoolCountries = async (database) => new Set((await database.prepare(
+  'SELECT DISTINCT country_code FROM address_pool WHERE active=1').all()).results.map((row) => row.country_code));
+
+// Each country is checked on its own so one large country cannot push a whole-pool scan past the statement timeout.
 export const refreshStaleAddressGenerationIndexes = async (database) => {
   const eligible = addressPublicationSqlClause('runtime.');
-    const rows = (await database.prepare(`WITH source_counts AS (
-      SELECT runtime.country_code,COUNT(DISTINCT runtime.id) AS source_count,
-        COUNT(DISTINCT generation.address_id) AS matched_index_count
-      FROM address_pool_runtime runtime
-      LEFT JOIN address_generation_index generation ON generation.address_id=runtime.id
-        AND generation.country_code=runtime.country_code AND generation.active=1
-      WHERE runtime.active=1 AND ${eligible}
-      GROUP BY runtime.country_code
-    ), index_counts AS (
-      SELECT country_code,COUNT(*) FILTER (WHERE active=1) AS index_count,
-        COUNT(*) FILTER (WHERE active=1 AND country_rank IS NULL) AS missing_ranks,
-        COUNT(*) FILTER (WHERE active=1 AND residential_ready=1 AND residential_rank IS NULL) AS missing_residential_ranks
-      FROM address_generation_index GROUP BY country_code
-    )
-    , all_countries AS (
-      SELECT country_code FROM source_counts
-      UNION
-      SELECT country_code FROM index_counts
-    )
-    SELECT all_countries.country_code
-    FROM all_countries
-      LEFT JOIN source_counts ON source_counts.country_code=all_countries.country_code
-      LEFT JOIN index_counts ON index_counts.country_code=all_countries.country_code
-    WHERE COALESCE(source_counts.source_count,0)<>COALESCE(index_counts.index_count,0)
-      OR COALESCE(source_counts.source_count,0)<>COALESCE(source_counts.matched_index_count,0)
-      OR COALESCE(index_counts.missing_ranks,0)>0
-      OR COALESCE(index_counts.missing_residential_ranks,0)>0
-    ORDER BY all_countries.country_code`).all()).results || [];
-  for (const { country_code: countryCode } of rows) await refreshAddressGenerationIndex(database, countryCode);
-  return rows.map(({ country_code: countryCode }) => countryCode);
+  const countries = (await database.prepare(`SELECT country_code FROM sync_country_policies
+    UNION SELECT DISTINCT country_code FROM address_generation_index ORDER BY country_code`).all()).results || [];
+  const populated = await activePoolCountries(database);
+  const refreshed = [];
+  const failed = [];
+  for (const { country_code: countryCode } of countries) {
+    try {
+      const source = !populated.has(countryCode) ? null : await database.prepare(`SELECT COUNT(DISTINCT runtime.id) AS source_count,
+          COUNT(DISTINCT generation.address_id) AS matched_index_count
+        FROM address_pool_runtime runtime
+        LEFT JOIN address_generation_index generation ON generation.address_id=runtime.id
+          AND generation.country_code=runtime.country_code AND generation.active=1
+        WHERE runtime.country_code=? AND runtime.active=1 AND ${eligible}`).bind(countryCode).first();
+      const index = await database.prepare(`SELECT COUNT(*) FILTER (WHERE active=1) AS index_count,
+          COUNT(*) FILTER (WHERE active=1 AND country_rank IS NULL) AS missing_ranks,
+          COUNT(*) FILTER (WHERE active=1 AND residential_ready=1 AND residential_rank IS NULL) AS missing_residential_ranks
+        FROM address_generation_index WHERE country_code=?`).bind(countryCode).first();
+      const sourceCount = Number(source?.source_count || 0);
+      if (sourceCount === Number(index?.index_count || 0) && sourceCount === Number(source?.matched_index_count || 0)
+        && !Number(index?.missing_ranks || 0) && !Number(index?.missing_residential_ranks || 0)) continue;
+      await refreshAddressGenerationIndex(database, countryCode);
+      refreshed.push(countryCode);
+    } catch (error) {
+      failed.push(`${countryCode}:${error?.code || error?.message || error}`);
+    }
+  }
+  if (failed.length) throw Object.assign(new Error(`Generation index consistency failed for ${failed.join(', ')}`), { refreshed });
+  return refreshed;
 };
 
 const generationIndexRowCountForCountry = async (database, countryCode) => Number(

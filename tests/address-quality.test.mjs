@@ -88,6 +88,16 @@ describe('country address quality gate', () => {
       .toContain('invalid_postcode');
   });
 
+  it('rejects CJK names whose source lost a character but keeps question marks in Latin names', () => {
+    const taiwan = { ...base, admin1: '臺北市', locality: '中正區', district: '', postcode: '100' };
+    for (const street of ['?榔路', '興化?路', '中�路']) {
+      expect(validateAddressQuality({ countryCode: 'TW', components: { ...taiwan, street } }).reasons).toContain('corrupted_text');
+    }
+    expect(validateAddressQuality({ countryCode: 'TW', components: { ...taiwan, street: '檳榔路' } }).reasons).not.toContain('corrupted_text');
+    expect(validateAddressQuality({ countryCode: 'NG', components: { ...base, buildingName: 'Why? Mart', postcode: '' } }).reasons)
+      .not.toContain('corrupted_text');
+  });
+
   it('rejects geocoder placeholder street names but keeps real names that contain those words', () => {
     for (const street of ['Unnamed Road', 'Đường không tên', 'Đường Chưa Đặt Tên', 'ถนนไม่มีชื่อ', 'Calle sin nombre', 'Rua Sem Denominação', 'İsimsiz Sokak', 'طريق بدون اسم']) {
       expect(isPlaceholderStreet(street)).toBe(true);

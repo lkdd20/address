@@ -6,6 +6,7 @@ import { gunzipSync } from 'node:zlib';
 import { strFromU8, unzipSync } from 'fflate';
 import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
 import { catalogHierarchyPaths, correctSpanishProvinceParents } from '../server/database/catalog-hierarchy.mjs';
+import { implausibleChineseTranslation } from '../src/domain/address-localization.mjs';
 
 const countryCodes = new Set([
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU', 'JP', 'HK', 'SG', 'TW', 'KR', 'MY',
@@ -144,14 +145,23 @@ CREATE TABLE catalog_regions_staging AS SELECT * FROM catalog_regions WHERE FALS
 CREATE TABLE catalog_cities_staging AS SELECT * FROM catalog_cities WHERE FALSE;
 CREATE TABLE catalog_postcodes_staging AS SELECT * FROM catalog_postcodes WHERE FALSE;
 `);
+// Upstream Chinese names that are literal translations (Bursa → 囊) are corrected or left to translation instead.
+const chineseNameCorrections = new Map([['TR:16', '布尔萨']]);
+const catalogChineseName = (entry) => {
+  const corrected = chineseNameCorrections.get(`${entry.country_code}:${entry.iso2}`);
+  const translated = corrected || entry.translations?.['zh-CN'] || '';
+  const original = entry.native || entry.name;
+  return translated && (corrected || entry.country_code === 'CN' || /\p{Script=Han}/u.test(original)
+    || !implausibleChineseTranslation(original, translated)) ? translated : original;
+};
 writeBatch(stream, 'catalog_regions_staging', ['id', 'country_code', 'code', 'name', 'native_name', 'zh_name', 'type', 'parent_id', 'path', 'latitude', 'longitude'], selectedStates, (state) => [
   state.id, state.country_code, state.iso2 || '', state.name, state.native || state.name,
-  state.translations?.['zh-CN'] || state.native || state.name, state.type || '', state.parent_id ? Number(state.parent_id) : null,
+  catalogChineseName(state), state.type || '', state.parent_id ? Number(state.parent_id) : null,
   regionPaths.get(Number(state.id)), number(state.latitude), number(state.longitude)
 ]);
 writeBatch(stream, 'catalog_cities_staging', ['id', 'country_code', 'region_id', 'name', 'native_name', 'zh_name', 'type', 'population', 'latitude', 'longitude'], selectedCities, (city) => [
   city.id, city.country_code, city.state_id || null, city.name, city.native || city.name,
-  city.translations?.['zh-CN'] || city.native || city.name, city.type || 'city', number(city.population), number(city.latitude), number(city.longitude)
+  catalogChineseName(city), city.type || 'city', number(city.population), number(city.latitude), number(city.longitude)
 ]);
 writeBatch(stream, 'catalog_postcodes_staging', ['id', 'country_code', 'region_id', 'city_id', 'code', 'locality_name', 'latitude', 'longitude'], selectedPostcodes, (postcode) => [
   postcode.id, postcode.country_code, postcode.state_id || null, postcode.city_id || null, postcode.code,

@@ -142,4 +142,20 @@ describe('production blue-green deployment', () => {
     expect(deploy).toContain('[[ "$protected" == *" $release "* ]]');
     expect(deploy).toContain('! -L "$target"');
   });
+
+  it('stops the sync service without waiting for long startup consistency queries', () => {
+    const sync = readFileSync('server/sync/index.mjs', 'utf8');
+    expect(sync).toContain('(closing ? Promise.resolve() : task())');
+    expect(sync.indexOf('closing = true;')).toBeLessThan(sync.indexOf('await coordinator.cancelActive();'));
+    expect(sync).toContain('Promise.race([postgresPool.end(), new Promise((done) => setTimeout(done, POOL_CLOSE_GRACE_MS).unref())])');
+    expect(sync).toMatch(/await runtime\.close\(\);\s*process\.exit\(0\);/u);
+  });
+
+  it('removes images of pruned releases and stale build cache after a successful deployment', () => {
+    const cleanup = deploy.slice(deploy.indexOf('cleanup_release_artifacts() {'), deploy.indexOf('verify_slot() {'));
+    expect(cleanup).toContain('kept+="$(basename "$target") "');
+    expect(cleanup).toContain('! grep -qxF "$image" <<<"$used"');
+    expect(cleanup).toContain('docker image rm "$image"');
+    expect(cleanup).toContain('docker builder prune -f --filter until=24h');
+  });
 });

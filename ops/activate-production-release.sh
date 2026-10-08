@@ -111,6 +111,18 @@ cleanup_release_artifacts() {
   done < <(find "$releases_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-)
   find "$ROOT/runtime" -mindepth 1 -maxdepth 2 -type f \
     \( -name 'address-*.tar.gz' -o -name '.deploy-*.tar.gz' \) -mtime +1 -delete
+  # Each release builds a ~2.5 GB image; keep only images of retained releases or ones a container still uses.
+  local repository=${RELEASE_IMAGE%%:*} kept=" $protected " used image
+  for target in "$releases_root"/*/; do
+    if [[ -d "$target" ]]; then kept+="$(basename "$target") "; fi
+  done
+  used=$(docker ps -a --format '{{.Image}}')
+  while IFS= read -r image; do
+    if [[ "$kept" != *" ${image#"$repository":} "* ]] && ! grep -qxF "$image" <<<"$used"; then
+      docker image rm "$image" >/dev/null || true
+    fi
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' | awk -v prefix="$repository:" 'index($0, prefix) == 1')
+  docker builder prune -f --filter until=24h >/dev/null || true
 }
 
 verify_slot() {
