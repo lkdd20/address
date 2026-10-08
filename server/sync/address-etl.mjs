@@ -12,6 +12,7 @@ import { loadGoogleCoverageTargets } from './google-coverage-targets.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
 import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
+import { runPostcodeInference } from './postcode-inference.mjs';
 import { PostgresCountryStateStore } from './postgres-country-state.mjs';
 import {
   assertStorageBudget,
@@ -116,18 +117,25 @@ const hongKongBilingualComponent = (value) => {
   return native && en ? { native, en } : null;
 };
 
+const spacedScript = /^(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])[\p{L}\p{N}]$/u;
 export const localizedFormattedAddress = (components, countryCode, language) => {
   const values = language === 'zh-CN'
     ? [displayNames.zh.of(countryCode), components.admin1, components.locality, components.postalLocality,
-      components.district, components.street, components.houseNumber, components.buildingName,
+      // A Japanese chōme street already starts with its town (町名), which is stored as the district.
+      countryCode === 'JP' && components.district && components.street?.startsWith(components.district) ? '' : components.district,
+      components.street, components.houseNumber, components.buildingName,
       components.unit,
       components.postcode]
     : [[components.houseNumber, components.street].filter(Boolean).join(' '), components.buildingName,
       components.unit,
       components.district, components.postalLocality || components.locality, components.admin1,
       components.postcode, displayNames.en.of(countryCode)];
-  return values.filter(Boolean).filter((value, index, all) => index === 0 || value !== all[index - 1])
-    .join(language === 'zh-CN' ? '' : ', ');
+  const parts = values.filter(Boolean).filter((value, index, all) => index === 0 || value !== all[index - 1]);
+  // Chinese text joins without separators, but adjacent alphabetic or digit parts (an untranslated street,
+  // house number, postcode) need a space so they do not run together.
+  return language === 'zh-CN'
+    ? parts.reduce((text, part) => text && spacedScript.test(text.at(-1)) && spacedScript.test(part[0]) ? `${text} ${part}` : `${text}${part}`, '')
+    : parts.join(', ');
 };
 
 const withEnglishHints = (record, components) => ({ ...components, ...(record.englishComponentHints || {}) });
@@ -1156,6 +1164,10 @@ export const runAddressEtl = async ({
     if (database && activeRun && !providedImporter) {
       for (const countryCode of changedCountries) {
         checkpoint();
+        await reportProgress({ phase: 'postcode', countryCode });
+        const postcodes = await runPostcodeInference({ database, countryCode, cacheDir, pythonBin: environment.PYTHON_BIN, signal })
+          .catch((error) => { if (signal?.aborted) throw error; console.error(`[address-sync] ${countryCode} postcode inference failed`, error?.message || error); return null; });
+        if (postcodes?.checked) console.log(JSON.stringify({ event: 'postcode_inference', ...postcodes }));
         await reportProgress({ phase: 'coverage', countryCode });
         const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString(), signal);
         console.log(`[address-sync] ${countryCode} coverage mapped=${coverage.matchedAddresses} unmatched=${coverage.unmatchedAddresses}`);

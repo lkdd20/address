@@ -15,6 +15,8 @@ import { reconcilePublishedPoolProjections, validatePublishedPoolBatch } from '.
 import { refreshStaleAddressGenerationIndexes } from '../database/generation-index.mjs';
 import { refreshIndexedResidentialCoverage } from '../database/residential-coverage.mjs';
 import { refreshAddressCoverage } from '../control/coverage';
+import { runPostcodeInference } from './postcode-inference.mjs';
+import { repairChineseAddressStrings } from './chinese-address-repair.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
 import { ChinaDataService } from '../china/service';
@@ -119,14 +121,36 @@ export const createSyncRuntime = async ({
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   await ensureAddressPolicies(database);
   // A full projection check scans every published address; it must not delay the health endpoint.
+  // Each startup step is independent: one timeout must not skip the others.
+  const startupStep = (name, task) => task().catch((error) => {
+    console.error(`[address-sync] startup ${name} failed`, error?.code || error?.message || error);
+  });
   const startupReconciliation = (async () => {
-    await reconcilePublishedPoolProjections(database);
-    if (environment.NODE_ENV === 'test') return;
-    await refreshStaleAddressGenerationIndexes(database);
-    await refreshIndexedResidentialCoverage(database, undefined, { skipLocked: true });
-    await refreshAddressCoverage(database, { useGenerationIndex: true });
+    if (environment.NODE_ENV === 'test') {
+      await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
+      return;
+    }
+    await startupStep('postcode inference', async () => {
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await runPostcodeInference({ database, countryCode, cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'),
+          pythonBin: environment.PYTHON_BIN }).catch((error) => ({ countryCode, error: error?.message || String(error) }));
+        if (summary.checked || summary.error) console.log(JSON.stringify({ event: 'postcode_inference', ...summary }));
+      }
+    });
+    await startupStep('chinese address spacing', async () => {
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await repairChineseAddressStrings({ database, countryCode });
+        if (summary.repaired) console.log(JSON.stringify({ event: 'chinese_address_repair', ...summary }));
+      }
+    });
+    await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
+    await startupStep('generation index refresh', () => refreshStaleAddressGenerationIndexes(database));
+    await startupStep('residential coverage', () => refreshIndexedResidentialCoverage(database, undefined, { skipLocked: true }));
+    await startupStep('address coverage', () => refreshAddressCoverage(database, { useGenerationIndex: true }));
     console.log(JSON.stringify({ event: 'startup_coverage_ready', at: new Date().toISOString() }));
-  })().catch((error) => console.error('[address-sync] startup consistency refresh failed', error?.code || error?.message || error));
+  })();
   await ensureChinaTargets(database, environment, environment.POSTGRES_URL || environment.DATABASE_URL || '');
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;

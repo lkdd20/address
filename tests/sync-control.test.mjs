@@ -26,7 +26,8 @@ describe('production deployment artifact', () => {
     expect(deploy).toContain("! -path './.github/*'");
     expect(deploy).toContain("! -name '.env.example'");
     expect(deploy).toContain('IMAGE="address-local:$REL"');
-    expect(deploy).toContain("bash ./ops/activate-production-release.sh '$REL' '$IMAGE'");
+    expect(deploy).toContain("setsid nohup sh -c 'bash ./ops/activate-production-release.sh");
+    expect(deploy).toContain("activation '$REL' '$IMAGE' '$LOG'");
     expect(deploy).toContain('sha256sum --quiet -c .release-manifest.sha256');
     expect(deploy).toContain('sha256sum --quiet -c .image-manifest.sha256');
     expect(deploy).toContain('docker run --rm --entrypoint sh');
@@ -281,6 +282,14 @@ describe('address sync coordinator', () => {
     });
   });
 
+  it('refuses jobs a queue pass still in flight would start after shutdown began', async () => {
+    const runSync = vi.fn(async () => ({}));
+    const coordinator = new SyncCoordinator({ stateDir: testStateDir(), idFactory: () => 'job-late', runSync });
+    await expect(coordinator.cancelActive()).resolves.toBe(false);
+    await expect(coordinator.trigger('queue')).resolves.toMatchObject({ accepted: false });
+    expect(runSync).not.toHaveBeenCalled();
+  });
+
   it('keeps the execution lock until an aborted worker has actually stopped', async () => {
     const worker = deferred();
     const aborted = deferred();
@@ -313,8 +322,10 @@ describe('address sync coordinator', () => {
 
   it('escalates a worker that ignores cancellation instead of hanging forever', async () => {
     const fatal = vi.fn(() => { throw new Error('fixture supervisor restart'); });
+    const history = { queued: vi.fn(async () => {}), started: vi.fn(async () => {}), heartbeat: vi.fn(async () => {}), completed: vi.fn(async () => {}) };
     const coordinator = new SyncCoordinator({
       stateDir: testStateDir(),
+      history,
       idFactory: () => 'job-stuck',
       jobTimeoutMs: 20,
       cancelGraceMs: 20,
@@ -328,6 +339,8 @@ describe('address sync coordinator', () => {
     ]);
     expect(completed).toBe(true);
     expect(fatal).toHaveBeenCalledOnce();
+    expect(history.completed).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'SYNC_WORKER_STUCK' }));
+    expect(history.completed.mock.invocationCallOrder[0]).toBeLessThan(fatal.mock.invocationCallOrder[0]);
     await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
       status: 'failed', errorCode: 'SYNC_WORKER_STUCK'
     });

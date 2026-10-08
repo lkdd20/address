@@ -582,6 +582,21 @@ export class PostgresAddressImporter {
       assignedIds.add(record.id);
       return true;
     });
+    // A postcode derived earlier (boundary, catalog or neighbours) stays when the source still has none.
+    const missingPostcode = records.filter((record) => !record.postcode);
+    for (let offset = 0; offset < missingPostcode.length; offset += 500) {
+      const batch = missingPostcode.slice(offset, offset + 500);
+      const inferred = new Map((await this.database.prepare(`SELECT address_id,postcode FROM address_postcode_inference
+        WHERE postcode<>'' AND address_id IN (${batch.map(() => '?').join(',')})`).bind(...batch.map((record) => record.id)).all()
+        .catch(() => ({ results: [] }))).results.map((row) => [row.address_id, row.postcode]));
+      for (const record of batch) {
+        const postcode = inferred.get(record.id);
+        if (!postcode) continue;
+        record.postcode = postcode;
+        record.components = { ...record.components, postcode };
+        if (this.rebuildFormattedAddress) record.formattedAddress = this.rebuildFormattedAddress(record.components, shard.countryCode);
+      }
+    }
     if (!records.length) {
       throw new SourceQualityError(
         shard.id,

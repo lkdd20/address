@@ -669,6 +669,15 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
   AND address_sources.redistribution_allowed = 1
 WHERE address_pool.active = 1;
 
+CREATE TABLE IF NOT EXISTS address_postcode_inference (
+  address_id TEXT PRIMARY KEY REFERENCES address_pool(id) ON DELETE CASCADE,
+  postcode TEXT NOT NULL DEFAULT '',
+  method TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  checked_revision TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 30) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 31) AS version
 ON CONFLICT (version) DO NOTHING;

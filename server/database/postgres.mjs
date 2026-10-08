@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { ensureActiveCountryCursorIndex } from './active-country-index.mjs';
 import { translationRecoverySchema, ensureTranslationStreetIndex, translationStreetIndexSql } from './translation-recovery-schema.mjs';
+import { postcodeInferenceSchema } from './postcode-inference-schema.mjs';
 import { deeplBudgetSchema } from '../credential-broker/deepl.mjs';
 import { administrativeAssignmentSchema, administrativeRuntimeView } from './administrative-assignments.mjs';
 import { translationRoutesSchema } from '../translation/routing.mjs';
@@ -11,7 +12,7 @@ import { translationRoutesSchema } from '../translation/routing.mjs';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 30;
+const ADDRESS_SCHEMA_VERSION = 31;
 const CONTROL_SCHEMA_VERSION = 26;
 
 const integer = (value, fallback, minimum, maximum) => {
@@ -155,6 +156,21 @@ const canonicalIndexState = async (client) => {
   return index;
 };
 
+const upgradePostcodeInferenceSchema = async (client) => {
+  await client.query('BEGIN');
+  try {
+    await client.query('SET LOCAL search_path TO address, public');
+    await client.query("SET LOCAL lock_timeout TO '5min'");
+    await client.query("SET LOCAL statement_timeout TO '2min'");
+    await client.query(postcodeInferenceSchema);
+    await client.query(`INSERT INTO schema_migrations(version,applied_at) VALUES (31,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING`);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  }
+};
+
 const upgradeChinaPublicationSchema = async (client) => {
   await client.query('BEGIN');
   try {
@@ -282,7 +298,7 @@ export const initializePostgres = async (pool, {
       `);
       if (Number(versions.address_version) >= ADDRESS_SCHEMA_VERSION
         && Number(versions.control_version) >= CONTROL_SCHEMA_VERSION) return;
-      if ([23, 24, 25, 26, 27, 28, 29, 30].includes(Number(versions.address_version))
+      if ([23, 24, 25, 26, 27, 28, 29, 30, 31].includes(Number(versions.address_version))
         && Number(versions.control_version) >= 19) {
         if (Number(versions.address_version) === 23) await upgradeStreetSchema(client, addressSource);
         if (Number(versions.address_version) < 25) await ensureActiveCountryCursorIndex(client);
@@ -291,6 +307,7 @@ export const initializePostgres = async (pool, {
         if (Number(versions.address_version) < 28) await upgradeAdministrativeRecovery(client, addressSource);
         if (Number(versions.address_version) < 29) await upgradeCanonicalAddressIdentity(client);
         if (Number(versions.address_version) < 30) await upgradeChinaPublicationSchema(client);
+        if (Number(versions.address_version) < 31) await upgradePostcodeInferenceSchema(client);
         await client.query('BEGIN');
         await client.query('SET LOCAL search_path TO address, public');
         await client.query("SET LOCAL lock_timeout TO '2s'");

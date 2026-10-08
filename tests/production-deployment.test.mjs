@@ -79,8 +79,9 @@ describe('production blue-green deployment', () => {
 
   it('serializes activations and never retries a partially completed cutover', () => {
     expect(deploy).toContain('flock -n 9');
-    expect(deployClient).toContain('ssh_once "cd \'$ADDRESS_ROOT\' && bash ./ops/activate-production-release.sh');
-    expect(deployClient).not.toContain('ssh_retry "cd \'$ADDRESS_ROOT\' && bash ./ops/activate-production-release.sh');
+    expect(deployClient).toContain('ssh_once "cd \'$ADDRESS_ROOT\' && rm -f \'$LOG\' \'$LOG.exit\' && setsid nohup sh -c \'bash ./ops/activate-production-release.sh');
+    expect(deployClient).not.toMatch(/ssh_retry "[^"]*activate-production-release\.sh/u);
+    expect(deployClient).toContain('activation failed with status');
   });
 
   it('uses non-interactive public-key SSH with connection keepalives', () => {

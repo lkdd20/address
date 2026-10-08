@@ -2275,7 +2275,7 @@ describe('source record normalization', () => {
     });
     expect(localized[0].localizations.en.formattedAddress).toContain('Philadelphia');
     expect(localized[0].localizations['zh-CN'].components).toMatchObject({ admin1: '宾夕法尼亚州', locality: '费城', street: '市场街' });
-    expect(localized[0].localizations['zh-CN'].formattedAddress).toBe('美国宾夕法尼亚州费城市场街170019103');
+    expect(localized[0].localizations['zh-CN'].formattedAddress).toBe('美国宾夕法尼亚州费城市场街1700 19103');
   });
 
   it('keeps source components when translation providers are unavailable', async () => {

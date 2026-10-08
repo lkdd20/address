@@ -82,7 +82,7 @@ export class SyncCoordinator {
 
   async trigger(trigger = 'manual', { shards = ['all'], sourceFingerprints = {}, sourceInputs = {} } = {}) {
     await this.initialize();
-    if (this.currentJob) return { accepted: false, job: this.currentJob };
+    if (this.currentJob || this.shutdownCancelled) return { accepted: false, job: this.currentJob };
 
     const id = `sync-${this.now().toISOString().replace(/[-:.TZ]/gu, '')}-${this.idFactory()}`;
     const job = {
@@ -204,6 +204,11 @@ export class SyncCoordinator {
             error: errorText(stuck), errorCode: stuck.code, failurePhase
           });
           await this.writeJob(job).catch(() => {});
+          // The restart that follows skips terminal job files, so history must record the failure first.
+          await Promise.race([
+            Promise.resolve(this.history?.completed(job)),
+            new Promise((resolveWait) => setTimeout(resolveWait, this.cancelGraceMs).unref?.())
+          ]).catch((historyError) => console.error('[address-sync] stuck job history persistence failed', historyError));
           try { this.fatal(stuck); } catch {}
           return;
         }
@@ -404,9 +409,10 @@ export class SyncCoordinator {
   }
 
   async cancelActive() {
+    // Shutdown also refuses jobs a queue pass still in flight would start after this point.
+    this.shutdownCancelled = true;
     const task = this.currentTask;
     if (!task || !this.currentAbort) return false;
-    this.shutdownCancelled = true;
     this.currentAbort.abort(Object.assign(new Error('Synchronization cancelled for shutdown'), { code: 'SYNC_JOB_CANCELLED' }));
     let stopped = false;
     let graceTimer;

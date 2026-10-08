@@ -125,7 +125,25 @@ if $RESTART; then
   echo "==> building $IMAGE"
   ssh_retry "docker build -t '$IMAGE' '$RUNTIME/releases/$REL'"
   ssh_retry "docker run --rm --entrypoint sh '$IMAGE' -c 'cd /srv/address/app && sha256sum --quiet -c .image-manifest.sha256'"
-  ssh_once "cd '$ADDRESS_ROOT' && bash ./ops/activate-production-release.sh '$REL' '$IMAGE'"
+  # Activation runs detached on the server so a dropped connection or stopped local shell cannot cut it off halfway.
+  LOG="$ADDRESS_ROOT/runtime/deploy/activation-$REL.log"
+  # Launched once and never retried: a second launch could restart a cutover that already began.
+  ssh_once "cd '$ADDRESS_ROOT' && rm -f '$LOG' '$LOG.exit' && setsid nohup sh -c 'bash ./ops/activate-production-release.sh \"\$1\" \"\$2\" > \"\$3\" 2>&1; echo \$? > \"\$3.exit\"' activation '$REL' '$IMAGE' '$LOG' < /dev/null > /dev/null 2>&1 &"
+  SHOWN=0
+  while :; do
+    sleep 15
+    OUTPUT=$(ssh_retry "tail -n +$((SHOWN + 1)) '$LOG' 2>/dev/null; printf '\nexit=%s\n' \"\$(cat '$LOG.exit' 2>/dev/null)\"") || continue
+    LINES=$(printf '%s\n' "$OUTPUT" | sed '$d' | sed '$d')
+    if [ -n "$LINES" ]; then
+      printf '%s\n' "$LINES"
+      SHOWN=$((SHOWN + $(printf '%s\n' "$LINES" | wc -l)))
+    fi
+    STATUS=$(printf '%s\n' "$OUTPUT" | tail -1 | sed 's/^exit=//')
+    if [ -n "$STATUS" ]; then
+      [ "$STATUS" = 0 ] || { echo "activation failed with status $STATUS" >&2; exit "$STATUS"; }
+      break
+    fi
+  done
 else
   echo "==> files synchronized without rebuilding services"
 fi
