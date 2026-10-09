@@ -3,6 +3,11 @@ import { evaluateCountryGoals } from './country-goals.mjs';
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled']);
 const json = (value) => JSON.stringify(value || {});
 
+// A run's growth is what its own import added or retired; a run that committed no import grew nothing, even if
+// translation publishing raised the country total meanwhile.
+const ownGrowth = (outcome) => ['imported', 'partial'].includes(String(outcome?.status || ''))
+  && Number.isFinite(Number(outcome?.netGrowth)) ? Number(outcome.netGrowth) : 0;
+
 export class SyncHistoryStore {
   constructor(database, { catalogShards = async () => [], now = () => new Date() } = {}) {
     this.database = database;
@@ -91,12 +96,6 @@ export class SyncHistoryStore {
     const snapshots = await this.goalSnapshots([...new Set(rows.map((row) => String(row.country_code)))]);
     const actualShards = new Set((job.actualShards || job.shards || []).map(String));
     const outcomes = new Map((job.sourceOutcomes || []).map((outcome) => [String(outcome.shardId || outcome.shardKey || ''), outcome]));
-    const executedByCountry = new Map();
-    for (const row of rows) {
-      if (!actualShards.size || actualShards.has(String(row.source_id))) {
-        executedByCountry.set(row.country_code, (executedByCountry.get(row.country_code) || 0) + 1);
-      }
-    }
     await this.database.prepare(`UPDATE sync_runs SET status=?,progress_json=?,error_code=?,error_message=?,failure_phase=?,
       completed_at=?,updated_at=? WHERE id=?`).bind(
       status, json({ phase: job.phase, releaseId: job.releaseId || null }), job.errorCode || null,
@@ -111,7 +110,6 @@ export class SyncHistoryStore {
       const outcomeFailed = ['failed', 'source-quality-failed'].includes(String(outcome?.status || ''));
       const outcomeSkipped = ['deferred', 'not-due', 'disabled'].includes(String(outcome?.status || ''));
       const childStatus = !executed || outcomeSkipped ? 'cancelled' : outcomeFailed ? 'failed' : status;
-      const singleSourceCountry = executedByCountry.get(countryCode) === 1;
       const errorCode = !executed ? 'SYNC_SOURCE_NOT_EXECUTED'
         : outcomeSkipped ? 'SYNC_SOURCE_SKIPPED' : outcome?.errorCode || (childStatus === 'failed' ? job.errorCode || null : null);
       const errorMessage = !executed || outcomeSkipped ? null
@@ -123,7 +121,7 @@ export class SyncHistoryStore {
         WHERE run_id=? AND country_code=? AND source_id=?`).bind(
         childStatus, job.completedAt || now, job.heartbeatAt || now, outcome?.failurePhase || job.failurePhase || null,
         executed ? after.count : row.before_count,
-        executed && singleSourceCountry ? after.count - Number(row.before_count || 0) : null,
+        executed ? ownGrowth(outcome) : null,
         executed ? json(after.goals) : row.before_goals_json || '{}',
         Number.isFinite(Number(metrics.candidateCount)) ? Number(metrics.candidateCount) : null,
         Number.isFinite(Number(outcome?.acceptedCount)) ? Number(outcome.acceptedCount) : null,
@@ -194,6 +192,15 @@ export class SyncHistoryStore {
     ) VALUES ('address-sync',?,?,?,?) ON CONFLICT(scheduler_id) DO UPDATE SET
       queue_snapshot_json=excluded.queue_snapshot_json,queue_snapshot_at=excluded.queue_snapshot_at,
       updated_at=excluded.updated_at`).bind(at, json, at, at).run();
+  }
+
+  // Earlier history credited failed runs with the country total's rise. A source that failed before or during its
+  // import committed nothing (the import is one transaction); a failure report may still carry the accepted count
+  // of an earlier successful import, so the failure phase decides.
+  async repairFailedRunGrowth() {
+    return Number((await this.database.prepare(`UPDATE sync_run_countries SET net_growth=0
+      WHERE status='failed' AND net_growth<>0
+        AND COALESCE(failure_phase,'') IN ('','planned','discover','materialize','import','interrupted')`).run()).meta?.changes || 0);
   }
 
   async repairInterruptedRuns() {

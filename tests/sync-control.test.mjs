@@ -80,7 +80,7 @@ describe('address sync coordinator', () => {
         await database.prepare(`INSERT INTO sync_country_state(
           country_code,status,address_count,residential_count,failure_count,updated_at
         ) VALUES ('US','ready',50,50,0,'2026-08-05T06:00:00Z')`).run();
-        return { releaseId: 'history-release' };
+        return { releaseId: 'history-release', etl: { reports: [{ shardId: 'oa-us', status: 'imported', netGrowth: 42, changedCount: 42 }] } };
       }
     });
     const result = await coordinator.trigger('manual', { shards: ['oa-us'] });
@@ -89,7 +89,7 @@ describe('address sync coordinator', () => {
       .toMatchObject({ status: 'succeeded', completed_at: '2026-08-05T06:00:00.000Z' });
     expect(await database.prepare(`SELECT country_code,source_id,status,before_count,after_count,net_growth
       FROM sync_run_countries WHERE run_id=?`).bind(result.job.id).first()).toEqual({
-      country_code: 'US', source_id: 'oa-us', status: 'succeeded', before_count: 0, after_count: 50, net_growth: 50
+      country_code: 'US', source_id: 'oa-us', status: 'succeeded', before_count: 0, after_count: 50, net_growth: 42
     });
     await history.schedulerHeartbeat();
     expect(await database.prepare(`SELECT heartbeat_at,active_run_id FROM sync_scheduler_state
@@ -380,7 +380,51 @@ describe('address sync coordinator', () => {
     database.close();
   });
 
-  it('does not duplicate country growth across multiple executed sources', async () => {
+  it('credits a failed run with no growth even when the country total rose meanwhile', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [{ id: 'oa-us', countryCode: 'US' }],
+      now: () => new Date('2026-08-05T06:00:00Z')
+    });
+    await database.prepare(`INSERT INTO sync_country_policies(
+      country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,
+      min_per_node,coverage_ratio,level1_min,level2_min,updated_at
+    ) VALUES ('US',1,10,0,0,0,0,1,1,0,0,'2026-08-01T00:00:00Z')`).run();
+    const job = { id: 'sync-history-failed', trigger: 'queue', shards: ['oa-us'], status: 'queued', phase: 'queued' };
+    await history.queued(job);
+    Object.assign(job, { status: 'running', phase: 'import', startedAt: '2026-08-05T06:00:00Z',
+      heartbeatAt: '2026-08-05T06:00:00Z', deadlineAt: '2026-08-05T07:00:00Z' });
+    await history.started(job);
+    await database.prepare(`INSERT INTO sync_country_state(country_code,status,address_count,residential_count,failure_count,updated_at)
+      VALUES ('US','ready',30,30,0,'2026-08-05T06:05:00Z')`).run();
+    Object.assign(job, { status: 'failed', phase: 'failed', failurePhase: 'import', errorCode: '57014', completedAt: '2026-08-05T06:10:00Z',
+      actualShards: ['oa-us'], sourceOutcomes: [{ shardId: 'oa-us', status: 'failed', errorCode: '57014' }] });
+    await history.completed(job);
+    expect(await database.prepare(`SELECT before_count,after_count,net_growth FROM sync_run_countries WHERE run_id=?`)
+      .bind(job.id).first()).toEqual({ before_count: 0, after_count: 30, net_growth: 0 });
+    database.close();
+  });
+
+  it('clears growth recorded for failed sources that committed no import', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    await database.prepare(`INSERT INTO sync_runs(id,kind,target_json,status,progress_json,created_at,updated_at)
+      VALUES ('legacy-growth','address-pool','{}','failed','{}','2026-08-05T05:00:00Z','2026-08-05T06:00:00Z')`).run();
+    for (const [sourceId, phase] of [['oa-us', 'import'], ['oa-ca', 'coverage']]) {
+      await database.prepare(`INSERT INTO sync_run_countries(run_id,country_code,source_id,trigger_name,status,before_count,
+          after_count,net_growth,accepted_count,failure_phase,before_goals_json,after_goals_json,created_at,updated_at)
+        VALUES ('legacy-growth',?,?,'queue','failed',10,40,30,120,?,'{}','{}','2026-08-05T05:00:00Z','2026-08-05T06:00:00Z')`)
+        .bind(sourceId === 'oa-us' ? 'US' : 'CA', sourceId, phase).run();
+    }
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairFailedRunGrowth()).resolves.toBe(1);
+    expect((await database.prepare(`SELECT source_id,net_growth FROM sync_run_countries ORDER BY source_id`).all()).results)
+      .toEqual([{ source_id: 'oa-ca', net_growth: 30 }, { source_id: 'oa-us', net_growth: 0 }]);
+    database.close();
+  });
+
+  it('attributes country growth to each executed source by its own import', async () => {
     const database = openTestDatabase();
     await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
     const history = new SyncHistoryStore(database, {
@@ -396,11 +440,13 @@ describe('address sync coordinator', () => {
       heartbeatAt: '2026-08-05T06:00:00Z', deadlineAt: '2026-08-05T07:00:00Z' });
     await history.started(job);
     Object.assign(job, { status: 'succeeded', phase: 'published', completedAt: '2026-08-05T06:10:00Z',
-      actualShards: ['oa-us-a', 'oa-us-b'] });
+      actualShards: ['oa-us-a', 'oa-us-b'], sourceOutcomes: [
+        { shardId: 'oa-us-a', status: 'imported', netGrowth: 7 }, { shardId: 'oa-us-b', status: 'unchanged', netGrowth: 0 }
+      ] });
     await history.completed(job);
     const growth = (await database.prepare(`SELECT net_growth FROM sync_run_countries
       WHERE run_id=? ORDER BY source_id`).bind(job.id).all()).results;
-    expect(growth).toEqual([{ net_growth: null }, { net_growth: null }]);
+    expect(growth).toEqual([{ net_growth: 7 }, { net_growth: 0 }]);
     database.close();
   });
 
@@ -577,6 +623,63 @@ describe('address sync coordinator', () => {
       status: 'failed', phase: 'interrupted', errorCode: 'SYNC_JOB_INTERRUPTED'
     });
     await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('recovers a lock left by a stopped container whose pid is alive in the new one', async () => {
+    const stateDir = testStateDir();
+    const jobsDir = resolve(stateDir, 'jobs');
+    const job = {
+      id: 'sync-old-container', trigger: 'queue', status: 'running', phase: 'import',
+      createdAt: '2026-07-16T03:00:00.000Z', startedAt: '2026-07-16T03:00:01.000Z', completedAt: null,
+      releaseId: null, shards: ['ES'], error: null
+    };
+    await mkdir(jobsDir, { recursive: true });
+    await writeFile(resolve(jobsDir, `${job.id}.json`), JSON.stringify(job));
+    await writeFile(resolve(stateDir, 'sync.lock'), JSON.stringify({ jobId: job.id, token: 'old', pid: 7, host: 'stopped-container' }));
+    const coordinator = new SyncCoordinator({
+      stateDir, runSync: async () => ({}), processIsAlive: () => true,
+      now: () => new Date('2026-07-16T03:01:00.000Z')
+    });
+    await coordinator.initialize();
+    await expect(coordinator.getJob(job.id)).resolves.toMatchObject({ status: 'failed', errorCode: 'SYNC_JOB_INTERRUPTED' });
+    await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('records the job of a stale lock it takes over as interrupted', async () => {
+    const stateDir = testStateDir();
+    const jobsDir = resolve(stateDir, 'jobs');
+    const job = {
+      id: 'sync-stale-owner', trigger: 'queue', status: 'running', phase: 'import',
+      createdAt: '2026-07-16T03:00:00.000Z', startedAt: '2026-07-16T03:00:01.000Z', completedAt: null,
+      releaseId: null, shards: ['ES'], error: null
+    };
+    await mkdir(jobsDir, { recursive: true });
+    await writeFile(resolve(jobsDir, `${job.id}.json`), JSON.stringify(job));
+    const coordinator = new SyncCoordinator({
+      stateDir, runSync: async () => ({}), processIsAlive: () => true, idFactory: () => 'next',
+      lockStaleMs: 1000, now: () => new Date(Date.now() + 60_000)
+    });
+    await coordinator.initialize();
+    await writeFile(resolve(stateDir, 'sync.lock'), JSON.stringify({ jobId: job.id, token: 'old', pid: 37 }));
+    await expect(coordinator.trigger('queue')).resolves.toMatchObject({ accepted: true });
+    await coordinator.waitForIdle();
+    await expect(coordinator.getJob(job.id)).resolves.toMatchObject({ status: 'failed', errorCode: 'SYNC_JOB_INTERRUPTED' });
+  });
+
+  it('records a shutdown interruption before exiting when the worker does not stop', async () => {
+    const fatal = vi.fn(() => { throw new Error('fixture supervisor restart'); });
+    const history = { queued: vi.fn(async () => {}), started: vi.fn(async () => {}), heartbeat: vi.fn(async () => {}), completed: vi.fn(async () => {}) };
+    const started = deferred();
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(), history, idFactory: () => 'job-shutdown-stuck', cancelGraceMs: 20, fatal,
+      runSync: async () => { started.resolve(); return new Promise(() => {}); }
+    });
+    const result = await coordinator.trigger('queue');
+    await started.promise;
+    await expect(coordinator.cancelActive()).resolves.toBe(false);
+    expect(history.completed).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'SYNC_JOB_INTERRUPTED' }));
+    expect(history.completed.mock.invocationCallOrder[0]).toBeLessThan(fatal.mock.invocationCallOrder[0]);
+    await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({ status: 'failed', errorCode: 'SYNC_JOB_INTERRUPTED' });
   });
 
   it('quarantines a malformed lock and reconciles its interrupted job', async () => {

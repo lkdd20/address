@@ -2,11 +2,31 @@ import { hongKongDistricts, hongKongRegions } from '../../src/domain/hk-administ
 import { catalogHierarchyPaths, correctSpanishProvinceParents } from './catalog-hierarchy.mjs';
 import type { PostgresDatabase } from './postgres.mjs';
 import { implausibleChineseTranslation } from '../../src/domain/address-localization.mjs';
+import { chinaCityNames, chinaCityRegionCode } from './china-catalog-corrections.mjs';
 
 const chineseRegionCorrections = [{ countryCode: 'TR', code: '16', zh: '布尔萨' }];
 // Upstream catalog Chinese names that are literal translations (Emerald → 翠) fall back to the source name, as for
 // entries without a translation, so address translation supplies the Chinese name instead.
+const repairChinaCatalog = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
+  const regions = new Map(((await transaction.prepare(`SELECT id,code FROM catalog_regions
+    WHERE country_code='CN' AND parent_id IS NULL`).all<{ id: number; code: string }>()).results || [])
+    .map((region) => [region.code, Number(region.id)]));
+  const codes = new Map([...regions].map(([code, id]) => [id, code]));
+  const cities = (await transaction.prepare(`SELECT id,region_id,name,native_name,zh_name,latitude,longitude FROM catalog_cities
+    WHERE country_code='CN'`).all<{ id: number; region_id: number | null; name: string; native_name: string; zh_name: string;
+      latitude: number | null; longitude: number | null }>()).results || [];
+  for (const city of cities) {
+    const names = chinaCityNames({ name: city.name, native: city.native_name, zh: city.zh_name, latitude: city.latitude, longitude: city.longitude });
+    const regionCode = city.region_id == null ? undefined : codes.get(Number(city.region_id));
+    const regionId = regionCode ? regions.get(chinaCityRegionCode(regionCode, city.latitude)) ?? city.region_id : city.region_id;
+    if (names.native === city.native_name && names.zh === city.zh_name && regionId === city.region_id) continue;
+    await transaction.prepare('UPDATE catalog_cities SET native_name=?,zh_name=?,region_id=? WHERE id=?')
+      .bind(names.native, names.zh, regionId, city.id).run();
+  }
+};
+
 const repairCatalogChineseNames = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
+  await repairChinaCatalog(transaction);
   for (const { countryCode, code, zh } of chineseRegionCorrections) {
     await transaction.prepare("UPDATE catalog_regions SET zh_name=? WHERE country_code=? AND code=? AND zh_name<>?")
       .bind(zh, countryCode, code, zh).run();

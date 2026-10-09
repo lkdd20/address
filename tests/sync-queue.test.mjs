@@ -1344,7 +1344,8 @@ describe('queue engine', () => {
         return { accepted: true, job: { id: `sync-${coordinator.calls.length}` } };
       },
       waitForIdle: async () => {},
-      getJob: async (id) => ({ id, status: coordinator.jobStatus })
+      sourceOutcomes: [],
+      getJob: async (id) => ({ id, status: coordinator.jobStatus, sourceOutcomes: coordinator.sourceOutcomes })
     };
     return coordinator;
   };
@@ -1610,6 +1611,7 @@ describe('queue engine', () => {
       coordinator.calls.push({ trigger, shards });
       facts.counts.US += 40;
       facts.rules.US.total.current += 40;
+      coordinator.sourceOutcomes = [{ shardId: 'oa-us', status: 'imported', netGrowth: 40, changedCount: 40 }];
       return { accepted: true, job: { id: 'sync-growth' } };
     };
     // Force the retry to be due immediately.
@@ -1623,6 +1625,25 @@ describe('queue engine', () => {
     });
     expect((await queue.snapshot()).entries.find((value) => value.countryCode === 'US'))
       .toMatchObject({ state: 'scheduled_wait', reason: 'source_version_checked' });
+  });
+
+  it('latches a source whose own import added nothing while translations raised the country total', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['US']);
+    const coordinator = fakeCoordinator();
+    coordinator.trigger = async (trigger, { shards }) => {
+      coordinator.calls.push({ trigger, shards });
+      facts.counts.US += 40;
+      facts.rules.US.total.current += 40;
+      coordinator.sourceOutcomes = [{ shardId: 'oa-us', status: 'unchanged', netGrowth: 0, changedCount: 0 }];
+      return { accepted: true, job: { id: 'sync-background-growth' } };
+    };
+    const queue = createSyncQueue({
+      environment: {}, coordinator, stateDir: stateDir(), sources: stubSources(facts, {}),
+      loadCatalog: async () => ({ shards: stubCatalogShards }), cooldownMs: 0, log: { log: () => {}, error: () => {} }
+    });
+    await queue.tick();
+    expect((await queue.store.load()).countries.US.shards['oa-us']).toMatchObject({ latched: true });
   });
 
   it('opens a country-adapter circuit after two shards hit the same systemic failure', async () => {

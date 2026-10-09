@@ -2847,6 +2847,39 @@ describe('built-in ETL planning and publishing', () => {
     database.close();
   });
 
+  it('reports only the pool rows its own import added', async () => {
+    const directory = resolve('.data-cache', 'sync-etl-tests', randomUUID());
+    directories.push(directory);
+    await mkdir(directory, { recursive: true });
+    const file = resolve(directory, 'own-growth.jsonl');
+    const database = openTestDatabase(':memory:');
+    const importer = new PostgresAddressImporter({
+      database,
+      normalizeRecord: normalizeSourceRecord,
+      hash: (value) => createHash('sha256').update(value).digest('hex'),
+      localizeRecords: async (records) => records.map((record) => ({
+        ...record,
+        localizations: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, {
+          components: record.components, formattedAddress: record.formattedAddress, source: 'fixture'
+        }]))
+      }))
+    });
+    await writeFile(file, ['1', '2'].map((number) => JSON.stringify({
+      id: `us-own-${number}`, admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
+      postcode: '19103', street: 'Market Street', number, longitude: -75.17, latitude: 39.95
+    })).map((line) => `${line}\n`).join(''), 'utf8');
+    const run = (version, checksum) => importer.importShard({
+      shard: { id: 'fixture-us', countryCode: 'US', source },
+      discovery: { version, dataUrl: source.dataUrl },
+      materialized: { file, format: 'overture-jsonl', checksum },
+      maxRecords: 10, sourceMaxRecords: 10, perLocality: 10,
+      policy: { targetCount: 10, levelLimits: [10, 10, 10, 0], overrides: new Map() }
+    });
+    expect(await run('v1', '1'.repeat(64))).toMatchObject({ netGrowth: 2, changedCount: 2 });
+    expect(await run('v2', '2'.repeat(64))).toMatchObject({ netGrowth: 0, changedCount: 0 });
+    database.close();
+  });
+
   it('automatically retires legacy rows that fail the current publication contract', async () => {
     const directory = resolve('.data-cache', 'sync-etl-tests', randomUUID());
     directories.push(directory);

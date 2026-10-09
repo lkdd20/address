@@ -1095,6 +1095,7 @@ export const runAddressEtl = async ({
           sourceChecksumSha256: task.materialized.sourceChecksum || task.previous?.sourceChecksumSha256 || null,
           cacheBytes: task.materialized.cacheBytes, cacheHit: task.materialized.cacheHit, datasetId: imported.datasetId,
           acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
+          netGrowth: Number(imported.netGrowth || 0), changedCount: Number(imported.changedCount || 0),
           rejectionReasons: imported.rejectionReasons || {}, metrics: {
             ...(imported.metrics || {}),
             ...(task.materialized.metrics || {}),

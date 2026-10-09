@@ -110,6 +110,34 @@ describe('Hong Kong administrative catalog', () => {
     }
   });
 
+  it('restores truncated China city names and moves Jiangsu cities out of the Taiwan province', async () => {
+    const database = openTestDatabase(':memory:');
+    try {
+      await database.batch([
+        database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+          VALUES (20,'CN','TW','Taiwan','台湾','台湾','province',NULL,'/20/'),(21,'CN','JS','Jiangsu','江苏省','江苏省','province',NULL,'/21/'),
+            (22,'CN','ZJ','Zhejiang','浙江省','浙江省','province',NULL,'/22/')`),
+        database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude)
+          VALUES (30,'CN',22,'Taizhou','台州','台','prefecture',NULL,28.658,121.416),
+            (31,'CN',20,'Taizhou','台州','台','adm3',NULL,32.491,119.908),
+            (32,'CN',20,'Nanjing','南京','南京','adm1',NULL,32.061,118.778),
+            (33,'CN',20,'Kaohsiung','高雄','高雄','city',NULL,22.620,120.312),
+            (34,'CN',20,'Zhenzhou','郑州','郑','adm3',NULL,32.280,119.170)`)
+      ]);
+      await applyAdministrativeCatalogOverrides(database);
+      expect((await database.prepare('SELECT id,region_id,native_name,zh_name FROM catalog_cities WHERE id BETWEEN 30 AND 34 ORDER BY id').all()).results)
+        .toEqual([
+          { id: 30, region_id: 22, native_name: '台州', zh_name: '台州' },
+          { id: 31, region_id: 21, native_name: '泰州', zh_name: '泰州' },
+          { id: 32, region_id: 21, native_name: '南京', zh_name: '南京' },
+          { id: 33, region_id: 20, native_name: '高雄', zh_name: '高雄' },
+          { id: 34, region_id: 21, native_name: '真州', zh_name: '真州' }
+        ]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it('replaces a legacy catalog and scopes filters and coverage to the official hierarchy', async () => {
     const database = openTestDatabase(':memory:');
     const now = new Date().toISOString();

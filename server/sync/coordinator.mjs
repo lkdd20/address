@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 
 class SyncBusyError extends Error {
@@ -258,9 +259,13 @@ export class SyncCoordinator {
         try {
           await rename(this.lockFile, staleFile);
           await rm(staleFile, { force: true });
-          return this.acquireLock(jobId, true);
+          const lock = await this.acquireLock(jobId, true);
+          // The stale lock's job died with its process; record it as interrupted instead of leaving it running.
+          await this.reconcileJobs(jobId).catch((error) => console.error('[address-sync] stale job reconciliation failed', error));
+          return lock;
         } catch (renameError) {
           if (renameError?.code === 'ENOENT') return this.acquireLock(jobId, true);
+          throw renameError;
         }
       }
       throw new SyncBusyError(await this.readLockJobId());
@@ -272,6 +277,7 @@ export class SyncCoordinator {
       jobId,
       token: lock.token,
       pid: process.pid,
+      host: hostname(),
       heartbeatAt: this.now().toISOString()
     }));
     await lock.handle.write(value, 0, value.length, 0);
@@ -326,7 +332,9 @@ export class SyncCoordinator {
       if (!lock) return null;
       if (lock.invalid && await this.removeLockFile()) return null;
     }
-    const ownerAlive = lock.pid === process.pid
+    // The sync service is a singleton whose new container starts only after the old one stopped, and process ids
+    // restart in every container, so a lock written on another host belongs to a stopped process.
+    const ownerAlive = lock.pid === process.pid || (lock.host && lock.host !== hostname())
       ? false
       : Number.isSafeInteger(lock.pid) && lock.pid > 0
       ? this.processIsAlive(lock.pid)
@@ -429,6 +437,19 @@ export class SyncCoordinator {
         new Error(`Synchronization worker did not stop within ${this.cancelGraceMs}ms after shutdown cancellation`),
         { code: 'SYNC_WORKER_STUCK' }
       );
+      // The process exits next, so the interruption is recorded first; otherwise the run stays "running".
+      const job = this.currentJob;
+      if (job) {
+        Object.assign(job, {
+          status: 'failed', phase: 'failed', completedAt: this.now().toISOString(), error: errorText(error),
+          errorCode: 'SYNC_JOB_INTERRUPTED', failurePhase: job.phase === 'failed' ? job.failurePhase : job.phase
+        });
+        await this.writeJob(job).catch(() => {});
+        await Promise.race([
+          Promise.resolve(this.history?.completed(job)),
+          new Promise((resolveWait) => setTimeout(resolveWait, this.cancelGraceMs).unref?.())
+        ]).catch((historyError) => console.error('[address-sync] interrupted job history persistence failed', historyError));
+      }
       try { this.fatal(error); } catch {}
       return false;
     }

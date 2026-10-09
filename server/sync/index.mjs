@@ -18,6 +18,7 @@ import { refreshAddressCoverage } from '../control/coverage';
 import { runPostcodeInference } from './postcode-inference.mjs';
 import { repairChineseAddressStrings } from './chinese-address-repair.mjs';
 import { repairTaiwanOfficialNames } from './taiwan-name-repair.mjs';
+import { ensureEvidenceDatasetIndex } from '../database/evidence-dataset-index.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
 import { ChinaDataService } from '../china/service';
@@ -135,6 +136,11 @@ export const createSyncRuntime = async ({
       await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
       return;
     }
+    // Runs beside the other startup steps: a concurrent build waits for running import transactions.
+    if (postgresPool) void startupStep('evidence dataset index', async () => {
+      const client = await postgresPool.connect();
+      try { await ensureEvidenceDatasetIndex(client); } finally { client.release(); }
+    });
     await startupStep('postcode inference', async () => {
       const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
       for (const { country_code: countryCode } of countries) {
@@ -176,6 +182,7 @@ export const createSyncRuntime = async ({
   };
   const history = new SyncHistoryStore(queueDatabase, { catalogShards, now });
   await history.repairInterruptedRuns();
+  await history.repairFailedRunGrowth();
   await history.repairLegacyProjections();
   const coordinator = new SyncCoordinator({
     stateDir,

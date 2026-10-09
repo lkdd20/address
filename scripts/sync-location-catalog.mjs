@@ -7,6 +7,7 @@ import { strFromU8, unzipSync } from 'fflate';
 import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
 import { catalogHierarchyPaths, correctSpanishProvinceParents } from '../server/database/catalog-hierarchy.mjs';
 import { implausibleChineseTranslation } from '../src/domain/address-localization.mjs';
+import { chinaCityNames, chinaCityRegionCode } from '../server/database/china-catalog-corrections.mjs';
 
 const countryCodes = new Set([
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU', 'JP', 'HK', 'SG', 'TW', 'KR', 'MY',
@@ -68,8 +69,17 @@ selectedStates.push(...hongKongRegions.map((region) => ({
 })));
 const regionPaths = catalogHierarchyPaths(selectedStates);
 const stateIds = new Set(selectedStates.map((state) => state.id));
+const chinaStateIds = new Map(selectedStates.filter((state) => state.country_code === 'CN' && !state.parent_id)
+  .map((state) => [state.iso2, state.id]));
+const chinaStateCodes = new Map([...chinaStateIds].map(([code, id]) => [id, code]));
 const selectedCities = cities.filter((city) => city.country_code !== 'HK' && countryCodes.has(city.country_code)
-  && (!city.state_id || stateIds.has(city.state_id)));
+  && (!city.state_id || stateIds.has(city.state_id))).map((city) => {
+  if (city.country_code !== 'CN') return city;
+  const names = chinaCityNames({ name: city.name, native: city.native, zh: city.translations?.['zh-CN'], latitude: city.latitude, longitude: city.longitude });
+  const stateCode = chinaStateCodes.get(city.state_id);
+  return { ...city, native: names.native, translations: { ...city.translations, 'zh-CN': names.zh },
+    state_id: stateCode ? chinaStateIds.get(chinaCityRegionCode(stateCode, city.latitude)) ?? city.state_id : city.state_id };
+});
 const hongKongRegionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
 selectedCities.push(...hongKongDistricts.map((district) => ({
   id: district.id, country_code: 'HK', state_id: hongKongRegionIds.get(district.regionCode),

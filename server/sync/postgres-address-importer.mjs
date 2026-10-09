@@ -325,11 +325,13 @@ const variants = (record) => ({
   addresses: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, record.localizations[language].formattedAddress]))
 });
 
+// Returns the ids among the records that were already in the published pool before this import.
 const preserveLocalizations = async (database, records) => {
-  const rows = (await database.prepare(`SELECT id,native_language,component_variants_json,address_variants_json
+  const rows = (await database.prepare(`SELECT id,active,native_language,component_variants_json,address_variants_json
     FROM address_pool WHERE id IN (${records.map(() => '?').join(',')}) FOR UPDATE`)
     .bind(...records.map((record) => record.id)).all()).results;
   const previous = new Map(rows.map((row) => [row.id, row]));
+  const active = new Set(rows.filter((row) => Number(row.active) === 1).map((row) => row.id));
   for (const record of records) {
     const row = previous.get(record.id);
     if (!row || row.native_language !== record.nativeLanguage) continue;
@@ -345,6 +347,7 @@ const preserveLocalizations = async (database, records) => {
       record.localizations[language] = { components, formattedAddress: addresses[language], source: 'validated-previous-source' };
     }
   }
+  return active;
 };
 
 const sourceStatement = (database, shard, observedAt) => database.prepare(`
@@ -405,6 +408,7 @@ const addressStatements = (database, records, context) => {
     );
     return '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL,?)';
   });
+  // Rows retired by publication validation return only through translation recovery after revalidation.
   const address = database.prepare(`
     INSERT INTO address_pool(
       id,canonical_key,country_code,admin1,admin1_code,locality,postal_locality,district,postcode,street,house_number,
@@ -423,8 +427,10 @@ const addressStatements = (database, records, context) => {
       locality_key=excluded.locality_key,postal_locality_key=excluded.postal_locality_key,
       district_key=excluded.district_key,postcode_key=excluded.postcode_key,
       property_type=excluded.property_type,quality_score=GREATEST(address_pool.quality_score,excluded.quality_score),
-      generation=excluded.generation,coverage=excluded.coverage,active=1,last_seen_at=excluded.last_seen_at,
-      expires_at=excluded.expires_at,retired_at=NULL,match_level=excluded.match_level
+      generation=excluded.generation,coverage=excluded.coverage,last_seen_at=excluded.last_seen_at,
+      expires_at=excluded.expires_at,match_level=excluded.match_level,
+      active=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%' THEN 0 ELSE 1 END,
+      retired_at=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%' THEN address_pool.retired_at ELSE NULL END
   `).bind(...addressBindings);
   const evidenceBindings = [];
   const evidenceRows = records.flatMap((record) => {
@@ -692,6 +698,12 @@ export class PostgresAddressImporter {
     checkpoint();
     const observedAt = new Date().toISOString();
     const context = { datasetId, discovery, observedAt, expiresAt: null, hash: this.hash };
+    // This import's own effect on the pool: rows it adds or reactivates minus rows it retires. Totals measured around
+    // the run would also count addresses that translation publishing added meanwhile.
+    const previouslyActive = new Set();
+    let addedCount = 0;
+    let reactivatedCount = 0;
+    let retiredCount = 0;
     await this.database.transaction(async () => {
       checkpoint();
       await this.database.batch([
@@ -702,7 +714,7 @@ export class PostgresAddressImporter {
       for (let offset = 0; offset < localized.length; offset += batchSize) {
         checkpoint();
         const batch = localized.slice(offset, offset + batchSize);
-        await preserveLocalizations(this.database, batch);
+        for (const id of await preserveLocalizations(this.database, batch)) previouslyActive.add(id);
         await this.database.batch(addressStatements(this.database, batch, context));
         checkpoint();
         await new Promise((resolve) => setImmediate(resolve));
@@ -742,7 +754,7 @@ export class PostgresAddressImporter {
         // Rows retired by publication validation stay out of the pool even while their evidence is current.
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
           WHERE country_code=? AND active=1 AND retired_at LIKE 'publication-validation:%'`).bind(observedAt, shard.countryCode)
-      ]);
+      ]).then((results) => { retiredCount += results.slice(-2).reduce((sum, result) => sum + Number(result?.meta?.changes || 0), 0); });
       checkpoint();
       const primaryEvidenceRows = (await this.database.prepare(`SELECT candidate.id,candidate.address_id
         FROM address_pool_evidence candidate
@@ -791,8 +803,12 @@ export class PostgresAddressImporter {
       for (let offset = 0; offset < countryCandidates.length; offset += batchSize) {
         checkpoint();
         const ids = countryCandidates.slice(offset, offset + batchSize).map(({ id }) => String(id));
-        await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
-          WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%') AND (active=0 OR retired_at IS NOT NULL)
+        const reactivated = await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
+          WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%') AND active=0
+            AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+        reactivatedCount += Number(reactivated.meta?.changes || 0);
+        await this.database.prepare(`UPDATE address_pool SET retired_at=NULL
+          WHERE active=1 AND retired_at IS NOT NULL AND retired_at NOT LIKE 'publication-validation:%'
             AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
       }
       const activeDatasets = (await this.database.prepare(`SELECT id FROM address_datasets
@@ -841,10 +857,17 @@ export class PostgresAddressImporter {
         )`).bind(shard.countryCode)
       ]);
       checkpoint();
+      const newlyListed = localized.map((record) => record.id).filter((id) => !previouslyActive.has(id));
+      for (let offset = 0; offset < newlyListed.length; offset += batchSize) {
+        const ids = newlyListed.slice(offset, offset + batchSize);
+        addedCount += Number(await this.database.prepare(`SELECT COUNT(*) AS total FROM address_pool
+          WHERE active=1 AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).first('total') || 0);
+      }
     });
     const residentialCount = localized.filter((record) => record.propertyType === 'residential' || record.propertyType === 'apartment').length;
     return {
       datasetId, acceptedCount: localized.length, rejectedCount, localityCount: localityCounts.size,
+      netGrowth: addedCount + reactivatedCount - retiredCount, changedCount: addedCount + reactivatedCount + retiredCount,
       admin1Count: candidateAdmin1Count, residentialCount,
       metrics,
       rejectionReasons: Object.fromEntries([...rejectionReasons].sort(([left], [right]) => left.localeCompare(right))),

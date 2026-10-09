@@ -528,6 +528,7 @@ CREATE INDEX IF NOT EXISTS idx_address_pool_postcode_random ON address_pool(coun
 CREATE INDEX IF NOT EXISTS idx_address_pool_generation ON address_pool(generation, active, expires_at);
 CREATE INDEX IF NOT EXISTS idx_address_pool_coverage ON address_pool(coverage, active, property_type);
 CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_address ON address_pool_evidence(address_id, is_current, is_primary);
+CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_dataset ON address_pool_evidence(dataset_id, evidence_type);
 CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_current_dataset
   ON address_pool_evidence(address_id, dataset_id) WHERE is_current = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_address_pool_evidence_source_record

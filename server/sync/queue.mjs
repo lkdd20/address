@@ -1690,6 +1690,8 @@ export const createSyncQueue = ({
       String(outcome?.shardId || outcome?.shardKey || '') === shardId);
     const beforeSource = pick.sourceExecution?.[shardId] || {};
     const afterSource = after?.sourceExecution?.[shardId] || beforeSource;
+    const ownGrowth = Number(sourceOutcome?.netGrowth || 0);
+    const ownChanges = Number(sourceOutcome?.changedCount || 0) > 0;
     const evaluation = evaluateAttempt({
       jobSucceeded: job?.status === 'succeeded',
       sourceComplete: sourceOutcome?.sourceComplete !== false,
@@ -1702,9 +1704,10 @@ export const createSyncQueue = ({
       partialMinimumWorkCount: Number(sourceOutcome?.metrics?.progressEvaluationMinimum || 1),
       partialProgressEvaluationReady: sourceOutcome?.metrics?.progressEvaluationReady === true,
       growthCapped: sourceOutcome?.metrics?.growthCapped === true,
-      netGrowth: (after?.current ?? pick.current) - pick.current,
-      goalDeficitBefore: goalDeficit(pick.rules),
-      goalDeficitAfter: goalDeficit(after?.rules),
+      // Only the source's own import counts as progress; totals also move while translations publish other rows.
+      netGrowth: ownGrowth,
+      goalDeficitBefore: ownChanges ? goalDeficit(pick.rules) : null,
+      goalDeficitAfter: ownChanges ? goalDeficit(after?.rules) : null,
       fingerprintBefore: pick.sourceFingerprints[shardId],
       fingerprintAfter: after?.sourceFingerprints?.[shardId] ?? pick.sourceFingerprints[shardId],
       failureFingerprintAfter: failure.fingerprint,
@@ -1729,7 +1732,7 @@ export const createSyncQueue = ({
       entry: pick, evaluation, evaluatedAt: completedAt, sourceId: shardId, runId: result.job.id
     });
     await applySharedFailureCircuit(after || pick, evaluation, completedAt);
-    log.log?.(`[sync-queue] ${pick.countryCode} ${evaluation.action} growth=${(after?.current ?? pick.current) - pick.current}`);
+    log.log?.(`[sync-queue] ${pick.countryCode} ${evaluation.action} growth=${ownGrowth}`);
     return cooldownMs;
   };
 
