@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out fork
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -57,7 +57,6 @@ jobs:
           # fork's workflows and sync every other upstream file normally.
           git rm -r -f --ignore-unmatch .github/workflows >/dev/null 2>&1 || true
           git checkout HEAD -- .github/workflows
-          git add -A
 
           unresolved="$(git diff --name-only --diff-filter=U)"
           if [[ -n "${unresolved}" ]]; then
@@ -67,5 +66,6 @@ jobs:
             exit 1
           fi
 
+          git add -A
           git commit -m 'chore: sync upstream (preserve fork workflows)'
           git push origin HEAD:main
