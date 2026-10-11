@@ -100,6 +100,40 @@ const addCountryReasons = (country, components, reasons) => {
   if (['DE', 'FR'].includes(country) && (!letters.test(street) || /^\d+$/u.test(street))) {
     reasons.push('invalid_street_name');
   }
+  if (country === 'IN' && latinOnlyFields.some((field) => hasNonLatinText(components[field]))) reasons.push('non_latin_text');
+};
+
+// India is published in English only; Devanagari, Tamil and other local-script text is not part of its contract.
+const nonLatinCharacter = /(?![\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}])[\p{L}\p{M}\p{N}]/u;
+const nonLatinRun = /(?:(?![\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}])[\p{L}\p{M}\p{N}]|[।॥])+/gu;
+const latinOnlyFields = ['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit', 'houseNumber'];
+export const englishOnlyCoreFields = ['street', 'locality', 'admin1'];
+export const hasNonLatinText = (value) => nonLatinCharacter.test(String(value ?? ''));
+const decimalDigits = (value) => String(value ?? '').replace(/\p{Nd}/gu, (digit) => {
+  let start = digit.codePointAt(0);
+  while (/\p{Nd}/u.test(String.fromCodePoint(start - 1))) start--;
+  return String((digit.codePointAt(0) - start) % 10);
+});
+export const stripNonLatinText = (value) => clean(decimalDigits(value).replace(nonLatinRun, ' '))
+  .replace(/[(\[{]\s*[)\]}]/gu, ' ').replace(/\s+([,;:])/gu, '$1').replace(/([,;:/|-])(?:\s*[,;:/|-])+/gu, '$1')
+  .replace(/\s+/gu, ' ').replace(/^[\s,;:/|&–—-]+|[\s,;:/|&–—-]+$/gu, '');
+// Returns the components without local-script text and the fields that held nothing else. A preferred value
+// (an earlier English translation of the same field) replaces local-script text when it is Latin-only.
+export const englishOnlyComponents = (components = {}, preferred = {}) => {
+  const output = { ...components };
+  const emptied = [];
+  for (const field of latinOnlyFields) {
+    const value = clean(output[field]);
+    if (!value || !hasNonLatinText(value)) continue;
+    const translated = clean(preferred[field]);
+    const stripped = translated && !hasNonLatinText(translated) && letters.test(translated) ? translated : stripNonLatinText(value);
+    if (stripped && (field === 'houseNumber' ? /[\p{L}\p{N}]/u : letters).test(stripped)) output[field] = stripped;
+    else {
+      delete output[field];
+      emptied.push(field);
+    }
+  }
+  return { components: output, emptied };
 };
 
 const addCoordinateReasons = (country, latitude, longitude, reasons) => {

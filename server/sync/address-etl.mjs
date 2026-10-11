@@ -25,7 +25,7 @@ import {
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { ADDRESS_POLICY_DEFAULTS, getRuntimePolicy, loadImportPolicy } from './address-policy.mjs';
-import { addressCanonicalKey, normalizeAddressFacts, streetAddressKey } from '../../src/domain/address-quality.mjs';
+import { addressCanonicalKey, englishOnlyComponents, englishOnlyCoreFields, normalizeAddressFacts, streetAddressKey } from '../../src/domain/address-quality.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -34,7 +34,7 @@ const defaultCacheDir = resolve(syncRoot, '../../.data-cache/address-sync');
 const nativeLanguage = {
   US: 'en', CA: 'en', MX: 'es', GB: 'en', DE: 'de', FR: 'fr', IT: 'it', ES: 'es', NL: 'nl',
   RU: 'ru', CN: 'zh-CN', HK: 'zh-HK', TW: 'zh-TW', JP: 'ja', SG: 'en', KR: 'ko', VN: 'vi',
-  TH: 'th', PH: 'fil', MY: 'ms', SA: 'ar', IN: 'hi', AU: 'en', TR: 'tr', BR: 'pt-BR', NG: 'en', ZA: 'en'
+  TH: 'th', PH: 'fil', MY: 'ms', SA: 'ar', IN: 'en', AU: 'en', TR: 'tr', BR: 'pt-BR', NG: 'en', ZA: 'en'
 };
 const residentialBuildings = new Set(['apartments', 'bungalow', 'cabin', 'detached', 'dormitory', 'ger', 'house', 'residential', 'semidetached_house', 'terrace']);
 
@@ -605,9 +605,15 @@ export const normalizeSourceRecord = (value, shard, format) => {
   if (!['street', 'premise', 'subpremise'].includes(matchLevel) || (matchLevel === 'street' && !streetLevel)) return null;
   if (streetLevel && (houseNumber || buildingName || unit || propertyType !== 'unknown' || residentialSourceRecordId)) return null;
   if (!sourceRecordId || !street || (!streetLevel && !houseNumber) || !finiteCoordinate(longitude, -180, 180) || !finiteCoordinate(latitude, -90, 90)) return null;
-  const components = normalizeAddressFacts(shard.countryCode, {
+  let components = normalizeAddressFacts(shard.countryCode, {
     houseNumber, street, buildingName, unit, district, locality, postalLocality, admin1, postcode
   });
+  if (shard.countryCode === 'IN') {
+    const english = englishOnlyComponents(components);
+    if (english.emptied.some((field) => englishOnlyCoreFields.includes(field) || field === 'houseNumber' && !streetLevel)) return null;
+    components = english.components;
+    ({ admin1 = '', locality = '', postalLocality = '', district = '', street = '', buildingName = '', unit = '', houseNumber = '' } = components);
+  }
   if (value.admin1_code) components.admin1Code = clean(value.admin1_code);
   const englishComponentHints = {};
   if (shard.countryCode === 'HK') {

@@ -32,6 +32,16 @@ describe('administrative boundary catalog', () => {
     expect(sourceCapabilityRevision(shard('KR', 'korea-kapt'))).toBe(sourceAdapterRevisions['korea-kapt']);
     expect(adminBoundaryRevision('PH')).not.toBe(adminBoundaryRevision('TH'));
   });
+
+  it('lets one Geofabrik extract change its own fingerprint without touching the other extracts', async () => {
+    const { loadSourceCatalog } = await import('../server/sync/source-adapters.mjs');
+    const shards = new Map((await loadSourceCatalog(undefined, {})).shards.map((shard) => [shard.id, shard]));
+    for (const id of ['geofabrik-osm-gb', 'geofabrik-osm-ru']) {
+      expect(sourceCapabilityRevision(shards.get(id)).startsWith(`${sourceAdapterRevisions.geofabrik}:cap-`)).toBe(true);
+    }
+    expect(sourceCapabilityRevision(shards.get('geofabrik-osm-au'))).toBe(sourceAdapterRevisions.geofabrik);
+    expect(shards.get('geofabrik-osm-gb').source.id).toBe('geofabrik-osm');
+  });
 });
 
 describe('applyAdministrativeBoundary', () => {

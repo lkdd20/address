@@ -208,6 +208,21 @@ CREATE TABLE IF NOT EXISTS catalog_metadata (
   postcode_count INTEGER NOT NULL
 );
 
+-- Catalog native names replaced by the reviewed correction table; the sync service rewrites stored addresses that
+-- were filled with the old name and then marks the row applied.
+CREATE TABLE IF NOT EXISTS catalog_native_repairs (
+  table_name TEXT NOT NULL,
+  catalog_id BIGINT NOT NULL,
+  country_code TEXT NOT NULL,
+  region_id BIGINT,
+  old_native TEXT NOT NULL,
+  new_native TEXT NOT NULL,
+  english_name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  applied_at TEXT,
+  PRIMARY KEY (table_name, catalog_id, old_native)
+);
+
 CREATE TABLE IF NOT EXISTS residential_coverage (
   country_code TEXT NOT NULL,
   region_name TEXT NOT NULL DEFAULT '',

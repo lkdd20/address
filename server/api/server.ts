@@ -257,6 +257,11 @@ const server = serve({
     }
     const response = await staticApp.fetch(request, node);
     if (url.pathname.startsWith('/_astro/')) response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    // Hono has no GeoJSON type; served as octet-stream the 270 KB world map was neither compressed nor cached.
+    if (url.pathname.endsWith('.geojson') && response.ok) {
+      response.headers.set('Content-Type', 'application/geo+json');
+      response.headers.set('Cache-Control', 'public, max-age=86400');
+    }
     return securityHeaders(response);
   },
   hostname,

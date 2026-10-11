@@ -147,3 +147,8 @@
 ## 缺少州档案（2026-10-10）
 
 - USA Structures 列表中缺少某州档案时，该州不再使整次美国同步失败：记录警告，地址照常导入，住宅佐证回退到 Overture Buildings；没有住宅证据的地址仍只作普通真实地址发布。
+
+## 目录本地名核验（2026-10-11）
+
+- 上游 countries-states-cities-database 的 native 字段存在机器翻译错误（如 Ordu→“Saat”、Alaska→“Down”）。本国地址以英文书写，目录本地名统一为英文名（仅保留只差重音的本地拼写，如 Montréal）。核验表为 server/database/catalog-native-corrections.json（scripts/verify-catalog-native-names.mjs 生成，省级逐条人工复核），迁移时更新目录，目录同步沿用同一表。
+- 本国修正：省级 3 条、城市 1119 条。曾用旧本地名补全的已存地址，由 sync 启动时一次性改写原文省/市（城市仅在其所属省内改写），重建原文与英文地址字符串、去重键和生成索引；英文与中文字段不受影响。

@@ -18,6 +18,8 @@ import { refreshAddressCoverage } from '../control/coverage';
 import { runPostcodeInference } from './postcode-inference.mjs';
 import { repairChineseAddressStrings } from './chinese-address-repair.mjs';
 import { repairTaiwanOfficialNames } from './taiwan-name-repair.mjs';
+import { repairCatalogNativeAddresses } from './catalog-native-repair.mjs';
+import { repairIndiaEnglishAddresses } from './india-english-repair.mjs';
 import { ensureEvidenceDatasetIndex } from '../database/evidence-dataset-index.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
@@ -159,6 +161,15 @@ export const createSyncRuntime = async ({
     await startupStep('taiwan official names', async () => {
       const summary = await repairTaiwanOfficialNames({ database });
       if (summary.renamed || summary.duplicates) console.log(JSON.stringify({ event: 'taiwan_official_name_repair', ...summary }));
+    });
+    await startupStep('catalog native names', async () => {
+      for (const summary of await repairCatalogNativeAddresses({ database })) {
+        console.log(JSON.stringify({ event: 'catalog_native_name_repair', ...summary }));
+      }
+    });
+    await startupStep('india english addresses', async () => {
+      const summary = await repairIndiaEnglishAddresses({ database });
+      if (summary.cleaned || summary.retired || summary.duplicates) console.log(JSON.stringify({ event: 'india_english_repair', ...summary }));
     });
     await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
     await startupStep('generation index refresh', () => refreshStaleAddressGenerationIndexes(database));

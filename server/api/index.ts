@@ -114,15 +114,25 @@ const poolMetadataCache = new WeakMap<object, {
   expiresAt: number;
   v2?: Map<string, AddressPoolV2Count>;
 }>();
-const countryGoalCache = new WeakMap<object, { expiresAt: number; promise: ReturnType<typeof evaluateCountryGoals> }>();
+const countryGoalCache = new WeakMap<object, {
+  expiresAt: number; promise: ReturnType<typeof evaluateCountryGoals>; settled?: boolean; refreshing?: boolean;
+}>();
 
+// Evaluating every country's goals takes about two seconds, so an expired result is served while a refresh runs.
 const cachedCountryGoals = (db: Database): ReturnType<typeof evaluateCountryGoals> => {
   const key = db as object;
   const cached = countryGoalCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  if (cached && (cached.expiresAt > Date.now() || cached.refreshing)) return cached.promise;
   const promise = evaluateCountryGoals(db);
-  countryGoalCache.set(key, { expiresAt: Date.now() + 10_000, promise });
-  void promise.catch(() => {
+  if (cached?.settled) {
+    cached.refreshing = true;
+    void promise.then(
+      () => countryGoalCache.set(key, { expiresAt: Date.now() + 60_000, promise, settled: true }),
+      () => { cached.refreshing = false; });
+    return cached.promise;
+  }
+  countryGoalCache.set(key, { expiresAt: Date.now() + 60_000, promise });
+  void promise.then(() => { const current = countryGoalCache.get(key); if (current?.promise === promise) current.settled = true; }, () => {
     if (countryGoalCache.get(key)?.promise === promise) countryGoalCache.delete(key);
   });
   return promise;

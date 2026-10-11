@@ -289,7 +289,7 @@
   {
     "countryCode": "CA",
     "name": "Nova Scotia",
-    "native": "New Scotia",
+    "native": "Nova Scotia",
     "zh": "新斯科舍省",
     "code": "NS"
   },
@@ -716,7 +716,7 @@
   {
     "countryCode": "ES",
     "name": "Basque Country",
-    "native": "País vasco",
+    "native": "País Vasco",
     "zh": "巴斯克地区",
     "code": "PV"
   },
@@ -772,7 +772,7 @@
   {
     "countryCode": "ES",
     "name": "Estremadura",
-    "native": "Extremo",
+    "native": "Extremadura",
     "zh": "埃斯特雷马杜拉",
     "code": "EX"
   },
@@ -814,7 +814,7 @@
   {
     "countryCode": "ES",
     "name": "Valencian Community",
-    "native": "Comunidad valenciana",
+    "native": "Comunidad Valenciana",
     "zh": "瓦伦西亚自治区",
     "code": "VC"
   },
@@ -884,14 +884,14 @@
   {
     "countryCode": "FR",
     "name": "French Southern and Antarctic Lands",
-    "native": "Terres du sud et de l'Antarctique français",
+    "native": "Terres australes et antarctiques françaises",
     "zh": "法属南部和南极领地",
     "code": "TF"
   },
   {
     "countryCode": "FR",
     "name": "Grand-Est",
-    "native": "Grand-Est",
+    "native": "Grand Est",
     "zh": "大东部",
     "code": "GES"
   },
@@ -982,14 +982,14 @@
   {
     "countryCode": "FR",
     "name": "Pays-de-la-Loire",
-    "native": "Pays-de-la-Loire",
+    "native": "Pays de la Loire",
     "zh": "卢瓦尔河地区",
     "code": "PDL"
   },
   {
     "countryCode": "FR",
     "name": "Provence-Alpes-Côte-d’Azur",
-    "native": "Provence-Alpes-Côte-d’Azur",
+    "native": "Provence-Alpes-Côte d'Azur",
     "zh": "普罗旺斯-阿尔卑斯-蓝色海岸",
     "code": "PAC"
   },
@@ -1017,7 +1017,7 @@
   {
     "countryCode": "FR",
     "name": "Wallis and Futuna",
-    "native": "Wallis et Futuna",
+    "native": "Wallis-et-Futuna",
     "zh": "瓦利斯和富图纳群岛",
     "code": "WF"
   },
@@ -1073,252 +1073,252 @@
   {
     "countryCode": "IN",
     "name": "Andaman and Nicobar Islands",
-    "native": "अंडमान व नोकोबार द्वीप समूह",
+    "native": "Andaman and Nicobar Islands",
     "zh": "安达曼和尼科巴群岛",
     "code": "AN"
   },
   {
     "countryCode": "IN",
     "name": "Andhra Pradesh",
-    "native": "आंध्र प्रदेश",
+    "native": "Andhra Pradesh",
     "zh": "安得拉邦",
     "code": "AP"
   },
   {
     "countryCode": "IN",
     "name": "Arunachal Pradesh",
-    "native": "अरुणाचल प्रदेश",
+    "native": "Arunachal Pradesh",
     "zh": "阿鲁纳恰尔邦",
     "code": "AR"
   },
   {
     "countryCode": "IN",
     "name": "Assam",
-    "native": "असम",
+    "native": "Assam",
     "zh": "阿萨姆",
     "code": "AS"
   },
   {
     "countryCode": "IN",
     "name": "Bihar",
-    "native": "बिहार",
+    "native": "Bihar",
     "zh": "比哈尔邦",
     "code": "BR"
   },
   {
     "countryCode": "IN",
     "name": "Chandigarh",
-    "native": "चंडीगढ़",
+    "native": "Chandigarh",
     "zh": "昌迪加尔",
     "code": "CH"
   },
   {
     "countryCode": "IN",
     "name": "Chhattisgarh",
-    "native": "छत्तीसगढ",
+    "native": "Chhattisgarh",
     "zh": "恰蒂斯加尔邦",
     "code": "CT"
   },
   {
     "countryCode": "IN",
     "name": "Dadra and Nagar Haveli and Daman and Diu",
-    "native": "दादरा और नगर हवेली और दमन और दीव",
+    "native": "Dadra and Nagar Haveli and Daman and Diu",
     "zh": "达德拉和纳加尔哈维利以及达曼和迪乌",
     "code": "DH"
   },
   {
     "countryCode": "IN",
     "name": "Delhi",
-    "native": "दिल्ली",
+    "native": "Delhi",
     "zh": "德里",
     "code": "DL"
   },
   {
     "countryCode": "IN",
     "name": "Goa",
-    "native": "गोवा",
+    "native": "Goa",
     "zh": "果阿",
     "code": "GA"
   },
   {
     "countryCode": "IN",
     "name": "Gujarat",
-    "native": "गुजरात",
+    "native": "Gujarat",
     "zh": "古吉拉特邦",
     "code": "GJ"
   },
   {
     "countryCode": "IN",
     "name": "Haryana",
-    "native": "हरियाणा",
+    "native": "Haryana",
     "zh": "哈里亚纳邦",
     "code": "HR"
   },
   {
     "countryCode": "IN",
     "name": "Himachal Pradesh",
-    "native": "हिमाचल प्रदेश",
+    "native": "Himachal Pradesh",
     "zh": "喜马偕尔邦",
     "code": "HP"
   },
   {
     "countryCode": "IN",
     "name": "Jammu and Kashmir",
-    "native": "जम्मू और कश्मीर",
+    "native": "Jammu and Kashmir",
     "zh": "查谟和克什米尔",
     "code": "JK"
   },
   {
     "countryCode": "IN",
     "name": "Jharkhand",
-    "native": "झारखंड",
+    "native": "Jharkhand",
     "zh": "贾坎德邦",
     "code": "JH"
   },
   {
     "countryCode": "IN",
     "name": "Karnataka",
-    "native": "कर्नाटक",
+    "native": "Karnataka",
     "zh": "卡纳塔克邦",
     "code": "KA"
   },
   {
     "countryCode": "IN",
     "name": "Kerala",
-    "native": "केरल",
+    "native": "Kerala",
     "zh": "喀拉拉邦",
     "code": "KL"
   },
   {
     "countryCode": "IN",
     "name": "Ladakh",
-    "native": "लद्दाख",
+    "native": "Ladakh",
     "zh": "拉达克",
     "code": "LA"
   },
   {
     "countryCode": "IN",
     "name": "Lakshadweep",
-    "native": "लक्षद्वीप",
+    "native": "Lakshadweep",
     "zh": "拉克沙群岛",
     "code": "LD"
   },
   {
     "countryCode": "IN",
     "name": "Madhya Pradesh",
-    "native": "मध्य प्रदेश",
+    "native": "Madhya Pradesh",
     "zh": "中央邦",
     "code": "MP"
   },
   {
     "countryCode": "IN",
     "name": "Maharashtra",
-    "native": "महाराष्ट्र",
+    "native": "Maharashtra",
     "zh": "马哈拉施特拉邦",
     "code": "MH"
   },
   {
     "countryCode": "IN",
     "name": "Manipur",
-    "native": "मणिपुर",
+    "native": "Manipur",
     "zh": "曼尼普尔邦",
     "code": "MN"
   },
   {
     "countryCode": "IN",
     "name": "Meghalaya",
-    "native": "मेघालय",
+    "native": "Meghalaya",
     "zh": "梅加拉亚邦",
     "code": "ML"
   },
   {
     "countryCode": "IN",
     "name": "Mizoram",
-    "native": "मिजोरम",
+    "native": "Mizoram",
     "zh": "米佐拉姆邦",
     "code": "MZ"
   },
   {
     "countryCode": "IN",
     "name": "Nagaland",
-    "native": "नागालैंड",
+    "native": "Nagaland",
     "zh": "那加兰邦",
     "code": "NL"
   },
   {
     "countryCode": "IN",
     "name": "Odisha",
-    "native": "ओडिशा",
+    "native": "Odisha",
     "zh": "奥里萨邦",
     "code": "OR"
   },
   {
     "countryCode": "IN",
     "name": "Puducherry",
-    "native": "पुदुचेरी",
+    "native": "Puducherry",
     "zh": "本地治里",
     "code": "PY"
   },
   {
     "countryCode": "IN",
     "name": "Punjab",
-    "native": "पंजाब",
+    "native": "Punjab",
     "zh": "旁遮普",
     "code": "PB"
   },
   {
     "countryCode": "IN",
     "name": "Rajasthan",
-    "native": "राजस्थान",
+    "native": "Rajasthan",
     "zh": "拉贾斯坦邦",
     "code": "RJ"
   },
   {
     "countryCode": "IN",
     "name": "Sikkim",
-    "native": "सिक्किम",
+    "native": "Sikkim",
     "zh": "锡金",
     "code": "SK"
   },
   {
     "countryCode": "IN",
     "name": "Tamil Nadu",
-    "native": "तमिलनाडु",
+    "native": "Tamil Nadu",
     "zh": "泰米尔纳德邦",
     "code": "TN"
   },
   {
     "countryCode": "IN",
     "name": "Telangana",
-    "native": "तेलंगाना",
+    "native": "Telangana",
     "zh": "特伦甘纳邦",
     "code": "TG"
   },
   {
     "countryCode": "IN",
     "name": "Tripura",
-    "native": "त्रिपुरा",
+    "native": "Tripura",
     "zh": "特里普拉邦",
     "code": "TR"
   },
   {
     "countryCode": "IN",
     "name": "Uttar Pradesh",
-    "native": "उत्तर प्रदेश",
+    "native": "Uttar Pradesh",
     "zh": "北方邦",
     "code": "UP"
   },
   {
     "countryCode": "IN",
     "name": "Uttarakhand",
-    "native": "उत्तराखंड",
+    "native": "Uttarakhand",
     "zh": "北阿坎德邦",
     "code": "UK"
   },
   {
     "countryCode": "IN",
     "name": "West Bengal",
-    "native": "पश्चिम बंगाल",
+    "native": "West Bengal",
     "zh": "西孟加拉邦",
     "code": "WB"
   },
@@ -1332,7 +1332,7 @@
   {
     "countryCode": "IT",
     "name": "Aosta Valley",
-    "native": "Usando",
+    "native": "Valle d'Aosta",
     "zh": "瓦莱达奥斯塔",
     "code": "23"
   },
@@ -1374,7 +1374,7 @@
   {
     "countryCode": "IT",
     "name": "Friuli–Venezia Giulia",
-    "native": "Friuli–Venezia Giulia",
+    "native": "Friuli-Venezia Giulia",
     "zh": "弗留利-威尼斯朱利亚",
     "code": "36"
   },
@@ -1437,7 +1437,7 @@
   {
     "countryCode": "IT",
     "name": "Trentino-South Tyrol",
-    "native": "Trentino-sud Tyrol",
+    "native": "Trentino-Alto Adige",
     "zh": "特伦蒂诺-南蒂罗尔",
     "code": "32"
   },
@@ -1815,7 +1815,7 @@
   {
     "countryCode": "KR",
     "name": "Gangwon",
-    "native": "강원도",
+    "native": "강원특별자치도",
     "zh": "江原道",
     "code": "42"
   },
@@ -1864,14 +1864,14 @@
   {
     "countryCode": "KR",
     "name": "North Jeolla",
-    "native": "전라북도",
+    "native": "전북특별자치도",
     "zh": "全罗北道",
     "code": "45"
   },
   {
     "countryCode": "KR",
     "name": "Sejong City",
-    "native": "세종시",
+    "native": "세종특별자치시",
     "zh": "世宗特别行政区",
     "code": "50"
   },
@@ -2270,7 +2270,7 @@
   {
     "countryCode": "NG",
     "name": "Akwa Ibom",
-    "native": "Immoral",
+    "native": "Akwa Ibom",
     "zh": "阿夸伊博姆州",
     "code": "AK"
   },
@@ -2333,7 +2333,7 @@
   {
     "countryCode": "NG",
     "name": "Edo",
-    "native": "Or",
+    "native": "Edo",
     "zh": "江户",
     "code": "ED"
   },
@@ -2571,7 +2571,7 @@
   {
     "countryCode": "NL",
     "name": "South Holland",
-    "native": "Zuid -Holland",
+    "native": "Zuid-Holland",
     "zh": "南荷兰",
     "code": "ZH"
   },
@@ -2746,7 +2746,7 @@
   {
     "countryCode": "RU",
     "name": "Astrakhan",
-    "native": "Астрахань",
+    "native": "Астраханская область",
     "zh": "阿斯特拉罕",
     "code": "AST"
   },
@@ -2781,7 +2781,7 @@
   {
     "countryCode": "RU",
     "name": "Chechen",
-    "native": "чеченский",
+    "native": "Чечня",
     "zh": "车臣",
     "code": "CE"
   },
@@ -2795,14 +2795,14 @@
   {
     "countryCode": "RU",
     "name": "Chukotka",
-    "native": "Чукотка",
+    "native": "Чукотский автономный округ",
     "zh": "楚科奇",
     "code": "CHU"
   },
   {
     "countryCode": "RU",
     "name": "Chuvash",
-    "native": "чувашский",
+    "native": "Чувашия",
     "zh": "楚瓦什人",
     "code": "CU"
   },
@@ -2830,21 +2830,21 @@
   {
     "countryCode": "RU",
     "name": "Ivanovo",
-    "native": "Иваново",
+    "native": "Ивановская область",
     "zh": "伊万诺沃",
     "code": "IVA"
   },
   {
     "countryCode": "RU",
     "name": "Jewish",
-    "native": "еврейский",
+    "native": "Еврейская автономная область",
     "zh": "犹太人",
     "code": "YEV"
   },
   {
     "countryCode": "RU",
     "name": "Kabardino-Balkar",
-    "native": "Кабардино-Балкарский",
+    "native": "Кабардино-Балкария",
     "zh": "卡巴尔达-巴尔卡尔",
     "code": "KB"
   },
@@ -2865,21 +2865,21 @@
   {
     "countryCode": "RU",
     "name": "Kaluga",
-    "native": "Калуга",
+    "native": "Калужская область",
     "zh": "卡卢加",
     "code": "KLU"
   },
   {
     "countryCode": "RU",
     "name": "Kamchatka",
-    "native": "Камчатка",
+    "native": "Камчатский край",
     "zh": "堪察加半岛",
     "code": "KAM"
   },
   {
     "countryCode": "RU",
     "name": "Karachay-Cherkess",
-    "native": "Карачаево-Черкесская",
+    "native": "Карачаево-Черкесия",
     "zh": "卡拉恰伊-切尔克斯",
     "code": "KC"
   },
@@ -2893,7 +2893,7 @@
   {
     "countryCode": "RU",
     "name": "Kemerovo",
-    "native": "Кемерово",
+    "native": "Кемеровская область",
     "zh": "克麦罗沃",
     "code": "KEM"
   },
@@ -2935,7 +2935,7 @@
   {
     "countryCode": "RU",
     "name": "Kostroma",
-    "native": "Кострома",
+    "native": "Костромская область",
     "zh": "科斯特罗马",
     "code": "KOS"
   },
@@ -3005,7 +3005,7 @@
   {
     "countryCode": "RU",
     "name": "Moscow",
-    "native": "Москва",
+    "native": "Московская область",
     "zh": "莫斯科",
     "code": "MOS"
   },
@@ -3026,14 +3026,14 @@
   {
     "countryCode": "RU",
     "name": "Nenets",
-    "native": "ненецкие",
+    "native": "Ненецкий автономный округ",
     "zh": "涅涅茨人",
     "code": "NEN"
   },
   {
     "countryCode": "RU",
     "name": "Nizhny Novgorod",
-    "native": "Нижний Новгород",
+    "native": "Нижегородская область",
     "zh": "下诺夫哥罗德",
     "code": "NIZ"
   },
@@ -3075,21 +3075,21 @@
   {
     "countryCode": "RU",
     "name": "Oryol",
-    "native": "Орел",
+    "native": "Орловская область",
     "zh": "奥廖尔",
     "code": "ORL"
   },
   {
     "countryCode": "RU",
     "name": "Penza",
-    "native": "Пенза",
+    "native": "Пензенская область",
     "zh": "奔萨",
     "code": "PNZ"
   },
   {
     "countryCode": "RU",
     "name": "Perm",
-    "native": "Пермь",
+    "native": "Пермский край",
     "zh": "彼尔姆",
     "code": "PER"
   },
@@ -3117,7 +3117,7 @@
   {
     "countryCode": "RU",
     "name": "Ryazan",
-    "native": "Рязань",
+    "native": "Рязанская область",
     "zh": "梁赞",
     "code": "RYA"
   },
@@ -3131,7 +3131,7 @@
   {
     "countryCode": "RU",
     "name": "Sakha",
-    "native": "Саха",
+    "native": "Якутия",
     "zh": "萨哈",
     "code": "SA"
   },
@@ -3145,7 +3145,7 @@
   {
     "countryCode": "RU",
     "name": "Samara",
-    "native": "Самара",
+    "native": "Самарская область",
     "zh": "萨马拉",
     "code": "SAM"
   },
@@ -3201,35 +3201,35 @@
   {
     "countryCode": "RU",
     "name": "Tula",
-    "native": "Тула",
+    "native": "Тульская область",
     "zh": "图拉",
     "code": "TUL"
   },
   {
     "countryCode": "RU",
     "name": "Tuva",
-    "native": "Тува",
+    "native": "Тыва",
     "zh": "图瓦",
     "code": "TY"
   },
   {
     "countryCode": "RU",
     "name": "Tver",
-    "native": "Тверь",
+    "native": "Тверская область",
     "zh": "特维尔",
     "code": "TVE"
   },
   {
     "countryCode": "RU",
     "name": "Tyumen",
-    "native": "Тюмень",
+    "native": "Тюменская область",
     "zh": "秋明",
     "code": "TYU"
   },
   {
     "countryCode": "RU",
     "name": "Udmurt",
-    "native": "удмуртский",
+    "native": "Удмуртия",
     "zh": "乌德穆尔特",
     "code": "UD"
   },
@@ -3257,7 +3257,7 @@
   {
     "countryCode": "RU",
     "name": "Vologda",
-    "native": "Вологда",
+    "native": "Вологодская область",
     "zh": "沃洛格达",
     "code": "VLG"
   },
@@ -3278,7 +3278,7 @@
   {
     "countryCode": "RU",
     "name": "Yaroslavl",
-    "native": "Ярославль",
+    "native": "Ярославская область",
     "zh": "雅罗斯拉夫尔",
     "code": "YAR"
   },
@@ -3334,14 +3334,14 @@
   {
     "countryCode": "SA",
     "name": "Ha'il",
-    "native": "يشيد",
+    "native": "منطقة حائل",
     "zh": "冰雹",
     "code": "06"
   },
   {
     "countryCode": "SA",
     "name": "Jizan",
-    "native": "جيزان",
+    "native": "منطقة جازان",
     "zh": "吉赞",
     "code": "09"
   },
@@ -3432,7 +3432,7 @@
   {
     "countryCode": "TH",
     "name": "Bangkok",
-    "native": "กรุงเทพฯ",
+    "native": "กรุงเทพมหานคร",
     "zh": "曼谷",
     "code": "10"
   },
@@ -3635,7 +3635,7 @@
   {
     "countryCode": "TH",
     "name": "Nan",
-    "native": "แนน",
+    "native": "จังหวัดน่าน",
     "zh": "南",
     "code": "55"
   },
@@ -4272,7 +4272,7 @@
   {
     "countryCode": "TR",
     "name": "Kars",
-    "native": "Karma",
+    "native": "Kars",
     "zh": "卡尔斯",
     "code": "36"
   },
@@ -4398,7 +4398,7 @@
   {
     "countryCode": "TR",
     "name": "Ordu",
-    "native": "Saat",
+    "native": "Ordu",
     "zh": "奥尔杜",
     "code": "52"
   },
@@ -4531,14 +4531,14 @@
   {
     "countryCode": "TW",
     "name": "Changhua",
-    "native": "Changhua",
+    "native": "彰化縣",
     "zh": "彰化",
     "code": "CHA"
   },
   {
     "countryCode": "TW",
     "name": "Chiayi",
-    "native": "Chiayi",
+    "native": "嘉義市",
     "zh": "嘉义",
     "code": "CYI"
   },
@@ -4552,7 +4552,7 @@
   {
     "countryCode": "TW",
     "name": "Hsinchu",
-    "native": "Hsinchu",
+    "native": "新竹市",
     "zh": "新竹",
     "code": "HSZ"
   },
@@ -4566,119 +4566,119 @@
   {
     "countryCode": "TW",
     "name": "Hualien",
-    "native": "Hualien",
+    "native": "花蓮縣",
     "zh": "花莲",
     "code": "HUA"
   },
   {
     "countryCode": "TW",
     "name": "Kaohsiung",
-    "native": "Kaohsiung",
+    "native": "高雄市",
     "zh": "高雄",
     "code": "KHH"
   },
   {
     "countryCode": "TW",
     "name": "Keelung",
-    "native": "Keelung",
+    "native": "基隆市",
     "zh": "基隆",
     "code": "KEE"
   },
   {
     "countryCode": "TW",
     "name": "Kinmen",
-    "native": "Kinmen",
+    "native": "金門縣",
     "zh": "金门",
     "code": "KIN"
   },
   {
     "countryCode": "TW",
     "name": "Lienchiang",
-    "native": "Lienchiang",
+    "native": "連江縣",
     "zh": "连江",
     "code": "LIE"
   },
   {
     "countryCode": "TW",
     "name": "Miaoli",
-    "native": "Miaoli",
+    "native": "苗栗縣",
     "zh": "苗栗",
     "code": "MIA"
   },
   {
     "countryCode": "TW",
     "name": "Nantou",
-    "native": "Nantou",
+    "native": "南投縣",
     "zh": "南投",
     "code": "NAN"
   },
   {
     "countryCode": "TW",
     "name": "New Taipei",
-    "native": "New Taipei",
+    "native": "新北市",
     "zh": "新北市",
     "code": "NWT"
   },
   {
     "countryCode": "TW",
     "name": "Penghu",
-    "native": "Penghu",
+    "native": "澎湖縣",
     "zh": "澎湖",
     "code": "PEN"
   },
   {
     "countryCode": "TW",
     "name": "Pingtung",
-    "native": "Pingtung",
+    "native": "屏東縣",
     "zh": "屏东",
     "code": "PIF"
   },
   {
     "countryCode": "TW",
     "name": "Taichung",
-    "native": "Taichung",
+    "native": "臺中市",
     "zh": "台中",
     "code": "TXG"
   },
   {
     "countryCode": "TW",
     "name": "Tainan",
-    "native": "Tainan",
+    "native": "臺南市",
     "zh": "台南",
     "code": "TNN"
   },
   {
     "countryCode": "TW",
     "name": "Taipei",
-    "native": "Taipei",
+    "native": "臺北市",
     "zh": "台北",
     "code": "TPE"
   },
   {
     "countryCode": "TW",
     "name": "Taitung",
-    "native": "Taitung",
+    "native": "臺東縣",
     "zh": "台东",
     "code": "TTT"
   },
   {
     "countryCode": "TW",
     "name": "Taoyuan",
-    "native": "Taoyuan",
+    "native": "桃園市",
     "zh": "桃园",
     "code": "TAO"
   },
   {
     "countryCode": "TW",
     "name": "Yilan",
-    "native": "Yilan",
+    "native": "宜蘭縣",
     "zh": "宜兰",
     "code": "ILA"
   },
   {
     "countryCode": "TW",
     "name": "Yunlin",
-    "native": "Yunlin",
+    "native": "雲林縣",
     "zh": "云林",
     "code": "YUN"
   },
@@ -4692,7 +4692,7 @@
   {
     "countryCode": "US",
     "name": "Alaska",
-    "native": "Down",
+    "native": "Alaska",
     "zh": "阿拉斯加州",
     "code": "AK"
   },
@@ -4713,7 +4713,7 @@
   {
     "countryCode": "US",
     "name": "Arkansas",
-    "native": "Arkansa",
+    "native": "Arkansas",
     "zh": "阿肯色州",
     "code": "AR"
   },
@@ -4979,7 +4979,7 @@
   {
     "countryCode": "US",
     "name": "Oklahoma",
-    "native": "Oklahola",
+    "native": "Oklahoma",
     "zh": "俄克拉荷马州",
     "code": "OK"
   },
@@ -5378,7 +5378,7 @@
   {
     "countryCode": "ZA",
     "name": "Mpumalanga",
-    "native": "East",
+    "native": "Mpumalanga",
     "zh": "姆普马兰加省",
     "code": "MP"
   },

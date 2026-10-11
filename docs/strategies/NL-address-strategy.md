@@ -132,3 +132,8 @@
 ## PDOK 元数据格式（2026-10-10）
 
 - PDOK OGC API 把集合更新时间放在顶层 `updated`（不再位于 self 链接），旧逻辑自 2026-10-07 起报 `SOURCE_METADATA_INVALID`。发现先读顶层 `updated`，兼容旧位置；来源版本仍为更新日期加适配器修订号，严格门禁不变。
+
+## 目录本地名核验（2026-10-11）
+
+- 上游 countries-states-cities-database 的 native 字段存在机器翻译错误（如 Ordu→“Saat”、Alaska→“Down”）。本地名以 Wikidata 本国语言标签核验：与本地名一致时只修正写法；本地名不符而标签与英文名一致时采用标签；标签与两者都不符（上游 Wikidata ID 错配）时，拉丁字母国家退回英文名、其他国家保留原值。核验表为 server/database/catalog-native-corrections.json（scripts/verify-catalog-native-names.mjs 生成，省级逐条人工复核），迁移时更新目录，目录同步沿用同一表。
+- 本国修正：省级 1 条、城市 197 条。曾用旧本地名补全的已存地址，由 sync 启动时一次性改写原文省/市（城市仅在其所属省内改写），重建原文与英文地址字符串、去重键和生成索引；英文与中文字段不受影响。

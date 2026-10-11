@@ -8,6 +8,7 @@ import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrat
 import { catalogHierarchyPaths, correctSpanishProvinceParents } from '../server/database/catalog-hierarchy.mjs';
 import { implausibleChineseTranslation } from '../src/domain/address-localization.mjs';
 import { chinaCityNames, chinaCityRegionCode } from '../server/database/china-catalog-corrections.mjs';
+import { correctedNativeName } from '../server/database/catalog-native-names.mjs';
 
 const countryCodes = new Set([
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU', 'JP', 'HK', 'SG', 'TW', 'KR', 'MY',
@@ -165,12 +166,12 @@ const catalogChineseName = (entry) => {
     || !implausibleChineseTranslation(original, translated)) ? translated : original;
 };
 writeBatch(stream, 'catalog_regions_staging', ['id', 'country_code', 'code', 'name', 'native_name', 'zh_name', 'type', 'parent_id', 'path', 'latitude', 'longitude'], selectedStates, (state) => [
-  state.id, state.country_code, state.iso2 || '', state.name, state.native || state.name,
+  state.id, state.country_code, state.iso2 || '', state.name, correctedNativeName('regions', state.id, state.native || state.name),
   catalogChineseName(state), state.type || '', state.parent_id ? Number(state.parent_id) : null,
   regionPaths.get(Number(state.id)), number(state.latitude), number(state.longitude)
 ]);
 writeBatch(stream, 'catalog_cities_staging', ['id', 'country_code', 'region_id', 'name', 'native_name', 'zh_name', 'type', 'population', 'latitude', 'longitude'], selectedCities, (city) => [
-  city.id, city.country_code, city.state_id || null, city.name, city.native || city.name,
+  city.id, city.country_code, city.state_id || null, city.name, correctedNativeName('cities', city.id, city.native || city.name),
   catalogChineseName(city), city.type || 'city', number(city.population), number(city.latitude), number(city.longitude)
 ]);
 writeBatch(stream, 'catalog_postcodes_staging', ['id', 'country_code', 'region_id', 'city_id', 'code', 'locality_name', 'latitude', 'longitude'], selectedPostcodes, (postcode) => [

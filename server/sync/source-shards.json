@@ -921,7 +921,7 @@
         { "countryCode": "IT", "extractId": "italy" },
         { "countryCode": "MX", "extractId": "mexico" },
         { "countryCode": "TW", "extractId": "taiwan" },
-        { "countryCode": "GB", "extractId": "united-kingdom" },
+        { "countryCode": "GB", "extractId": "united-kingdom", "capabilityInputs": { "processTimeout": "75m-retry-20261011" } },
         { "countryCode": "HK", "extractId": "china", "boundaryIso3": "HKG" },
         { "countryCode": "KR", "extractId": "south-korea" },
         { "countryCode": "NG", "extractId": "nigeria" },
@@ -946,7 +946,7 @@
         { "countryCode": "SA", "extractId": "gcc-states", "boundaryIso3": "SAU" },
         { "countryCode": "IN", "extractId": "india" },
         { "countryCode": "ZA", "extractId": "south-africa" },
-        { "countryCode": "RU", "extractId": "russia" },
+        { "countryCode": "RU", "extractId": "russia", "capabilityInputs": { "processTimeout": "75m-retry-20261011" } },
         { "countryCode": "BR", "extractId": "brazil" }
       ]
     },

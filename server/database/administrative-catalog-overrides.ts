@@ -3,6 +3,7 @@ import { catalogHierarchyPaths, correctSpanishProvinceParents } from './catalog-
 import type { PostgresDatabase } from './postgres.mjs';
 import { implausibleChineseTranslation } from '../../src/domain/address-localization.mjs';
 import { chinaCityNames, chinaCityRegionCode } from './china-catalog-corrections.mjs';
+import { catalogNativeCorrections } from './catalog-native-names.mjs';
 
 const chineseRegionCorrections = [{ countryCode: 'TR', code: '16', zh: '布尔萨' }];
 // Upstream catalog Chinese names that are literal translations (Emerald → 翠) fall back to the source name, as for
@@ -40,6 +41,46 @@ const repairCatalogChineseNames = async (transaction: Pick<PostgresDatabase, 'pr
       await transaction.prepare(`UPDATE ${table} SET zh_name=? WHERE id=?`).bind(row.native_name || row.name, row.id).run();
     }
   }
+};
+
+const catalogNativeRepairsSchema = `CREATE TABLE IF NOT EXISTS catalog_native_repairs (
+  table_name TEXT NOT NULL, catalog_id BIGINT NOT NULL, country_code TEXT NOT NULL, region_id BIGINT,
+  old_native TEXT NOT NULL, new_native TEXT NOT NULL, english_name TEXT NOT NULL, created_at TEXT NOT NULL, applied_at TEXT,
+  CONSTRAINT catalog_native_repairs_identity PRIMARY KEY (table_name, catalog_id, old_native)
+)`;
+
+// Upstream native names are often machine translations (Alaska -> "Down"); the reviewed correction table replaces
+// them. A Chinese name that fell back to the bad native follows it.
+export const repairCatalogNativeNames = async (transaction: Pick<PostgresDatabase, 'prepare'>): Promise<number> => {
+  let changed = 0;
+  // Existing databases gain the table here; schema.sql creates it for new ones.
+  const repairsTable = await transaction.prepare(`SELECT COUNT(*) AS total FROM information_schema.tables
+    WHERE table_name='catalog_native_repairs'`).first<{ total: number }>();
+  if (!Number(repairsTable?.total || 0)) await transaction.prepare(catalogNativeRepairsSchema).run();
+  for (const [table, kind] of [['catalog_regions', 'regions'], ['catalog_cities', 'cities']] as const) {
+    const entries = Object.entries(catalogNativeCorrections[kind] as Record<string, string>);
+    for (let offset = 0; offset < entries.length; offset += 500) {
+      const chunk = new Map(entries.slice(offset, offset + 500));
+      const ids = [...chunk.keys()].map(Number);
+      const regionColumn = table === 'catalog_cities' ? 'region_id' : 'parent_id';
+      const rows = (await transaction.prepare(`SELECT id,country_code,name,native_name,zh_name,${regionColumn} AS region_id
+        FROM ${table} WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids)
+        .all<{ id: number; country_code: string; name: string; native_name: string; zh_name: string; region_id: number | null }>()).results || [];
+      for (const row of rows) {
+        const native = chunk.get(String(row.id));
+        if (!native || native === row.native_name) continue;
+        const chinese = row.zh_name === row.native_name && !/\p{Script=Han}/u.test(row.native_name || '') ? native : row.zh_name;
+        await transaction.prepare(`UPDATE ${table} SET native_name=?,zh_name=? WHERE id=?`).bind(native, chinese, row.id).run();
+        // Stored addresses filled with the old name are rewritten by the sync service.
+        await transaction.prepare(`INSERT INTO catalog_native_repairs(table_name,catalog_id,country_code,region_id,old_native,
+            new_native,english_name,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
+          .bind(table, row.id, row.country_code, table === 'catalog_cities' ? row.region_id : row.id, row.native_name || '',
+            native, row.name, new Date().toISOString()).run();
+        changed += 1;
+      }
+    }
+  }
+  return changed;
 };
 
 const canonicalHongKongCatalog = async (database: PostgresDatabase): Promise<boolean> => {
@@ -91,6 +132,7 @@ export const applyAdministrativeCatalogOverrides = async (database: PostgresData
         OR component_variants_json LIKE '%中西區 &%' OR address_variants_json LIKE '%中西區 &%'
       )`).run();
     changed ||= Number(cleanup.meta?.changes || 0) > 0;
+    await repairCatalogNativeNames(transaction);
     await repairCatalogChineseNames(transaction);
     if (catalogIsCanonical) return;
     changed = true;

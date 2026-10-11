@@ -584,10 +584,10 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         maxRecords: extract.maxRecords ?? source.extractDefaults?.maxRecords,
         qualityGate: extract.qualityGate ?? source.extractDefaults?.qualityGate,
         intervalDays,
-        source: extract.shardId ? {
+        source: extract.shardId || extract.capabilityInputs ? {
           ...source,
-          id: `${source.id}-${extract.shardId}`,
-          name: `${source.name} (${extract.name || extract.extractId})`
+          ...(extract.shardId ? { id: `${source.id}-${extract.shardId}`, name: `${source.name} (${extract.name || extract.extractId})` } : {}),
+          ...(extract.capabilityInputs ? { capabilityInputs: { ...(source.capabilityInputs || {}), ...extract.capabilityInputs } } : {})
         } : source
       });
     } else if (source.adapter === 'japan-abr') {

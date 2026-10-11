@@ -6,6 +6,7 @@ import { validateAddressContract } from '../src/domain/address-contracts.mjs';
 import { validateAddressQuality, streetAddressKey } from '../src/domain/address-quality.mjs';
 import { postcodePatterns } from '../src/domain/postcode-patterns.mjs';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/mobile';
+import { englishNativeCountries } from '../server/database/catalog-native-names.mjs';
 
 const base = process.env.API_BASE_URL || 'https://address.333186.xyz/api/v1';
 const token = process.env.API_TOKEN || '';
@@ -80,6 +81,11 @@ const issueFor = (code, address) => {
   const zh = address.addressVariants?.['zh-CN'] || '';
   const nativeComponents = nativeCoreValues(nativeVariant);
   const englishComponents = semanticValues(address.componentVariants?.en);
+  // English-language countries write the same region and city in both variants; a difference is a bad catalog native.
+  const englishVariant = address.componentVariants?.en || {};
+  // Malaysian states keep their Malay official names (Pulau Pinang / Penang).
+  if (englishNativeCountries.has(code) && (code === 'MY' ? ['locality'] : ['admin1', 'locality']).some((field) => nativeVariant[field]
+    && englishVariant[field] && nativeVariant[field] !== englishVariant[field])) issues.push('native_english_mismatch');
   const chineseComponents = semanticValues(address.componentVariants?.['zh-CN']);
   const matchLevel = address.matchLevel;
   const streetLevel = matchLevel === 'street' && code !== 'CN';

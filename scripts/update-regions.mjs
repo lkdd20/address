@@ -1,5 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
+import { correctedNativeName } from '../server/database/catalog-native-names.mjs';
 
 const sourceUrl = 'https://raw.githubusercontent.com/dr5hn/countries-states-cities-database/master/json/states.json';
 const countryCodes = new Set([
@@ -18,7 +19,7 @@ const regions = states
   .map((state) => ({
     countryCode: state.country_code,
     name: state.name,
-    native: state.native || state.name,
+    native: correctedNativeName('regions', state.id, state.native || state.name),
     zh: chineseNameCorrections.get(`${state.country_code}:${state.iso2}`) || state.translations?.['zh-CN'] || state.name,
     code: state.iso2
   }))
