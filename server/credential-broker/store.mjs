@@ -1,5 +1,5 @@
 import { createDecipheriv, createHash } from 'node:crypto';
-import { deepLBudgetStatus } from './deepl.mjs';
+import { deepLBudgetRecheckAt, deepLBudgetStatuses } from './deepl.mjs';
 import { parseOpenAICompatibleSecret } from './openai-compatible.mjs';
 
 const periodStart = (period, offsetMinutes, date) => {
@@ -175,15 +175,18 @@ export class CredentialBrokerStore {
       FROM provider_credentials WHERE provider=? ORDER BY id`).bind(provider).all()).results;
     if (provider === 'deepl') {
       const enabled = rows.filter((row) => row.enabled && !['disabled', 'needs_review'].includes(row.status));
-      const budget = await deepLBudgetStatus(this.database);
-      const exhausted = Boolean(budget.observedAt && !budget.remaining);
-      const available = !exhausted && enabled.some((row) => !row.cooldown_until || row.cooldown_until <= now.toISOString());
+      const budgets = await deepLBudgetStatuses(this.database);
+      const ready = (row) => (!row.cooldown_until || row.cooldown_until <= now.toISOString())
+        && !(deepLBudgetRecheckAt(budgets.get(row.id)) > now.toISOString());
+      const available = enabled.some(ready);
+      const exhausted = !available && enabled.some((row) => deepLBudgetRecheckAt(budgets.get(row.id)));
       return { provider, known: rows.length > 0, available,
-        nextResetAt: available ? null : exhausted ? budget.resetAt : enabled.map((row) => row.cooldown_until).filter(Boolean).sort()[0] || null,
+        nextResetAt: available ? null : enabled.map((row) => [row.cooldown_until, deepLBudgetRecheckAt(budgets.get(row.id))]
+          .filter(Boolean).sort().at(-1)).filter(Boolean).sort()[0] || null,
         waitState: available ? null : !enabled.length ? 'blocked' : exhausted ? 'quota_wait' : 'cooldown_wait',
         reason: available || enabled.length ? null : !rows.length ? 'missing_api_key:deepl'
           : rows.some((row) => row.enabled) ? 'api_key_needs_review:deepl' : 'api_key_disabled:deepl',
-        revision: createHash('sha256').update(JSON.stringify([budget.resetAt, rows.map((row) => [row.id,
+        revision: createHash('sha256').update(JSON.stringify([rows.map((row) => [row.id, budgets.get(row.id)?.resetAt || null,
           row.enabled, row.qps_limit, row.quota_limit, row.secret_ciphertext, row.status === 'needs_review'])])).digest('hex') };
     }
     await synchronizeProviderCounters(this.database, provider, now);

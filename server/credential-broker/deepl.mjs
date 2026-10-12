@@ -5,8 +5,9 @@ export const deeplLanguages = { en: 'EN', 'zh-CN': 'ZH-HANS', 'zh-TW': 'ZH-HANT'
 export const isDeepLFreeKey = (value) => typeof value === 'string' && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}:fx$/iu.test(value.trim());
 export const characterCount = (values) => values.reduce((sum, value) => sum + Array.from(value).length, 0);
 
-export const deeplBudgetSchema = `CREATE TABLE IF NOT EXISTS deepl_character_budget (
-  id INTEGER PRIMARY KEY CHECK (id=1),
+// Each key is a separate DeepL account, so each keeps its own character ledger.
+export const deeplBudgetSchema = `CREATE TABLE IF NOT EXISTS deepl_credential_budget (
+  credential_id TEXT PRIMARY KEY,
   used_count BIGINT NOT NULL DEFAULT 0 CHECK (used_count>=0),
   provider_used BIGINT NOT NULL DEFAULT 0 CHECK (provider_used>=0),
   provider_limit BIGINT NOT NULL DEFAULT 0 CHECK (provider_limit>=0),
@@ -22,14 +23,22 @@ const decrypt = (row, key) => {
   return Buffer.concat([decipher.update(Buffer.from(row.secret_ciphertext, 'base64')), decipher.final()]).toString('utf8');
 };
 
-export const deepLBudgetStatus = async (database) => {
-  const row = await database.prepare('SELECT * FROM deepl_character_budget WHERE id=1').first();
-  const cap = await database.prepare("SELECT MIN(quota_limit) AS cap FROM provider_credentials WHERE provider='deepl' AND enabled=1").first('cap');
-  const limit = Math.min(Number(cap || 0), Number(row?.provider_limit || 0));
+const budgetStatus = (row) => {
+  const limit = Math.min(Number(row?.quota_limit || 0), Number(row?.provider_limit || 0));
   return { used: Number(row?.used_count || 0), limit, remaining: Math.max(0, limit - Number(row?.used_count || 0)),
     providerUsed: Number(row?.provider_used || 0), providerLimit: Number(row?.provider_limit || 0),
     observedAt: row?.observed_at || null, resetAt: row?.period_end || null, unit: 'characters' };
 };
+export const deepLBudgetStatuses = async (database) => new Map((await database.prepare(`SELECT credential.id,credential.quota_limit,
+    budget.used_count,budget.provider_used,budget.provider_limit,budget.observed_at,budget.period_end
+  FROM provider_credentials credential LEFT JOIN deepl_credential_budget budget ON budget.credential_id=credential.id
+  WHERE credential.provider='deepl'`).all()).results.map((row) => [row.id, budgetStatus(row)]));
+export const deepLBudgetStatus = async (database, credentialId) =>
+  (await deepLBudgetStatuses(database)).get(credentialId) || budgetStatus(null);
+export const deepLBudgetExhausted = (budget) => Boolean(budget?.observedAt && !budget.remaining);
+// An exhausted key rechecks its account usage at the reported reset or hourly, which is how a new period is noticed.
+export const deepLBudgetRecheckAt = (budget) => deepLBudgetExhausted(budget)
+  ? [new Date(Date.parse(budget.observedAt) + 3_600_000).toISOString(), budget.resetAt].filter(Boolean).sort()[0] : null;
 
 export const executeDeepL = async ({ database, masterKey, clientId, testPolicies, requestKey, parameters, usageOnly,
   fetchImpl, now = () => new Date(), signal, maxDispatches, onDispatch = () => {} }) => {
@@ -43,13 +52,17 @@ export const executeDeepL = async ({ database, masterKey, clientId, testPolicies
   if (clientId === 'test' && !testPolicies.deepl) return fail('BROKER_TEST_POLICY_BLOCKED', 403);
   if (!usageOnly && maxDispatches < 2) return fail('DEEPL_REQUEST_BUDGET_REQUIRED', 400);
   const reviewing = Boolean(usageOnly && parameters.credentialId);
+  const budgets = await deepLBudgetStatuses(database);
   const rows = (await database.prepare(`SELECT * FROM provider_credentials WHERE provider='deepl' AND enabled=1
     AND status<>'disabled' ORDER BY last_used_at IS NOT NULL,last_used_at,id`).all()).results;
   const disabledRoutes = usageOnly ? new Set() : new Set((await database.prepare(`SELECT credential_id FROM translation_routes
     WHERE provider='deepl' AND credential_id IS NOT NULL AND enabled=0`).all()).results.map((item) => item.credential_id));
-  const row = rows.find((item) => (!parameters.credentialId || item.id === parameters.credentialId)
+  const candidates = rows.filter((item) => (!parameters.credentialId || item.id === parameters.credentialId)
     && !disabledRoutes.has(item.id)
     && (reviewing || item.status !== 'needs_review' && (!item.cooldown_until || item.cooldown_until <= now().toISOString())));
+  const recheckAt = (item) => deepLBudgetRecheckAt(budgets.get(item.id));
+  const row = usageOnly ? candidates[0] : candidates.find((item) => !(recheckAt(item) > now().toISOString()));
+  if (!row && candidates.length) return fail('SOURCE_QUOTA_UNAVAILABLE', 429, candidates.map(recheckAt).sort()[0]);
   if (!row) return fail('SOURCE_CREDENTIAL_UNAVAILABLE', 503,
     rows.map((item) => item.cooldown_until).filter(Boolean).sort()[0] || null);
   let secret;
@@ -110,20 +123,23 @@ export const executeDeepL = async ({ database, masterKey, clientId, testPolicies
     || !Number.isSafeInteger(usage?.character_limit) || usage.character_limit <= 0) return await reject(0);
   const characters = usageOnly ? 0 : characterCount(parameters.values);
   const reservation = await database.transaction(async (transaction) => {
-    await transaction.prepare('INSERT INTO deepl_character_budget(id) VALUES (1) ON CONFLICT(id) DO NOTHING').run();
-    const budget = await transaction.prepare('SELECT * FROM deepl_character_budget WHERE id=1 FOR UPDATE').first();
-    const credentials = (await transaction.prepare("SELECT id,enabled,status,quota_limit,secret_ciphertext FROM provider_credentials WHERE provider='deepl' ORDER BY id FOR UPDATE").all()).results;
-    const current = credentials.find((item) => item.id === row.id);
+    await transaction.prepare('INSERT INTO deepl_credential_budget(credential_id) VALUES (?) ON CONFLICT(credential_id) DO NOTHING')
+      .bind(row.id).run();
+    const budget = await transaction.prepare('SELECT * FROM deepl_credential_budget WHERE credential_id=? FOR UPDATE').bind(row.id).first();
+    const current = await transaction.prepare('SELECT id,enabled,status,quota_limit,secret_ciphertext FROM provider_credentials WHERE id=? FOR UPDATE')
+      .bind(row.id).first();
     if (!current?.enabled || current.status === 'disabled' || !reviewing && current.status === 'needs_review'
       || current.secret_ciphertext !== row.secret_ciphertext) return null;
-    const limit = Math.min(usage.character_limit, ...credentials.filter((item) => item.enabled).map((item) => Number(item.quota_limit)));
+    const limit = Math.min(usage.character_limit, Number(current.quota_limit));
     const periodStart = Number.isFinite(Date.parse(usage.start_time)) ? new Date(usage.start_time).toISOString() : null;
     const periodEnd = Number.isFinite(Date.parse(usage.end_time)) ? new Date(usage.end_time).toISOString() : null;
+    // The Free API reports no billing period; its account count only falls when DeepL starts a new one.
     const newPeriod = budget.period_end && periodStart && periodEnd && periodStart >= budget.period_end
-      && periodStart <= now().toISOString() && periodEnd > now().toISOString();
+      && periodStart <= now().toISOString() && periodEnd > now().toISOString()
+      || Boolean(budget.observed_at) && usage.character_count < Number(budget.provider_used);
     const used = Math.max(newPeriod ? 0 : Number(budget.used_count), usage.character_count);
-    await transaction.prepare(`UPDATE deepl_character_budget SET used_count=?,provider_used=?,provider_limit=?,observed_at=?,period_start=?,period_end=? WHERE id=1`)
-      .bind(used, usage.character_count, usage.character_limit, now().toISOString(), periodStart, periodEnd).run();
+    await transaction.prepare(`UPDATE deepl_credential_budget SET used_count=?,provider_used=?,provider_limit=?,observed_at=?,period_start=?,period_end=?
+      WHERE credential_id=?`).bind(used, usage.character_count, usage.character_limit, now().toISOString(), periodStart, periodEnd, row.id).run();
     if (usageOnly) {
       await transaction.prepare(`UPDATE provider_credentials SET status=?,failure_count=0,cooldown_until=NULL,last_success_at=?,updated_at=? WHERE id=?`)
         .bind(used >= limit ? 'quota_exhausted' : 'healthy', now().toISOString(), now().toISOString(), row.id).run();
@@ -135,13 +151,13 @@ export const executeDeepL = async ({ database, masterKey, clientId, testPolicies
       WHERE request.provider='deepl' AND request.client_id='test'`).first('total')) : 0;
     if (used + characters > limit || clientId === 'test'
       && (testCount >= policy.cap || used + characters > Math.max(0, limit - policy.reserve))) return { blocked: true };
-    await transaction.prepare('UPDATE deepl_character_budget SET used_count=? WHERE id=1').bind(used + characters).run();
+    await transaction.prepare('UPDATE deepl_credential_budget SET used_count=? WHERE credential_id=?').bind(used + characters, row.id).run();
     const dispatch = await transaction.prepare(`INSERT INTO credential_broker_dispatches(request_key,credential_id,status,reserved_at)
       VALUES (?,?,'dispatched',?) RETURNING id`).bind(requestKey, row.id, now().toISOString()).first();
     return { dispatchId: dispatch.id };
   });
   if (!reservation) return fail('SOURCE_CREDENTIAL_UNAVAILABLE');
-  if (usageOnly) return { status: 200, body: { data: await deepLBudgetStatus(database) } };
+  if (usageOnly) return { status: 200, body: { data: await deepLBudgetStatus(database, row.id) } };
   if (reservation.blocked) return fail('SOURCE_QUOTA_UNAVAILABLE', 429, nextCheck(now()));
   try {
     response = await request('translate', { method: 'POST', headers: { 'Content-Type': 'application/json' },

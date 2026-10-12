@@ -113,3 +113,25 @@ describe('address structure repair', () => {
     expect(error).toHaveBeenCalled();
   });
 });
+
+describe('pool coverage after repairs', () => {
+  it('derives coverage keys from the current region even when the stored key predates a correction', async () => {
+    const { PostgresAddressImporter } = await import('../server/sync/postgres-address-importer.mjs');
+    const database = openTestDatabase();
+    try {
+      await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+      for (const [id, admin1] of [['a', 'Kerala'], ['b', 'Tamil Nadu']]) {
+        await insert(database, id, { street: 'Avinashi Road', houseNumber: id === 'a' ? '1' : '2', locality: 'Coimbatore', admin1 });
+        await database.prepare("UPDATE address_pool SET coverage='sync:IN:kerala:coimbatore:residential', admin1_key=lower(admin1), locality_key=lower(locality) WHERE id=?").bind(id).run();
+        await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,random_key,active,source_revision,updated_at)
+          VALUES (?,'IN',1,1,'x',?)`).bind(id, at).run();
+      }
+      const importer = new PostgresAddressImporter({ database });
+      await importer.refreshDerivedCountryState('IN', 5, 'dataset', at);
+      expect((await database.prepare('SELECT coverage_key FROM pool_coverage ORDER BY coverage_key').all()).results.map((row) => row.coverage_key))
+        .toEqual(['sync:IN:kerala:coimbatore:residential', 'sync:IN:tamil nadu:coimbatore:residential']);
+    } finally {
+      await database.close();
+    }
+  });
+});

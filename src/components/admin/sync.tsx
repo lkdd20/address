@@ -45,7 +45,7 @@ export function ChinaAreaCoverage({ locale, request }: { locale: AdminLocale; re
       <label><span>{t.pageSize}</span><select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{[25, 50, 100].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
     </div>
     {error && <div className="table-error" role="alert">{error}</div>}
-    <div className={`table-scroll coverage-table${loading ? ' is-loading' : ''}`}><table><thead><tr><th>{t.province}</th><th>{t.city}</th><th>{t.district}</th><th>{t.currentCommunities}</th><th>{t.target}</th><th>{t.statusLabel}</th></tr></thead><tbody>{(data?.items || []).map((item) => { const current = Number(item.current_count || 0); const target = Number(item.target_count || 5); return <tr key={String(item.district_adcode)}><td>{String(item.province)}</td><td>{String(item.city)}</td><td>{String(item.district)}</td><td>{current.toLocaleString()}</td><td>{target.toLocaleString()}</td><td><span className={`badge ${current >= target ? 'succeeded' : ''}`}>{current >= target ? t.covered : t.pending}</span></td></tr>; })}</tbody></table>{!loading && !data?.items.length && <EmptyState icon={MapPin} text={t.noAreas} />}</div>
+    <div className={`table-scroll coverage-table${loading ? ' is-loading' : ''}`}><table><thead><tr><th>{t.province}</th><th>{t.city}</th><th>{t.district}</th><th>{t.currentCommunities}</th><th>{t.target}</th><th>{t.statusLabel}</th></tr></thead><tbody>{(data?.items || []).map((item) => { const current = Number(item.current_count || 0); const target = Number(item.target_count || 5); return <tr key={String(item.district_adcode)}><td>{String(item.province)}</td><td>{String(item.city)}</td><td>{String(item.district)}</td><td>{current.toLocaleString(locale)}</td><td>{target.toLocaleString(locale)}</td><td><span className={`badge ${current >= target ? 'succeeded' : ''}`}>{current >= target ? t.covered : t.pending}</span></td></tr>; })}</tbody></table>{!loading && !data?.items.length && <EmptyState icon={MapPin} text={t.noAreas} />}</div>
     <div className="table-pagination"><span>{interpolate(t.pageSummary, { page, pages, total: data?.total || 0 })}</span><div><button disabled={loading || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t.previousPage}</button><button disabled={loading || page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>{t.nextPage}</button></div></div>
   </>;
 }
@@ -74,7 +74,7 @@ export function SyncHistoryPanel({ initialData, locale, request, fixedCountry = 
     ...(initialData.countries || []), ...(data.countries || []),
     ...data.items.map((item) => item.countryCode).filter((value): value is string => Boolean(value))
   ])].sort();
-  const statusLabel = (status: string): string => text[status as keyof typeof text] || status;
+  const statusLabel = (status: string): string => { const label = text[status as keyof typeof text]; return typeof label === 'string' ? label : status; };
   return <section className="admin-panel sync-history-panel">
     <header><h2>{text.title}</h2>{!fixedCountry && <div className="sync-history-toolbar">
       <label><span className="sr-only">{text.country}</span><select value={country} onChange={(event) => { setCountry(event.target.value); setOffset(0); }}>
@@ -84,15 +84,15 @@ export function SyncHistoryPanel({ initialData, locale, request, fixedCountry = 
     <div className="sync-history-summary"><span className={`badge address-data-status ${data.scheduler?.active_run_id ? 'running' : 'ready'}`}>{data.scheduler?.active_run_id ? text.schedulerActive : text.schedulerIdle}</span><span>{text.lastHeartbeat}: {dateTime(data.scheduler?.heartbeat_at, locale)}</span>{failed && <span className="queue-unavailable">{addressDataText[locale].queueUnavailable}</span>}</div>
     {data.items.length ? <div className="table-scroll"><table className="sync-history-table"><thead><tr><th>{text.status}</th><th>{text.country}</th><th>{text.source}</th><th>{text.period}</th><th>{text.duration}</th><th>{text.growth}</th><th>{text.details}</th></tr></thead><tbody>{data.items.map((item, index) => {
       const name = item.countryCode && isCountryCode(item.countryCode) ? localizedCountryName(item.countryCode, locale, item.countryCode) : item.countryCode || '-';
-      const ended = item.completedAt || new Date().toISOString();
+      const detail = syncHistoryResultDetail(item, locale);
       return <tr key={`${item.id}-${item.countryCode || ''}-${item.sourceId}-${index}`}>
         <td><span className={`badge address-data-status ${syncHistoryStatusClass(item.status, item.errorCode)}`}>{syncInterrupted(item) ? text.interrupted : statusLabel(item.status)}</span></td>
         <td><span className="country-cell-name"><strong>{name}</strong>{item.countryCode && <small className="country-code">{item.countryCode}</small>}</span></td>
-        <td>{item.sourceId || (item.kind.startsWith('china') ? 'China map providers' : '-')}</td>
-        <td><span className="history-period">{dateTime(item.startedAt || item.createdAt, locale)}<b>→</b>{dateTime(ended, locale)}</span></td>
+        <td className="history-source">{item.sourceId || (item.kind.startsWith('china') ? text.chinaProviders : '-')}</td>
+        <td className="history-period-cell"><span className="history-period"><span>{dateTime(item.startedAt || item.createdAt, locale)}</span><b>→</b><span>{item.completedAt ? dateTime(item.completedAt, locale) : text.inProgress}</span></span></td>
         <td>{durationLabel(item.startedAt, item.completedAt, locale)}</td>
         <td className={(item.netGrowth || 0) > 0 ? 'history-growth-positive' : ''}>{item.netGrowth === null ? '-' : <>{item.netGrowth > 0 ? '+' : ''}{item.netGrowth.toLocaleString(locale)}</>}</td>
-        <td title={syncHistoryResultDetail(item, locale)}>{syncHistoryResultDetail(item, locale) || '-'}</td>
+        <td className="history-detail" title={[detail, item.errorMessage].filter(Boolean).join('\n')}>{detail || '-'}</td>
       </tr>;
     })}</tbody></table></div> : <p className="admin-empty">{text.empty}</p>}
     {(offset > 0 || data.hasMore) && <footer className="sync-history-pagination">

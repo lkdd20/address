@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Database } from '../database/database.mjs';
-import { deepLBudgetStatus, isDeepLFreeKey } from '../credential-broker/deepl.mjs';
+import { deepLBudgetExhausted, deepLBudgetStatuses, isDeepLFreeKey } from '../credential-broker/deepl.mjs';
 import { OPENAI_COMPATIBLE_DEFAULT_REASONING_EFFORT, parseOpenAICompatibleSecret, serializeOpenAICompatibleSecret } from '../credential-broker/openai-compatible.mjs';
 import { decryptSecret, encryptSecret, hashPassword, opaqueToken, safeEqual, tokenHash, verifyPassword } from './security';
 import {
@@ -1096,7 +1096,7 @@ export class ControlStore {
     await this.resetExpiredQuotaStates();
     const rows = (await this.database.prepare('SELECT * FROM provider_credentials ORDER BY provider,label').all<CredentialRow>()).results;
     await Promise.all(rows.map(async (row) => { row.quota_windows = row.provider === 'deepl' ? [] : await this.credentialQuotaWindows(row); }));
-    const deepl = rows.some((row) => row.provider === 'deepl') ? await deepLBudgetStatus(this.database) : null;
+    const deeplBudgets = rows.some((row) => row.provider === 'deepl') ? await deepLBudgetStatuses(this.database) : null;
     const routes = await this.translationRoutes();
     const routeByKey = new Map(routes.map((route) => [
       route.credentialId, route
@@ -1108,9 +1108,11 @@ export class ControlStore {
         translationRouteId: route.id, translationPriority: route.priority, translationRouteEnabled: route.enabled,
         translationPrompt: route.prompt, ...(!route.enabled ? { enabled: false, status: 'disabled' } : {})
       } : {};
-      if (row.provider !== 'deepl' || !deepl) return { ...value, ...routeFields };
+      const deepl = row.provider === 'deepl' ? deeplBudgets?.get(row.id) : undefined;
+      if (!deepl) return { ...value, ...routeFields };
       const status = !row.enabled ? 'disabled' : row.status === 'needs_review' ? row.status
-        : deepl.observedAt && !deepl.remaining ? 'quota_exhausted' : value.status;
+        : deepLBudgetExhausted(deepl) ? 'quota_exhausted'
+          : value.status === 'quota_exhausted' && !(String(row.cooldown_until || '') > nowIso()) ? 'healthy' : value.status;
       return { ...value, status, quotaUsed: deepl.used, quotaLimit: row.quota_limit, officialQuotaLimit: deepl.providerLimit,
         quotaRemaining: deepl.remaining, quotaResetAt: deepl.resetAt || '', providerReportedAt: deepl.observedAt,
         quotaWindows: [], characterQuota: deepl, ...routeFields };
@@ -1274,6 +1276,7 @@ export class ControlStore {
       await database.prepare("UPDATE provider_credentials SET enabled=0,status='disabled',updated_at=? WHERE id=?")
         .bind(nowIso(), id).run();
       await database.prepare('DELETE FROM provider_credentials WHERE id=?').bind(id).run();
+      if (credential.provider === 'deepl') await database.prepare('DELETE FROM deepl_credential_budget WHERE credential_id=?').bind(id).run();
       return credential.provider;
     });
   }

@@ -134,6 +134,27 @@ describe('credential broker', () => {
     expect(definition.validate({ values: ['Road'], target: 'fr' })).toBeNull();
   });
 
+  it('marks an OpenAI-compatible key with exhausted credit as quota-blocked and rechecks it hourly', async () => {
+    const id = await control.addCredential({ provider: 'openai-compatible', label: 'Prepaid', apiKey: 'fixture-prepaid-key',
+      baseUrl: 'https://fixture.example/v1', model: 'fixture-model' });
+    let calls = 0;
+    const broker = await createCredentialBroker({ database, masterKey, tokens, fetchImpl: async () => {
+      calls += 1;
+      return Response.json({ error: { message: 'You have insufficient credits to make this request.' } }, { status: 400 });
+    } });
+    const input = (requestId) => ({ requestId, operation: 'openai-compatible.translate',
+      parameters: { values: ['Main Street'], target: 'zh-CN', credentialId: id }, maxDispatches: 1 });
+    expect(await (await call(broker, 'production', input('credit-first'))).json()).toMatchObject({ code: 'SOURCE_QUOTA_UNAVAILABLE' });
+    expect(await database.prepare('SELECT status,cooldown_until FROM provider_credentials WHERE id=?').bind(id).first())
+      .toMatchObject({ status: 'quota_exhausted' });
+    const cooldown = Date.parse(await database.prepare('SELECT cooldown_until FROM provider_credentials WHERE id=?').bind(id).first('cooldown_until'));
+    expect(cooldown - Date.now()).toBeGreaterThan(50 * 60_000);
+    expect(cooldown - Date.now()).toBeLessThanOrEqual(60 * 60_000);
+    expect(await (await call(broker, 'production', input('credit-second'))).json()).toMatchObject({ code: 'SOURCE_QUOTA_UNAVAILABLE' });
+    expect(calls).toBe(1);
+    expect(operationDefinitions['openai-compatible.translate'].rejection(400, { error: { message: 'Unknown model' } })).toBeNull();
+  });
+
   it('gives slow reasoning models a longer queue-inclusive deadline than other providers', async () => {
     expect(operationDefinitions['openai-compatible.translate'].timeoutMs).toBe(120_000);
     expect(operationDefinitions['youdao.translate'].timeoutMs).toBeUndefined();

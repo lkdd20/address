@@ -897,6 +897,7 @@ export class PostgresAddressImporter {
   }
 
   // Derived per-country state is rebuilt after the import commits so it never holds the import transaction open.
+  // Coverage keys come from the current administrative columns, which repairs may have changed since import.
   async refreshDerivedCountryState(countryCode, coverageTarget, datasetId, observedAt) {
     const ranks = await this.database.prepare(`SELECT COUNT(*) AS total,MAX(country_rank) AS maximum
       FROM address_generation_index WHERE country_code=? AND active=1`).bind(countryCode).first();
@@ -909,7 +910,9 @@ export class PostgresAddressImporter {
       this.database.prepare(`INSERT INTO pool_coverage(
           coverage_key,country_code,admin1_key,locality_key,postcode_key,property_type,target_count,
           active_count,shadow_count,residential_count,refresh_status,generation,last_refreshed_at,expires_at
-        ) SELECT address.coverage,address.country_code,
+        ) SELECT 'sync:' || address.country_code || ':' || coalesce(nullif(coalesce(nullif(address.admin1_code_key,''),address.admin1_key),''),'*')
+            || ':' || coalesce(nullif(coalesce(nullif(address.postal_locality_key,''),address.locality_key),''),'*') || ':' || address.property_type,
+          address.country_code,
           coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
           coalesce(nullif(address.postal_locality_key,''),address.locality_key),min(address.postcode_key),address.property_type,CAST(? AS INTEGER),
           count(*),0,sum(indexed.residential_ready),
@@ -917,7 +920,7 @@ export class PostgresAddressImporter {
         FROM address_pool address JOIN address_generation_index indexed
           ON indexed.address_id=address.id AND indexed.country_code=address.country_code AND indexed.active=1
         WHERE address.country_code=? AND address.active=1
-        GROUP BY address.coverage,address.country_code,coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
+        GROUP BY address.country_code,coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
           coalesce(nullif(address.postal_locality_key,''),address.locality_key),address.property_type`)
         .bind(coverageTarget, coverageTarget, datasetId, observedAt, countryCode)
     ]);

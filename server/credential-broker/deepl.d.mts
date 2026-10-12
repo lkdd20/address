@@ -6,5 +6,8 @@ export interface DeepLCharacterBudget {
 }
 export function isDeepLFreeKey(value: unknown): boolean;
 export function characterCount(values: string[]): number;
-export function deepLBudgetStatus(database: Database): Promise<DeepLCharacterBudget>;
+export function deepLBudgetStatus(database: Database, credentialId: string): Promise<DeepLCharacterBudget>;
+export function deepLBudgetStatuses(database: Database): Promise<Map<string, DeepLCharacterBudget>>;
+export function deepLBudgetExhausted(budget: DeepLCharacterBudget | undefined | null): boolean;
+export function deepLBudgetRecheckAt(budget: DeepLCharacterBudget | undefined | null): string | null;
 export const deeplBudgetSchema: string;

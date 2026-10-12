@@ -46,10 +46,23 @@ describe('sync history presentation', () => {
     });
     expect(syncInterrupted(item)).toBe(true);
     expect(syncHistoryStatusClass(item.status, item.errorCode)).toBe('quota_wait');
-    expect(syncHistoryResultDetail(item, 'zh-CN')).toBe('已保留 +162 条已通过质量校验的地址 · materialize · Address synchronization aborted');
+    expect(syncHistoryResultDetail(item, 'zh-CN')).toBe('已保留 +162 条已通过质量校验的地址 · 数据准备 · 因重启或部署中断，已自动重新排队');
     const lockFailure = historyItem({ status: 'failed', netGrowth: 0, failurePhase: 'coverage', errorCode: '55P03', errorMessage: 'lock timeout' });
     expect(syncInterrupted(lockFailure)).toBe(false);
     expect(syncHistoryStatusClass(lockFailure.status, lockFailure.errorCode)).toBe('failed');
-    expect(syncHistoryResultDetail(lockFailure, 'zh-CN')).toBe('coverage · lock timeout');
+    expect(syncHistoryResultDetail(lockFailure, 'zh-CN')).toBe('覆盖统计 · 数据库锁等待超时');
+  });
+
+  it('shows localized failure categories instead of raw worker messages and server paths', () => {
+    const timeout = historyItem({ status: 'failed', netGrowth: 0, failurePhase: 'materialize', errorCode: 'SYNC_PROCESS_TIMEOUT',
+      errorMessage: '/srv/address/venv/bin/python exceeded 4500000ms' });
+    expect(syncHistoryResultDetail(timeout, 'zh-CN')).toBe('数据准备 · 超过处理时间上限');
+    expect(syncHistoryResultDetail(timeout, 'en')).not.toContain('/srv/');
+    const china = historyItem({ status: 'failed', netGrowth: 0, failurePhase: null, errorCode: 'CHINA_SYNC_WORKER', errorMessage: 'CHINA_SYNC_JOB_TIMEOUT' });
+    expect(syncHistoryResultDetail(china, 'en')).toBe('Exceeded the processing time limit');
+    const unknown = historyItem({ status: 'failed', netGrowth: 0, failurePhase: 'interrupted', errorCode: 'error', errorMessage: 'column does not exist' });
+    expect(syncHistoryResultDetail(unknown, 'zh-CN')).toBe('同步失败（error）');
+    expect(syncHistoryResultDetail(historyItem({ status: 'failed', netGrowth: 0, errorCode: '57014', errorMessage: 'canceling statement' }), 'en'))
+      .toBe('Database statement timed out');
   });
 });

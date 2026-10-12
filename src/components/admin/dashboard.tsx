@@ -92,7 +92,7 @@ export function Dashboard({ value, locale, coverageTrail, openCoverage, returnCo
   const visible = root ? filtered : filtered.slice((page - 1) * pageSize, page * pageSize);
   return <div className="dashboard-page">
     {root && <section className="dashboard-kpis">
-      <DashboardMetric label={t.countriesCovered} value={value.metrics.countryCount.toLocaleString()} icon={Globe2} tone="blue" />
+      <DashboardMetric label={t.countriesCovered} value={value.metrics.countryCount.toLocaleString(locale)} icon={Globe2} tone="blue" />
       <DashboardMetric label={ui.addressTotal} value={value.metrics.addressTotal.toLocaleString(locale)} detail={interpolate(ui.residentialShare, { count: value.metrics.residentialTotal.toLocaleString(locale) })} icon={House} tone="green" />
       <DashboardMetric label={t.regionsCovered} value={`${(value.metrics.coverageRate * 100).toFixed(1)}%`} detail={`${value.metrics.coveredLowest.toLocaleString(locale)} / ${value.metrics.totalLowest.toLocaleString(locale)}`} icon={Target} tone="amber" />
       <DashboardMetric label={ui.todayGrowth} value={`${value.metrics.todayGrowth > 0 ? '+' : ''}${value.metrics.todayGrowth.toLocaleString(locale)}`} icon={RefreshCw} tone="violet" />
@@ -115,9 +115,9 @@ export const CountryCoverageTable = ({ values, open, locale }: { values: Coverag
     const countryCode = item.countryCode.toUpperCase();
     const meta = isCountryCode(countryCode) ? countryByCode.get(countryCode) : undefined;
     const levels = item.coverageLevels || [];
-    return <tr key={item.key}><td><button className="country-name-button" disabled={!item.childCount} onClick={() => open(item)}><img className="country-flag" src={flagSrc(countryCode)} width="24" height="18" alt="" loading="lazy" /><strong>{coverageRegionName(item, locale)}</strong></button></td><td>{meta ? continentLabel(meta.group, locale) : '-'}</td><td className="numeric-cell">{item.residentialCount.toLocaleString()}</td>{[0, 1, 2].map((index) => {
+    return <tr key={item.key}><td><button className="country-name-button" disabled={!item.childCount} onClick={() => open(item)}><img className="country-flag" src={flagSrc(countryCode)} width="24" height="18" alt="" loading="lazy" /><strong>{coverageRegionName(item, locale)}</strong></button></td><td>{meta ? continentLabel(meta.group, locale) : '-'}</td><td className="numeric-cell">{item.residentialCount.toLocaleString(locale)}</td>{[0, 1, 2].map((index) => {
       const level = levels[index];
-      return <td key={index}>{level ? <span className="coverage-value"><small>{usesChineseSource(locale) ? level.labelZh : level.labelEn}</small><b>{level.covered.toLocaleString()} / {level.total.toLocaleString()}</b></span> : '-'}</td>;
+      return <td key={index}>{level ? <span className="coverage-value"><small>{usesChineseSource(locale) ? level.labelZh : level.labelEn}</small><b>{level.covered.toLocaleString(locale)} / {level.total.toLocaleString(locale)}</b></span> : '-'}</td>;
     })}</tr>;
   })}</tbody></table>{!values.length && <p className="admin-empty">{adminText[locale].noSubregions}</p>}</div>;
 };
@@ -125,7 +125,7 @@ export const CoverageTable = ({ values, open, locale }: { values: CoverageNode[]
   const t = adminText[locale];
   return <div className="table-scroll"><table><thead><tr><th>{t.region}</th><th>{t.level}</th><th>{t.residential}</th><th>{t.administrativeCoverage}</th></tr></thead><tbody>{values.map((item) => <tr key={item.key}>
     <td><button className="drill-button" disabled={!item.childCount} title={!item.childCount ? t.noSubregions : undefined} onClick={() => open(item)}>{coverageRegionName(item, locale)}</button>{!item.totalCount && <span className="coverage-empty-tag">{t.noAddressData}</span>}</td>
-    <td>{coverageLevelName(item, locale)}</td><td>{item.residentialCount.toLocaleString()}</td>
-    <td>{item.coverageLevels?.length ? <div className="coverage-ratios">{item.coverageLevels.map((level) => <span key={level.key} title={`${t.qualifiedCoverage}: ${level.qualified.toLocaleString()} / ${level.total.toLocaleString()}`}><b>{usesChineseSource(locale) ? level.labelZh : level.labelEn}</b>{level.covered.toLocaleString()} / {level.total.toLocaleString()}</span>)}</div> : item.childCount.toLocaleString()}</td>
+    <td>{coverageLevelName(item, locale)}</td><td>{item.residentialCount.toLocaleString(locale)}</td>
+    <td>{item.coverageLevels?.length ? <div className="coverage-ratios">{item.coverageLevels.map((level) => <span key={level.key} title={`${t.qualifiedCoverage}: ${level.qualified.toLocaleString(locale)} / ${level.total.toLocaleString(locale)}`}><b>{usesChineseSource(locale) ? level.labelZh : level.labelEn}</b>{level.covered.toLocaleString(locale)} / {level.total.toLocaleString(locale)}</span>)}</div> : item.childCount.toLocaleString(locale)}</td>
   </tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noSubregions}</p>}</div>;
 };

@@ -14,7 +14,7 @@ const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
 const ADDRESS_SCHEMA_VERSION = 33;
-const CONTROL_SCHEMA_VERSION = 26;
+const CONTROL_SCHEMA_VERSION = 27;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -463,6 +463,15 @@ export const initializePostgres = async (pool, {
           await client.query('RESET lock_timeout');
           await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (26,CURRENT_TIMESTAMP::text)
             ON CONFLICT (version) DO NOTHING`);
+        }
+        if (Number(versions.control_version) < 27) {
+          await client.query('BEGIN');
+          await client.query('SET LOCAL search_path TO control, public');
+          await client.query("SET LOCAL lock_timeout TO '2s'");
+          await client.query(deeplBudgetSchema);
+          await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (27,CURRENT_TIMESTAMP::text)
+            ON CONFLICT (version) DO NOTHING`);
+          await client.query('COMMIT');
         }
         return;
       }

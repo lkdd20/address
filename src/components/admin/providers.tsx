@@ -98,7 +98,7 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
           await mutate('/settings/translation', 'PUT', { googleTranslationConcurrency: Number(googleConcurrency) }, t.translationSaved);
         }
       }}><label><span>{openAI.routePriority}</span><input name="googleTranslationPriority" type="number" min="1" max="10000" required value={googlePriority} onChange={(event) => setGooglePriority(event.target.value)} /></label>
-      <ConcurrencyField value={googleConcurrency} onChange={setGoogleConcurrency} locale={locale} /><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{openAI.routingHint}</small></form>
+      <ConcurrencyField value={googleConcurrency} onChange={setGoogleConcurrency} locale={locale} hint={false} /><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{concurrencyText(locale).hint} {openAI.routingHint}</small></form>
       <section className="translation-provider deepl-provider">
         <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>DeepL API Free</h3><span className="provider-key-count">{providerCredentialCount(locale, deeplCredentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openDeepL('create')}><Plus size={14} aria-hidden="true" />{deeplText(locale).add}</button></header>
         <p className="security-note translation-notice">{deeplText(locale).notice}</p>
@@ -131,8 +131,8 @@ const concurrencyText = (locale: AdminLocale) => ({
   'zh-TW': { label: '並發數', hint: '同時進行的請求數（1-50）；超出時排隊等待。' },
   en: { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' }
 } as Record<string, { label: string; hint: string }>)[locale] || { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' };
-const ConcurrencyField = ({ value, onChange, locale }: { value: string; onChange: (value: string) => void; locale: AdminLocale }) =>
-  <label><span>{concurrencyText(locale).label}</span><input name="maxConcurrency" type="number" min="1" max="50" step="1" required value={value} onChange={(event) => onChange(event.target.value)} /><small>{concurrencyText(locale).hint}</small></label>;
+const ConcurrencyField = ({ value, onChange, locale, hint = true }: { value: string; onChange: (value: string) => void; locale: AdminLocale; hint?: boolean }) =>
+  <label><span>{concurrencyText(locale).label}</span><input name="maxConcurrency" type="number" min="1" max="50" step="1" required value={value} onChange={(event) => onChange(event.target.value)} />{hint && <small>{concurrencyText(locale).hint}</small>}</label>;
 
 export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   value?: Credential; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;

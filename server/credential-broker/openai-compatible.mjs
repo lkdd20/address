@@ -296,9 +296,12 @@ const providerErrorMessage = (body, text) => {
   const message = body?.error?.message || body?.error?.msg || body?.message || body?.detail || body?.error;
   return typeof message === 'string' && message.trim() ? message : text;
 };
+// Providers report exhausted prepaid credit as 402 or as a 4xx whose message names the balance.
+export const isOpenAICompatibleCreditExhausted = (status, body, text = '') => status === 402
+  || /insufficient|quota|balance|credit|余额|额度/iu.test(String(providerErrorMessage(body, text) || ''));
 const diagnosticOutcome = (status, message) => {
   if (status === 401 || status === 403) return 'auth';
-  if (status === 402 || /insufficient|quota|balance|credit|余额|额度/iu.test(message)) return 'quota';
+  if (isOpenAICompatibleCreditExhausted(status, null, message)) return 'quota';
   if (status === 429) return 'qps';
   return status >= 500 ? 'network' : 'invalid';
 };

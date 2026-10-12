@@ -13,6 +13,8 @@ import App, {
 import { resolveAmapServiceHost } from '../src/components/AmapPreview';
 import { countries } from '../src/domain/countries';
 import { messages } from '../src/domain/i18n';
+import { nonResidentialRules } from '../src/domain/non-residential-rules.mjs';
+import { blacklistCategoryLabels } from '../src/components/admin/text';
 
 const appSource = App.toString();
 const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
@@ -383,5 +385,17 @@ describe('strict residential generator page structure', () => {
     expect(adminSource).toContain('country.lowestCoverage.covered / country.lowestCoverage.total');
     expect(adminSource).toContain('interpolate(ui.minimumNodes');
     expect(adminSource).not.toContain('Math.round(country.coverageActual * 100)');
+  });
+
+  it('names every built-in blacklist category in every admin locale', () => {
+    for (const labels of Object.values(blacklistCategoryLabels)) {
+      expect(Object.keys(nonResidentialRules).filter((category) => !labels[category])).toEqual([]);
+    }
+  });
+
+  it('aligns admin coverage cells and inline field suffixes with their headers and siblings', () => {
+    expect(adminStyles).toContain('.country-coverage-table tbody td:nth-child(n+4) { text-align: center; }');
+    expect(adminStyles).toContain('.percent-input b { position: absolute;');
+    expect(adminSource).toContain('locale={locale} hint={false}');
   });
 });

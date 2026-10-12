@@ -91,8 +91,8 @@ Translations must keep house numbers, unit numbers, and postcodes unchanged and 
 Add a free key ending in `:fx` under “DeepL” and set the project character limit (default 500,000). “Test” only checks the quota and uses no characters.
 
 - Only `https://api-free.deepl.com` is allowed; Pro keys and endpoints are rejected.
-- All DeepL keys share one character ledger; the usable amount is the smaller of the account quota and the project limit.
-- DeepL usage may lag by a few minutes, and the Free API reports no billing period, so the local ledger never resets automatically.
+- Each key keeps its own character ledger (each key is a separate DeepL account); the usable amount is the smaller of that account's quota and the key's project limit. Deleting a key deletes its ledger.
+- DeepL usage may lag by a few minutes. The Free API reports no billing period, so a key's ledger starts over when DeepL reports lower account usage; exhausted keys recheck usage hourly.
 
 ### Youdao Text Translation
 
@@ -110,7 +110,7 @@ Connect any service that speaks the OpenAI **Chat Completions** format, such as 
 2. Click the button next to the model field to load the model list and pick one, or type the model name.
 3. Save, then click “Test” to confirm it works.
 
-Quota defaults to “Unlimited”; uncheck it and enter a daily request limit if you need one.
+Quota defaults to “Unlimited”; uncheck it and enter a daily request limit if you need one. When the provider reports exhausted prepaid credit (HTTP 402 or a balance/credit error), the key shows “Quota exhausted”, is skipped, and is rechecked hourly; after topping up, “Test” restores it at once.
 
 **Base URL**: a prefix or the full URL both work; the actual request URL is previewed below the field.
 

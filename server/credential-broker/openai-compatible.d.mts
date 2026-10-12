@@ -42,3 +42,4 @@ export interface OpenAICompatibleDiagnostic {
 export declare const diagnoseOpenAICompatible: (value: unknown, options?: { mode?: 'chat' | 'translate'; prompt?: string }, fetchImpl?: typeof fetch) => Promise<OpenAICompatibleDiagnostic>;
 export declare const openAICompatibleBaseHasVersion: (baseUrl: string) => boolean;
 export declare const resolveOpenAICompatibleBaseUrl: (value: unknown, fetchImpl?: typeof fetch) => Promise<string | null>;
+export declare const isOpenAICompatibleCreditExhausted: (status: number, body: unknown, text?: string) => boolean;

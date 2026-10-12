@@ -346,5 +346,5 @@ WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000
   AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
 
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 26) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 27) AS version
 ON CONFLICT (version) DO NOTHING;

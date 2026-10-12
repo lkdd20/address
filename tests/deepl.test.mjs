@@ -40,7 +40,7 @@ describe('DeepL Free character gate', () => {
   };
 
   it('honors the actual account allowance, Unicode code points and delayed usage', async () => {
-    await add(1_000_000);
+    const id = await add(1_000_000);
     const translations = [];
     const broker = await createCredentialBroker({ database, masterKey, tokens, now,
       fetchImpl: fetcher(999_995, 1_000_000, translations) });
@@ -48,7 +48,7 @@ describe('DeepL Free character gate', () => {
     expect((await call(broker, 'unicode-second', ['Hello'])).status).toBe(429);
     expect(translations).toHaveLength(1);
     expect(translations[0].target_lang).toBe('ZH-HANS');
-    expect(await deepLBudgetStatus(database)).toMatchObject({ used: 999_998, limit: 1_000_000, remaining: 2, resetAt: null });
+    expect(await deepLBudgetStatus(database, id)).toMatchObject({ used: 999_998, limit: 1_000_000, remaining: 2, resetAt: null });
   });
 
   it('keeps the administrator cap across restart, key replacement and calendar changes', async () => {
@@ -60,15 +60,15 @@ describe('DeepL Free character gate', () => {
     await control.updateCredential(id, { secret });
     expect((await call(await createCredentialBroker({ ...options, now: () => new Date('2026-10-01') }), 'after-restart')).status).toBe(429);
     expect(translations).toHaveLength(1);
-    expect((await deepLBudgetStatus(database)).used).toBe(9);
+    expect((await deepLBudgetStatus(database, id)).used).toBe(9);
   });
 
   it('does not release reserved characters after an uncertain upstream outcome', async () => {
-    await add(10);
+    const id = await add(10);
     const translations = [];
     const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: fetcher(0, 100, translations, true) });
     expect((await call(broker, 'unknown-result')).status).toBe(503);
-    expect((await deepLBudgetStatus(database)).used).toBe(5);
+    expect((await deepLBudgetStatus(database, id)).used).toBe(5);
     expect(await database.prepare('SELECT status FROM credential_broker_dispatches').first('status')).toBe('unknown');
   });
 
@@ -96,11 +96,11 @@ describe('DeepL Free character gate', () => {
       .toMatchObject({ status: 'healthy', failure_count: 0 });
     expect(await database.prepare('SELECT status,outcome FROM credential_broker_dispatches').first())
       .toEqual({ status: 'unknown', outcome: 'cancelled' });
-    expect((await deepLBudgetStatus(database)).used).toBe(5);
+    expect((await deepLBudgetStatus(database, id)).used).toBe(5);
   });
 
-  it('resets only when the provider supplies a verified new billing period', async () => {
-    await add(5);
+  it('resets when the provider supplies a verified new billing period', async () => {
+    const id = await add(5);
     let clock = new Date('2026-09-13T00:00:00Z');
     let period = { start_time: '2026-09-01T00:00:00Z', end_time: '2026-10-01T00:00:00Z' };
     const broker = await createCredentialBroker({ database, masterKey, tokens, now: () => clock, fetchImpl: async (request) =>
@@ -111,7 +111,21 @@ describe('DeepL Free character gate', () => {
     expect((await call(broker, 'stale-period-translation')).status).toBe(429);
     period = { start_time: '2026-10-01T00:00:00Z', end_time: '2026-11-01T00:00:00Z' };
     expect((await call(broker, 'verified-period-translation')).status).toBe(200);
-    expect(await deepLBudgetStatus(database)).toMatchObject({ used: 5, remaining: 0, resetAt: '2026-11-01T00:00:00.000Z' });
+    expect(await deepLBudgetStatus(database, id)).toMatchObject({ used: 5, remaining: 0, resetAt: '2026-11-01T00:00:00.000Z' });
+  });
+
+  it('starts a new period when the Free API reports a lower account count', async () => {
+    const id = await add(10);
+    let accountUsed = 8;
+    const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: async (request) =>
+      request.url.endsWith('/usage') ? Response.json({ character_count: accountUsed, character_limit: 10 })
+        : Response.json({ translations: [{ text: '你好', billed_characters: 5 }] }) });
+    expect((await call(broker, 'previous-month')).status).toBe(429);
+    expect((await call(broker, 'unchanged-count')).status).toBe(429);
+    accountUsed = 0;
+    expect((await usage(broker, id)).status).toBe(200);
+    expect(await deepLBudgetStatus(database, id)).toMatchObject({ used: 0, remaining: 10 });
+    expect((await call(broker, 'new-month')).status).toBe(200);
   });
 
   it('requires valid usage and never substitutes a paid key', async () => {
@@ -125,14 +139,19 @@ describe('DeepL Free character gate', () => {
     expect(await database.prepare('SELECT COUNT(*) AS count FROM credential_broker_dispatches').first('count')).toBe(0);
   });
 
-  it('shares a cap between credentials and simultaneous requests', async () => {
-    await add(5);
-    await add(5);
+  it('serializes simultaneous requests on one key and gives a new key its own ledger', async () => {
+    const first = await add(5);
     const translations = [];
     const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: fetcher(0, 100, translations) });
     const results = await Promise.all([call(broker, 'parallel-first'), call(broker, 'parallel-second')]);
     expect(results.map((response) => response.status).sort()).toEqual([200, 429]);
     expect(translations).toHaveLength(1);
+    await control.deleteCredential(first);
+    const second = await add(5);
+    expect(await deepLBudgetStatus(database, second)).toMatchObject({ used: 0, observedAt: null });
+    expect((await call(broker, 'fresh-key')).status).toBe(200);
+    expect((await control.listCredentials()).find((item) => item.id === second)).toMatchObject({ status: 'quota_exhausted', quotaUsed: 5 });
+    expect(await database.prepare('SELECT COUNT(*) AS total FROM deepl_credential_budget WHERE credential_id=?').bind(first).first('total')).toBe(0);
   });
 
   it('recovers an explicitly selected credential using a read-only usage test', async () => {
@@ -142,7 +161,7 @@ describe('DeepL Free character gate', () => {
     const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: fetcher(4, 100, translations) });
     expect((await usage(broker, id)).status).toBe(200);
     expect(translations).toHaveLength(0);
-    expect((await deepLBudgetStatus(database)).used).toBe(4);
+    expect((await deepLBudgetStatus(database, id)).used).toBe(4);
     expect(await database.prepare('SELECT status,failure_count FROM provider_credentials WHERE id=?').bind(id).first())
       .toMatchObject({ status: 'healthy', failure_count: 0 });
     expect(await database.prepare('SELECT COUNT(*) AS total FROM credential_broker_dispatches').first('total')).toBe(0);
@@ -157,14 +176,14 @@ describe('DeepL Free character gate', () => {
     expect(requests).toBe(0);
   });
 
-  it('shows exhausted character budgets without inventing a reset date', async () => {
+  it('shows exhausted character budgets without inventing a reset date and rechecks hourly', async () => {
     await add(5);
     const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: fetcher(0, 100, []) });
     const before = await broker.store.availability({ clientId: 'production', provider: 'deepl' });
     expect((await call(broker, 'exhaust-characters')).status).toBe(200);
     expect((await control.listCredentials())[0]).toMatchObject({ status: 'quota_exhausted', quotaRemaining: 0, quotaResetAt: '' });
     expect(await broker.store.availability({ clientId: 'production', provider: 'deepl' }))
-      .toMatchObject({ available: false, waitState: 'quota_wait', nextResetAt: null, revision: before.revision });
+      .toMatchObject({ available: false, waitState: 'quota_wait', nextResetAt: '2026-09-13T01:00:00.000Z', revision: before.revision });
   });
 
   it('paces usage and translation requests, including concurrent callers', async () => {
@@ -209,13 +228,13 @@ describe('DeepL Free character gate', () => {
   });
 
   it.each([403, 456])('blocks provider HTTP %i and retains uncertain billed characters', async (status) => {
-    await add();
+    const id = await add();
     const broker = await createCredentialBroker({ database, masterKey, tokens, now, fetchImpl: async (request) => request.url.endsWith('/usage')
       ? Response.json({ character_count: 0, character_limit: 100 }) : Response.json({ message: secret }, { status }) });
     const response = await call(broker, `provider-status-${status}`);
     expect(response.status).toBe(status === 456 ? 429 : 503);
     expect(await response.text()).not.toContain(secret);
-    expect((await deepLBudgetStatus(database)).used).toBe(5);
+    expect((await deepLBudgetStatus(database, id)).used).toBe(5);
     expect(await database.prepare('SELECT status FROM provider_credentials').first('status')).toBe(status === 456 ? 'quota_exhausted' : 'needs_review');
   });
 

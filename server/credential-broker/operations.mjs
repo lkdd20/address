@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { retryAtFromHeader } from '../lib/retry-after.mjs';
 import { characterCount, deeplLanguages } from './deepl.mjs';
-import { OPENAI_COMPATIBLE_TARGETS, OPENAI_COMPATIBLE_TIMEOUT_MS, openAICompatibleRequest, parseOpenAICompatibleResponse, parseOpenAICompatibleSecret } from './openai-compatible.mjs';
+import { isOpenAICompatibleCreditExhausted, OPENAI_COMPATIBLE_TARGETS, OPENAI_COMPATIBLE_TIMEOUT_MS, openAICompatibleRequest,
+  parseOpenAICompatibleResponse, parseOpenAICompatibleSecret } from './openai-compatible.mjs';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
@@ -199,6 +200,9 @@ export const operationDefinitions = {
     },
     request(parameters, secret) { return openAICompatibleRequest(secret, parameters.values, parameters.target, { prompt: parameters.prompt }); },
     classify: classifyOpenAICompatible,
+    // Credit can be topped up at any time, so an exhausted key is rechecked hourly rather than at a calendar reset.
+    rejection: (status, body) => isOpenAICompatibleCreditExhausted(status, body)
+      ? { type: 'retry', outcome: 'quota', retryAt: new Date(Date.now() + 3_600_000).toISOString(), service: 'translation' } : null,
     normalize: normalizeOpenAICompatible,
     redactSecrets(secret) {
       const config = parseOpenAICompatibleSecret(secret);
@@ -426,10 +430,11 @@ export const executeOperation = async ({ definition, parameters, secret, fetchIm
     type: 'retry', outcome: 'network', retryAt: retryAtFrom(response),
     providerCode: `HTTP_${response.status}`, httpStatus: response.status
   };
-  if (!response.ok) return {
-    type: 'error', outcome: 'request', status: 502, code: 'UPSTREAM_REQUEST_REJECTED',
-    providerCode: `HTTP_${response.status}`, httpStatus: response.status
-  };
+  if (!response.ok) {
+    const rejected = definition.rejection?.(response.status, await jsonBody(response).catch(() => null));
+    return { ...(rejected || { type: 'error', outcome: 'request', status: 502, code: 'UPSTREAM_REQUEST_REJECTED' }),
+      providerCode: `HTTP_${response.status}`, httpStatus: response.status };
+  }
   try {
     let data = await jsonBody(response);
     const classified = definition.classify?.(data, response);

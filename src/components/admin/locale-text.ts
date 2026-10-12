@@ -45,9 +45,9 @@ const en = {
     youdao: 'Youdao is usage-based and may charge after trial credits run out, including tests and automatic translation. Project limits are not free-credit guarantees. Do not add or enable credentials unless you accept the charges.'
   },
   deepl: {
-    notice: 'DeepL API Free only; never switches to Pro. The lower of the account allowance and project cap applies. All DeepL keys share one project character ledger. The test button checks usage without translating.',
+    notice: 'DeepL API Free only; never switches to Pro. The lower of the account allowance and project cap applies. Each key keeps its own character ledger. The test button checks usage without translating.',
     budget: 'Character cap (current quota period)', characters: 'characters', provider: 'Account used / limit', observed: 'Usage checked', unknown: 'Usage not checked',
-    reset: 'Provider reset date unavailable; usage is not cleared at calendar month boundaries.', add: 'Add DeepL key'
+    reset: 'DeepL Free reports no reset date; a key starts over when DeepL reports lower account usage, and exhausted keys are rechecked hourly.', add: 'Add DeepL key'
   },
   test: {"title": "Test connection", "mode": "Test mode", "modeChat": "Connectivity (send \"hi\")", "modeTranslate": "Address translation", "start": "Testing credential", "running": "Waiting for the provider…", "passed": "Test passed", "failed": "Test failed", "retry": "Retry", "model": "Model", "prompt": "Prompt", "addressSample": "address sample", "endpointProbe": "detected on save", "endpointPreview": "Request URL", "restoreDefaultPrompt": "Restore default prompt", "steps": {"invalidConfig": "The saved configuration is invalid", "endpoint": "Endpoint", "model": "Model", "parameters": "Parameters", "sendTranslation": "Sending address sample", "sendChat": "Sending test message", "timeout": "Request timed out", "network": "Network error", "status": "Connected", "providerError": "Provider error", "invalidJson": "Response is not JSON", "respondedModel": "Responding model", "finishReason": "Finish reason", "usage": "Token usage", "reasoning": "Reasoning characters", "response": "Response", "done": "Test completed", "truncated": "Output was truncated before the JSON finished; increase the output budget", "invalidTranslation": "The reply is not the expected JSON translations array", "translations": "Parsed translations", "identifiersChanged": "The model changed numbers or identifiers"}},
   shortcut: {
@@ -63,7 +63,10 @@ const en = {
     source: 'Source', period: 'Time period', duration: 'Duration', growth: 'Address growth', trigger: 'Trigger',
     details: 'Details', empty: 'No synchronization history', queued: 'Queued', running: 'Running', succeeded: 'Execution succeeded',
     failed: 'Failed', paused_quota: 'Paused for quota', needs_review: 'Needs review', cancelled: 'Not executed', previous: 'Previous', next: 'Next',
-    candidates: 'Candidates', qualityPassed: 'Quality passed', rejected: 'Rejected', coveredNodes: 'Covered nodes', qualifiedNodes: 'Qualified nodes', interrupted: 'Interrupted', keptRows: 'Kept {count} published rows that passed quality checks'
+    candidates: 'Candidates', qualityPassed: 'Quality passed', rejected: 'Rejected', coveredNodes: 'Covered nodes', qualifiedNodes: 'Qualified nodes', interrupted: 'Interrupted', keptRows: 'Kept {count} published rows that passed quality checks',
+    inProgress: 'In progress', chinaProviders: 'China map providers',
+    phases: { discover: 'Source discovery', download: 'Download', materialize: 'Data preparation', import: 'Import', coverage: 'Coverage statistics', postcode: 'Postcode inference', publish: 'Publication' },
+    errors: { interrupted: 'Interrupted by a restart or deployment; requeued automatically', timeout: 'Exceeded the processing time limit', stuck: 'Worker did not stop in time after cancellation', databaseTimeout: 'Database statement timed out', databaseLock: 'Database lock wait timed out', database: 'Database error', quality: 'Failed the quality gates', partial: 'Partially completed; progress saved', credential: 'Key or quota unavailable', source: 'Source unavailable or returned invalid data', failed: 'Synchronization failed ({code})' }
   }
 };
 
@@ -115,9 +118,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: '有道按量收费，试用额度用完后可能扣费，测试和自动翻译也可能产生费用。项目限额不代表供应商免费额度；若不接受费用，请勿添加或启用凭据。'
     },
     deepl: {
-      notice: '仅支持 DeepL API Free，不切换付费版。以账户实际额度和项目上限中较小者为准；所有 DeepL 密钥共用项目字符账本。测试按钮只查询额度，不消耗翻译字符。',
+      notice: '仅支持 DeepL API Free，不切换付费版。以账户实际额度和项目上限中较小者为准；每个密钥单独计算字符用量。测试按钮只查询额度，不消耗翻译字符。',
       budget: '字符使用上限（当前额度周期）', characters: '字符', provider: '账户已用 / 上限', observed: '额度查询时间', unknown: '尚未查询额度',
-      reset: '供应商未提供重置日期，不按月初清零。', add: '添加 DeepL 密钥'
+      reset: 'DeepL 免费版不提供重置日期；DeepL 报告的账户用量下降时重新计数，额度用完的密钥每小时复查一次。', add: '添加 DeepL 密钥'
     },
     test: {"title": "测试连接", "mode": "测试模式", "modeChat": "连通性（发送 \"hi\"）", "modeTranslate": "地址翻译", "start": "开始测试凭据", "running": "等待供应商响应…", "passed": "测试通过", "failed": "测试失败", "retry": "重试", "model": "模型", "prompt": "提示词", "addressSample": "地址样例", "endpointProbe": "保存时自动探测", "endpointPreview": "实际请求地址", "restoreDefaultPrompt": "恢复默认提示词", "steps": {"invalidConfig": "已保存的配置无效", "endpoint": "请求地址", "model": "模型", "parameters": "参数", "sendTranslation": "发送地址样例", "sendChat": "发送测试消息", "timeout": "请求超时", "network": "网络错误", "status": "已连接", "providerError": "供应商返回错误", "invalidJson": "响应不是 JSON", "respondedModel": "响应模型", "finishReason": "结束原因", "usage": "Token 用量", "reasoning": "思考内容字数", "response": "响应", "done": "测试完成", "truncated": "输出在 JSON 结束前被截断，请调大输出预算", "invalidTranslation": "回复不是约定的 JSON 翻译数组", "translations": "解析出的译文", "identifiersChanged": "模型改动了数字或编号"}},
     shortcut: {
@@ -133,7 +136,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '占用时间段', duration: '持续时间', growth: '总量净增', trigger: '触发方式', details: '结果说明',
       empty: '暂无同步历史', queued: '排队中', running: '同步中', succeeded: '执行成功', failed: '失败',
       paused_quota: '等待额度', needs_review: '需要检查', cancelled: '未执行', previous: '上一页', next: '下一页',
-      candidates: '候选', qualityPassed: '质量通过', rejected: '拒绝', coveredNodes: '覆盖节点', qualifiedNodes: '达标节点', interrupted: '已中断', keptRows: '已保留 {count} 条已通过质量校验的地址'
+      candidates: '候选', qualityPassed: '质量通过', rejected: '拒绝', coveredNodes: '覆盖节点', qualifiedNodes: '达标节点', interrupted: '已中断', keptRows: '已保留 {count} 条已通过质量校验的地址',
+      inProgress: '进行中', chinaProviders: '中国地图服务商',
+      phases: { discover: '发现数据源', download: '下载', materialize: '数据准备', import: '导入', coverage: '覆盖统计', postcode: '邮编推断', publish: '发布' },
+      errors: { interrupted: '因重启或部署中断，已自动重新排队', timeout: '超过处理时间上限', stuck: '取消后工作进程未及时停止', databaseTimeout: '数据库语句超时', databaseLock: '数据库锁等待超时', database: '数据库错误', quality: '未通过质量门禁', partial: '部分完成，进度已保存', credential: '密钥或额度不可用', source: '数据源不可用或返回异常', failed: '同步失败（{code}）' }
     }
   },
   'zh-TW': {
@@ -180,9 +186,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: '有道按量收費，試用額度用完後可能扣費，測試和自動翻譯也可能產生費用。專案限額不代表供應商免費額度；若不接受費用，請勿新增或啟用憑據。'
     },
     deepl: {
-      notice: '僅支援 DeepL API Free，不切換付費版。以帳戶實際額度和專案上限中較小者為準；所有 DeepL 金鑰共用專案字元帳本。測試按鈕僅查詢額度，不消耗翻譯字元。',
+      notice: '僅支援 DeepL API Free，不切換付費版。以帳戶實際額度和專案上限中較小者為準；每個金鑰單獨計算字元用量。測試按鈕僅查詢額度，不消耗翻譯字元。',
       budget: '字元使用上限（目前額度週期）', characters: '字元', provider: '帳戶已用 / 上限', observed: '額度查詢時間', unknown: '尚未查詢額度',
-      reset: '供應商未提供重置日期，不按月初歸零。', add: '新增 DeepL 金鑰'
+      reset: 'DeepL 免費版不提供重置日期；DeepL 回報的帳戶用量下降時重新計數，額度用完的金鑰每小時複查一次。', add: '新增 DeepL 金鑰'
     },
     test: {"title": "測試連線", "mode": "測試模式", "modeChat": "連通性（傳送 \"hi\"）", "modeTranslate": "地址翻譯", "start": "開始測試憑據", "running": "等待供應商回應…", "passed": "測試通過", "failed": "測試失敗", "retry": "重試", "model": "模型", "prompt": "提示詞", "addressSample": "地址樣例", "endpointProbe": "儲存時自動偵測", "endpointPreview": "實際請求網址", "restoreDefaultPrompt": "恢復預設提示詞", "steps": {"invalidConfig": "已儲存的設定無效", "endpoint": "請求網址", "model": "模型", "parameters": "參數", "sendTranslation": "傳送地址樣例", "sendChat": "傳送測試訊息", "timeout": "請求逾時", "network": "網路錯誤", "status": "已連線", "providerError": "供應商回傳錯誤", "invalidJson": "回應不是 JSON", "respondedModel": "回應模型", "finishReason": "結束原因", "usage": "Token 用量", "reasoning": "思考內容字數", "response": "回應", "done": "測試完成", "truncated": "輸出在 JSON 結束前被截斷，請調大輸出預算", "invalidTranslation": "回覆不是約定的 JSON 翻譯陣列", "translations": "解析出的譯文", "identifiersChanged": "模型改動了數字或編號"}},
     shortcut: {
@@ -198,7 +204,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '佔用時段', duration: '持續時間', growth: '總量淨增', trigger: '觸發方式', details: '結果說明',
       empty: '暫無同步歷史', queued: '排隊中', running: '同步中', succeeded: '執行成功', failed: '失敗',
       paused_quota: '等待額度', needs_review: '需要檢查', cancelled: '未執行', previous: '上一頁', next: '下一頁',
-      candidates: '候選', qualityPassed: '品質通過', rejected: '拒絕', coveredNodes: '覆蓋節點', qualifiedNodes: '達標節點', interrupted: '已中斷', keptRows: '已保留 {count} 筆已通過品質校驗的地址'
+      candidates: '候選', qualityPassed: '品質通過', rejected: '拒絕', coveredNodes: '覆蓋節點', qualifiedNodes: '達標節點', interrupted: '已中斷', keptRows: '已保留 {count} 筆已通過品質校驗的地址',
+      inProgress: '進行中', chinaProviders: '中國地圖服務商',
+      phases: { discover: '探索資料來源', download: '下載', materialize: '資料準備', import: '匯入', coverage: '覆蓋統計', postcode: '郵遞區號推斷', publish: '發布' },
+      errors: { interrupted: '因重新啟動或部署中斷，已自動重新排隊', timeout: '超過處理時間上限', stuck: '取消後工作程序未及時停止', databaseTimeout: '資料庫語句逾時', databaseLock: '資料庫鎖定等待逾時', database: '資料庫錯誤', quality: '未通過品質門檻', partial: '部分完成，進度已儲存', credential: '金鑰或額度無法使用', source: '資料來源無法使用或回傳異常', failed: '同步失敗（{code}）' }
     }
   },
   ja: {
@@ -245,9 +254,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'Youdao は従量課金で、試用クレジットを使い切るとテストや自動翻訳でも料金が発生する場合があります。プロジェクトの上限は無料枠を保証するものではありません。料金を受け入れない場合は、認証情報を追加・有効化しないでください。'
     },
     deepl: {
-      notice: 'DeepL API Free のみ対応し、Pro には切り替えません。アカウントの利用枠とプロジェクト上限のうち小さい方が適用されます。すべての DeepL キーで 1 つの文字数台帳を共有します。テストボタンは利用状況を確認するだけで翻訳は行いません。',
+      notice: 'DeepL API Free のみ対応し、Pro には切り替えません。アカウントの利用枠とプロジェクト上限のうち小さい方が適用されます。文字数台帳はキーごとに管理します。テストボタンは利用状況を確認するだけで翻訳は行いません。',
       budget: '文字数上限（現在の利用期間）', characters: '文字', provider: 'アカウント使用量 / 上限', observed: '利用状況の確認時刻', unknown: '利用状況は未確認',
-      reset: 'プロバイダーがリセット日を提供していないため、月初にはリセットされません。', add: 'DeepL キーを追加'
+      reset: 'DeepL Free はリセット日を返しません。DeepL が報告する利用量が減ると再計算し、上限に達したキーは 1 時間ごとに再確認します。', add: 'DeepL キーを追加'
     },
     test: {"title": "接続テスト", "mode": "テストモード", "modeChat": "疎通確認（\"hi\" を送信）", "modeTranslate": "住所の翻訳", "start": "認証情報をテスト中", "running": "プロバイダーの応答を待っています…", "passed": "テスト成功", "failed": "テスト失敗", "retry": "再試行", "model": "モデル", "prompt": "プロンプト", "addressSample": "住所サンプル", "endpointProbe": "保存時に自動検出", "endpointPreview": "リクエスト URL", "restoreDefaultPrompt": "既定のプロンプトに戻す", "steps": {"invalidConfig": "保存された設定が無効です", "endpoint": "エンドポイント", "model": "モデル", "parameters": "パラメーター", "sendTranslation": "住所サンプルを送信", "sendChat": "テストメッセージを送信", "timeout": "タイムアウトしました", "network": "ネットワークエラー", "status": "接続済み", "providerError": "プロバイダーのエラー", "invalidJson": "応答が JSON ではありません", "respondedModel": "応答したモデル", "finishReason": "終了理由", "usage": "トークン使用量", "reasoning": "推論の文字数", "response": "応答", "done": "テスト完了", "truncated": "JSON の途中で出力が打ち切られました。出力上限を増やしてください", "invalidTranslation": "応答が想定した JSON 翻訳配列ではありません", "translations": "解析した訳文", "identifiersChanged": "モデルが数字や識別子を変更しました"}},
     shortcut: {
@@ -263,7 +272,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '実行期間', duration: '所要時間', growth: '純増数', trigger: 'トリガー', details: '結果',
       empty: '同期履歴はありません', queued: '待機中', running: '実行中', succeeded: '成功', failed: '失敗',
       paused_quota: 'クォータ待ち', needs_review: '要確認', cancelled: '未実行', previous: '前へ', next: '次へ',
-      candidates: '候補', qualityPassed: '品質合格', rejected: '除外', coveredNodes: '網羅ノード', qualifiedNodes: '基準達成ノード', interrupted: '中断', keptRows: '品質チェック済みの {count} 件を保持'
+      candidates: '候補', qualityPassed: '品質合格', rejected: '除外', coveredNodes: '網羅ノード', qualifiedNodes: '基準達成ノード', interrupted: '中断', keptRows: '品質チェック済みの {count} 件を保持',
+      inProgress: '実行中', chinaProviders: '中国の地図サービス',
+      phases: { discover: 'データソースの検出', download: 'ダウンロード', materialize: 'データ準備', import: 'インポート', coverage: 'カバレッジ集計', postcode: '郵便番号推定', publish: '公開' },
+      errors: { interrupted: '再起動またはデプロイで中断され、自動で再キューされました', timeout: '処理時間の上限を超えました', stuck: 'キャンセル後にワーカーが時間内に停止しませんでした', databaseTimeout: 'データベースのステートメントがタイムアウトしました', databaseLock: 'データベースのロック待ちがタイムアウトしました', database: 'データベースエラー', quality: '品質ゲートを通過しませんでした', partial: '一部完了し、進捗を保存しました', credential: 'キーまたは利用枠を使用できません', source: 'データソースが利用できないか異常な応答を返しました', failed: '同期に失敗しました（{code}）' }
     }
   },
   ko: {
@@ -310,9 +322,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'Youdao는 사용량 기반 요금이며 체험 크레딧 소진 후에는 테스트와 자동 번역에도 요금이 발생할 수 있습니다. 프로젝트 한도는 무료 크레딧을 보장하지 않습니다. 요금을 받아들이지 않으면 자격 증명을 추가하거나 사용하지 마세요.'
     },
     deepl: {
-      notice: 'DeepL API Free만 지원하며 Pro로 전환하지 않습니다. 계정 허용량과 프로젝트 한도 중 작은 값이 적용되고, 모든 DeepL 키가 하나의 문자 사용 장부를 공유합니다. 테스트 버튼은 번역 없이 사용량만 확인합니다.',
+      notice: 'DeepL API Free만 지원하며 Pro로 전환하지 않습니다. 계정 허용량과 프로젝트 한도 중 작은 값이 적용되고, 문자 사용 장부는 키마다 따로 관리합니다. 테스트 버튼은 번역 없이 사용량만 확인합니다.',
       budget: '문자 한도(현재 할당 기간)', characters: '자', provider: '계정 사용량 / 한도', observed: '사용량 확인 시각', unknown: '사용량 미확인',
-      reset: '공급자가 초기화 날짜를 제공하지 않아 월초에 초기화되지 않습니다.', add: 'DeepL 키 추가'
+      reset: 'DeepL Free는 초기화 날짜를 제공하지 않습니다. DeepL이 보고한 계정 사용량이 줄면 다시 계산하며, 한도에 도달한 키는 1시간마다 다시 확인합니다.', add: 'DeepL 키 추가'
     },
     test: {"title": "연결 테스트", "mode": "테스트 모드", "modeChat": "연결 확인(\"hi\" 전송)", "modeTranslate": "주소 번역", "start": "자격 증명 테스트 시작", "running": "공급자 응답 대기 중…", "passed": "테스트 통과", "failed": "테스트 실패", "retry": "다시 시도", "model": "모델", "prompt": "프롬프트", "addressSample": "주소 샘플", "endpointProbe": "저장 시 자동 감지", "endpointPreview": "요청 URL", "restoreDefaultPrompt": "기본 프롬프트 복원", "steps": {"invalidConfig": "저장된 설정이 올바르지 않습니다", "endpoint": "엔드포인트", "model": "모델", "parameters": "매개변수", "sendTranslation": "주소 샘플 전송", "sendChat": "테스트 메시지 전송", "timeout": "요청 시간 초과", "network": "네트워크 오류", "status": "연결됨", "providerError": "공급자 오류", "invalidJson": "응답이 JSON이 아닙니다", "respondedModel": "응답 모델", "finishReason": "종료 사유", "usage": "토큰 사용량", "reasoning": "추론 글자 수", "response": "응답", "done": "테스트 완료", "truncated": "JSON이 끝나기 전에 출력이 잘렸습니다. 출력 예산을 늘리세요", "invalidTranslation": "응답이 약속된 JSON 번역 배열이 아닙니다", "translations": "파싱된 번역", "identifiersChanged": "모델이 숫자나 식별자를 변경했습니다"}},
     shortcut: {
@@ -328,7 +340,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: '실행 기간', duration: '소요 시간', growth: '순증가', trigger: '트리거', details: '결과',
       empty: '동기화 기록이 없습니다', queued: '대기 중', running: '실행 중', succeeded: '성공', failed: '실패',
       paused_quota: '할당량 대기', needs_review: '검토 필요', cancelled: '실행 안 됨', previous: '이전', next: '다음',
-      candidates: '후보', qualityPassed: '품질 통과', rejected: '제외', coveredNodes: '커버 노드', qualifiedNodes: '기준 충족 노드', interrupted: '중단됨', keptRows: '품질 검사를 통과한 {count}건 유지'
+      candidates: '후보', qualityPassed: '품질 통과', rejected: '제외', coveredNodes: '커버 노드', qualifiedNodes: '기준 충족 노드', interrupted: '중단됨', keptRows: '품질 검사를 통과한 {count}건 유지',
+      inProgress: '진행 중', chinaProviders: '중국 지도 서비스',
+      phases: { discover: '데이터 소스 탐색', download: '다운로드', materialize: '데이터 준비', import: '가져오기', coverage: '커버리지 집계', postcode: '우편번호 추정', publish: '게시' },
+      errors: { interrupted: '재시작 또는 배포로 중단되어 자동으로 다시 대기열에 추가됨', timeout: '처리 시간 한도 초과', stuck: '취소 후 작업자가 제때 멈추지 않음', databaseTimeout: '데이터베이스 문 실행 시간 초과', databaseLock: '데이터베이스 잠금 대기 시간 초과', database: '데이터베이스 오류', quality: '품질 기준 미통과', partial: '일부 완료, 진행 상황 저장됨', credential: '키 또는 할당량 사용 불가', source: '데이터 소스를 사용할 수 없거나 비정상 응답', failed: '동기화 실패({code})' }
     }
   },
   de: {
@@ -375,9 +390,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'Youdao wird nach Nutzung abgerechnet und kann nach Ablauf des Testguthabens Kosten verursachen, auch für Tests und automatische Übersetzung. Projektlimits garantieren kein Freikontingent. Fügen Sie Zugangsdaten nur hinzu oder aktivieren Sie sie, wenn Sie die Kosten akzeptieren.'
     },
     deepl: {
-      notice: 'Nur DeepL API Free; es wird nie zu Pro gewechselt. Es gilt der kleinere Wert aus Kontokontingent und Projektlimit. Alle DeepL-Schlüssel teilen sich ein Zeichenkonto. Die Testtaste prüft nur die Nutzung und übersetzt nichts.',
+      notice: 'Nur DeepL API Free; es wird nie zu Pro gewechselt. Es gilt der kleinere Wert aus Kontokontingent und Projektlimit. Jeder Schlüssel führt ein eigenes Zeichenkonto. Die Testtaste prüft nur die Nutzung und übersetzt nichts.',
       budget: 'Zeichenlimit (aktueller Zeitraum)', characters: 'Zeichen', provider: 'Konto genutzt / Limit', observed: 'Nutzung geprüft', unknown: 'Nutzung nicht geprüft',
-      reset: 'Der Anbieter nennt kein Rücksetzdatum; die Nutzung wird nicht zum Monatsanfang zurückgesetzt.', add: 'DeepL-Schlüssel hinzufügen'
+      reset: 'DeepL Free nennt kein Rücksetzdatum; sinkt die von DeepL gemeldete Kontonutzung, beginnt die Zählung neu, und ausgeschöpfte Schlüssel werden stündlich geprüft.', add: 'DeepL-Schlüssel hinzufügen'
     },
     test: {"title": "Verbindung testen", "mode": "Testmodus", "modeChat": "Erreichbarkeit („hi“ senden)", "modeTranslate": "Adressübersetzung", "start": "Zugangsdaten werden getestet", "running": "Warten auf den Anbieter…", "passed": "Test bestanden", "failed": "Test fehlgeschlagen", "retry": "Erneut versuchen", "model": "Modell", "prompt": "Prompt", "addressSample": "Adressbeispiel", "endpointProbe": "wird beim Speichern erkannt", "endpointPreview": "Anfrage-URL", "restoreDefaultPrompt": "Standard-Prompt wiederherstellen", "steps": {"invalidConfig": "Die gespeicherte Konfiguration ist ungültig", "endpoint": "Endpunkt", "model": "Modell", "parameters": "Parameter", "sendTranslation": "Adressbeispiel wird gesendet", "sendChat": "Testnachricht wird gesendet", "timeout": "Zeitüberschreitung", "network": "Netzwerkfehler", "status": "Verbunden", "providerError": "Fehler des Anbieters", "invalidJson": "Antwort ist kein JSON", "respondedModel": "Antwortendes Modell", "finishReason": "Abschlussgrund", "usage": "Token-Verbrauch", "reasoning": "Reasoning-Zeichen", "response": "Antwort", "done": "Test abgeschlossen", "truncated": "Die Ausgabe wurde vor dem Ende des JSON abgeschnitten; erhöhen Sie das Ausgabebudget", "invalidTranslation": "Die Antwort ist nicht das erwartete JSON-Übersetzungsarray", "translations": "Erkannte Übersetzungen", "identifiersChanged": "Das Modell hat Zahlen oder Kennungen verändert"}},
     shortcut: {
@@ -393,7 +408,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Zeitraum', duration: 'Dauer', growth: 'Adresszuwachs', trigger: 'Auslöser', details: 'Ergebnis',
       empty: 'Kein Synchronisierungsverlauf', queued: 'In Warteschlange', running: 'Läuft', succeeded: 'Erfolgreich', failed: 'Fehlgeschlagen',
       paused_quota: 'Pausiert (Kontingent)', needs_review: 'Prüfung nötig', cancelled: 'Nicht ausgeführt', previous: 'Zurück', next: 'Weiter',
-      candidates: 'Kandidaten', qualityPassed: 'Qualität bestanden', rejected: 'Abgelehnt', coveredNodes: 'Abgedeckte Knoten', qualifiedNodes: 'Qualifizierte Knoten', interrupted: 'Unterbrochen', keptRows: '{count} geprüfte Adressen behalten'
+      candidates: 'Kandidaten', qualityPassed: 'Qualität bestanden', rejected: 'Abgelehnt', coveredNodes: 'Abgedeckte Knoten', qualifiedNodes: 'Qualifizierte Knoten', interrupted: 'Unterbrochen', keptRows: '{count} geprüfte Adressen behalten',
+      inProgress: 'Läuft', chinaProviders: 'Kartendienste China',
+      phases: { discover: 'Quellensuche', download: 'Download', materialize: 'Datenaufbereitung', import: 'Import', coverage: 'Abdeckungsstatistik', postcode: 'Postleitzahlen-Ableitung', publish: 'Veröffentlichung' },
+      errors: { interrupted: 'Durch Neustart oder Deployment unterbrochen; automatisch neu eingereiht', timeout: 'Bearbeitungszeitlimit überschritten', stuck: 'Worker stoppte nach dem Abbruch nicht rechtzeitig', databaseTimeout: 'Datenbankanweisung hat das Zeitlimit überschritten', databaseLock: 'Warten auf Datenbanksperre hat das Zeitlimit überschritten', database: 'Datenbankfehler', quality: 'Qualitätsprüfung nicht bestanden', partial: 'Teilweise abgeschlossen; Fortschritt gespeichert', credential: 'Schlüssel oder Kontingent nicht verfügbar', source: 'Quelle nicht verfügbar oder ungültige Daten', failed: 'Synchronisierung fehlgeschlagen ({code})' }
     }
   },
   fr: {
@@ -440,9 +458,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'Youdao est facturé à l’usage et peut entraîner des frais après épuisement des crédits d’essai, y compris pour les tests et la traduction automatique. Les limites du projet ne garantissent aucun crédit gratuit. N’ajoutez ni n’activez d’identifiants si vous n’acceptez pas ces frais.'
     },
     deepl: {
-      notice: 'DeepL API Free uniquement ; aucun passage à Pro. La plus faible valeur entre l’allocation du compte et la limite du projet s’applique. Toutes les clés DeepL partagent un même registre de caractères. Le bouton de test vérifie l’usage sans traduire.',
+      notice: 'DeepL API Free uniquement ; aucun passage à Pro. La plus faible valeur entre l’allocation du compte et la limite du projet s’applique. Chaque clé tient son propre registre de caractères. Le bouton de test vérifie l’usage sans traduire.',
       budget: 'Plafond de caractères (période en cours)', characters: 'caractères', provider: 'Compte utilisé / limite', observed: 'Usage vérifié', unknown: 'Usage non vérifié',
-      reset: 'Le fournisseur n’indique pas de date de réinitialisation ; l’usage n’est pas remis à zéro en début de mois.', add: 'Ajouter une clé DeepL'
+      reset: 'DeepL Free n’indique pas de date de réinitialisation ; le décompte repart quand l’usage signalé par DeepL baisse, et les clés épuisées sont revérifiées toutes les heures.', add: 'Ajouter une clé DeepL'
     },
     test: {"title": "Tester la connexion", "mode": "Mode de test", "modeChat": "Connectivité (envoi de « hi »)", "modeTranslate": "Traduction d’adresse", "start": "Test de l’identifiant", "running": "En attente du fournisseur…", "passed": "Test réussi", "failed": "Échec du test", "retry": "Réessayer", "model": "Modèle", "prompt": "Invite", "addressSample": "exemple d’adresse", "endpointProbe": "détecté à l’enregistrement", "endpointPreview": "URL de requête", "restoreDefaultPrompt": "Rétablir l’invite par défaut", "steps": {"invalidConfig": "La configuration enregistrée est invalide", "endpoint": "Point de terminaison", "model": "Modèle", "parameters": "Paramètres", "sendTranslation": "Envoi de l’exemple d’adresse", "sendChat": "Envoi du message de test", "timeout": "Délai dépassé", "network": "Erreur réseau", "status": "Connecté", "providerError": "Erreur du fournisseur", "invalidJson": "La réponse n’est pas du JSON", "respondedModel": "Modèle ayant répondu", "finishReason": "Motif de fin", "usage": "Consommation de jetons", "reasoning": "Caractères de raisonnement", "response": "Réponse", "done": "Test terminé", "truncated": "La sortie a été tronquée avant la fin du JSON ; augmentez le budget de sortie", "invalidTranslation": "La réponse n’est pas le tableau JSON de traductions attendu", "translations": "Traductions analysées", "identifiersChanged": "Le modèle a modifié des nombres ou des identifiants"}},
     shortcut: {
@@ -458,7 +476,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Période', duration: 'Durée', growth: 'Croissance des adresses', trigger: 'Déclencheur', details: 'Résultat',
       empty: 'Aucun historique de synchronisation', queued: 'En file', running: 'En cours', succeeded: 'Réussi', failed: 'Échec',
       paused_quota: 'En pause (quota)', needs_review: 'À vérifier', cancelled: 'Non exécuté', previous: 'Précédent', next: 'Suivant',
-      candidates: 'Candidats', qualityPassed: 'Qualité validée', rejected: 'Rejetés', coveredNodes: 'Nœuds couverts', qualifiedNodes: 'Nœuds conformes', interrupted: 'Interrompu', keptRows: '{count} adresses validées conservées'
+      candidates: 'Candidats', qualityPassed: 'Qualité validée', rejected: 'Rejetés', coveredNodes: 'Nœuds couverts', qualifiedNodes: 'Nœuds conformes', interrupted: 'Interrompu', keptRows: '{count} adresses validées conservées',
+      inProgress: 'En cours', chinaProviders: 'Services cartographiques chinois',
+      phases: { discover: 'Découverte de la source', download: 'Téléchargement', materialize: 'Préparation des données', import: 'Import', coverage: 'Statistiques de couverture', postcode: 'Déduction des codes postaux', publish: 'Publication' },
+      errors: { interrupted: 'Interrompu par un redémarrage ou un déploiement ; remis en file automatiquement', timeout: 'Durée maximale de traitement dépassée', stuck: 'Le processus ne s’est pas arrêté à temps après l’annulation', databaseTimeout: 'Délai de requête de la base de données dépassé', databaseLock: 'Délai d’attente de verrou de la base de données dépassé', database: 'Erreur de base de données', quality: 'Contrôles qualité non réussis', partial: 'Partiellement terminé ; progression enregistrée', credential: 'Clé ou quota indisponible', source: 'Source indisponible ou données invalides', failed: 'Échec de la synchronisation ({code})' }
     }
   },
   es: {
@@ -505,9 +526,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'Youdao se factura por uso y puede cobrar al agotarse los créditos de prueba, incluidas las pruebas y la traducción automática. Los límites del proyecto no garantizan créditos gratuitos. No añada ni active credenciales si no acepta los cargos.'
     },
     deepl: {
-      notice: 'Solo DeepL API Free; nunca cambia a Pro. Se aplica el menor entre el cupo de la cuenta y el límite del proyecto. Todas las claves de DeepL comparten un mismo registro de caracteres. El botón de prueba consulta el uso sin traducir.',
+      notice: 'Solo DeepL API Free; nunca cambia a Pro. Se aplica el menor entre el cupo de la cuenta y el límite del proyecto. Cada clave lleva su propio registro de caracteres. El botón de prueba consulta el uso sin traducir.',
       budget: 'Límite de caracteres (periodo actual)', characters: 'caracteres', provider: 'Cuenta usada / límite', observed: 'Uso consultado', unknown: 'Uso no consultado',
-      reset: 'El proveedor no indica la fecha de restablecimiento; el uso no se reinicia a principio de mes.', add: 'Añadir clave de DeepL'
+      reset: 'DeepL Free no indica la fecha de restablecimiento; el recuento se reinicia cuando DeepL informa un uso menor y las claves agotadas se revisan cada hora.', add: 'Añadir clave de DeepL'
     },
     test: {"title": "Probar conexión", "mode": "Modo de prueba", "modeChat": "Conectividad (enviar \"hi\")", "modeTranslate": "Traducción de direcciones", "start": "Probando la credencial", "running": "Esperando al proveedor…", "passed": "Prueba superada", "failed": "Prueba fallida", "retry": "Reintentar", "model": "Modelo", "prompt": "Prompt", "addressSample": "muestra de dirección", "endpointProbe": "se detecta al guardar", "endpointPreview": "URL de solicitud", "restoreDefaultPrompt": "Restablecer prompt predeterminado", "steps": {"invalidConfig": "La configuración guardada no es válida", "endpoint": "Endpoint", "model": "Modelo", "parameters": "Parámetros", "sendTranslation": "Enviando muestra de dirección", "sendChat": "Enviando mensaje de prueba", "timeout": "Tiempo de espera agotado", "network": "Error de red", "status": "Conectado", "providerError": "Error del proveedor", "invalidJson": "La respuesta no es JSON", "respondedModel": "Modelo que respondió", "finishReason": "Motivo de finalización", "usage": "Uso de tokens", "reasoning": "Caracteres de razonamiento", "response": "Respuesta", "done": "Prueba completada", "truncated": "La salida se cortó antes de terminar el JSON; aumente el presupuesto de salida", "invalidTranslation": "La respuesta no es el array JSON de traducciones esperado", "translations": "Traducciones analizadas", "identifiersChanged": "El modelo cambió números o identificadores"}},
     shortcut: {
@@ -523,7 +544,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Periodo', duration: 'Duración', growth: 'Crecimiento de direcciones', trigger: 'Disparador', details: 'Resultado',
       empty: 'Sin historial de sincronización', queued: 'En cola', running: 'En curso', succeeded: 'Completado', failed: 'Fallido',
       paused_quota: 'En pausa por cuota', needs_review: 'Requiere revisión', cancelled: 'No ejecutado', previous: 'Anterior', next: 'Siguiente',
-      candidates: 'Candidatos', qualityPassed: 'Calidad superada', rejected: 'Rechazados', coveredNodes: 'Nodos cubiertos', qualifiedNodes: 'Nodos que cumplen', interrupted: 'Interrumpido', keptRows: 'Se conservaron {count} direcciones validadas'
+      candidates: 'Candidatos', qualityPassed: 'Calidad superada', rejected: 'Rechazados', coveredNodes: 'Nodos cubiertos', qualifiedNodes: 'Nodos que cumplen', interrupted: 'Interrumpido', keptRows: 'Se conservaron {count} direcciones validadas',
+      inProgress: 'En curso', chinaProviders: 'Servicios de mapas de China',
+      phases: { discover: 'Descubrimiento de la fuente', download: 'Descarga', materialize: 'Preparación de datos', import: 'Importación', coverage: 'Estadísticas de cobertura', postcode: 'Inferencia de códigos postales', publish: 'Publicación' },
+      errors: { interrupted: 'Interrumpido por un reinicio o despliegue; reencolado automáticamente', timeout: 'Se superó el tiempo máximo de procesamiento', stuck: 'El proceso no se detuvo a tiempo tras la cancelación', databaseTimeout: 'Se agotó el tiempo de la consulta a la base de datos', databaseLock: 'Se agotó la espera de bloqueo de la base de datos', database: 'Error de base de datos', quality: 'No superó los controles de calidad', partial: 'Completado parcialmente; progreso guardado', credential: 'Clave o cupo no disponible', source: 'Fuente no disponible o datos no válidos', failed: 'Error de sincronización ({code})' }
     }
   },
   pt: {
@@ -570,9 +594,9 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       youdao: 'O Youdao é cobrado por uso e pode gerar cobranças após o fim dos créditos de teste, inclusive em testes e tradução automática. Os limites do projeto não garantem créditos gratuitos. Não adicione nem ative credenciais se não aceitar as cobranças.'
     },
     deepl: {
-      notice: 'Apenas DeepL API Free; nunca muda para Pro. Vale o menor entre a franquia da conta e o limite do projeto. Todas as chaves DeepL compartilham um único registro de caracteres. O botão de teste consulta o uso sem traduzir.',
+      notice: 'Apenas DeepL API Free; nunca muda para Pro. Vale o menor entre a franquia da conta e o limite do projeto. Cada chave mantém seu próprio registro de caracteres. O botão de teste consulta o uso sem traduzir.',
       budget: 'Limite de caracteres (período atual)', characters: 'caracteres', provider: 'Conta usada / limite', observed: 'Uso consultado', unknown: 'Uso não consultado',
-      reset: 'O provedor não informa a data de redefinição; o uso não é zerado no início do mês.', add: 'Adicionar chave DeepL'
+      reset: 'O DeepL Free não informa a data de redefinição; a contagem recomeça quando o DeepL informa um uso menor e as chaves esgotadas são verificadas a cada hora.', add: 'Adicionar chave DeepL'
     },
     test: {"title": "Testar conexão", "mode": "Modo de teste", "modeChat": "Conectividade (enviar \"hi\")", "modeTranslate": "Tradução de endereços", "start": "Testando a credencial", "running": "Aguardando o provedor…", "passed": "Teste aprovado", "failed": "Teste falhou", "retry": "Tentar novamente", "model": "Modelo", "prompt": "Prompt", "addressSample": "amostra de endereço", "endpointProbe": "detectado ao salvar", "endpointPreview": "URL da requisição", "restoreDefaultPrompt": "Restaurar prompt padrão", "steps": {"invalidConfig": "A configuração salva é inválida", "endpoint": "Endpoint", "model": "Modelo", "parameters": "Parâmetros", "sendTranslation": "Enviando amostra de endereço", "sendChat": "Enviando mensagem de teste", "timeout": "Tempo esgotado", "network": "Erro de rede", "status": "Conectado", "providerError": "Erro do provedor", "invalidJson": "A resposta não é JSON", "respondedModel": "Modelo que respondeu", "finishReason": "Motivo de término", "usage": "Uso de tokens", "reasoning": "Caracteres de raciocínio", "response": "Resposta", "done": "Teste concluído", "truncated": "A saída foi cortada antes do fim do JSON; aumente o orçamento de saída", "invalidTranslation": "A resposta não é o array JSON de traduções esperado", "translations": "Traduções analisadas", "identifiersChanged": "O modelo alterou números ou identificadores"}},
     shortcut: {
@@ -588,7 +612,10 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       period: 'Período', duration: 'Duração', growth: 'Crescimento de endereços', trigger: 'Gatilho', details: 'Resultado',
       empty: 'Sem histórico de sincronização', queued: 'Na fila', running: 'Em execução', succeeded: 'Concluído', failed: 'Falhou',
       paused_quota: 'Pausado por cota', needs_review: 'Requer revisão', cancelled: 'Não executado', previous: 'Anterior', next: 'Próximo',
-      candidates: 'Candidatos', qualityPassed: 'Qualidade aprovada', rejected: 'Rejeitados', coveredNodes: 'Nós cobertos', qualifiedNodes: 'Nós qualificados', interrupted: 'Interrompido', keptRows: '{count} endereços validados mantidos'
+      candidates: 'Candidatos', qualityPassed: 'Qualidade aprovada', rejected: 'Rejeitados', coveredNodes: 'Nós cobertos', qualifiedNodes: 'Nós qualificados', interrupted: 'Interrompido', keptRows: '{count} endereços validados mantidos',
+      inProgress: 'Em andamento', chinaProviders: 'Serviços de mapas da China',
+      phases: { discover: 'Descoberta da fonte', download: 'Download', materialize: 'Preparação dos dados', import: 'Importação', coverage: 'Estatísticas de cobertura', postcode: 'Inferência de CEP', publish: 'Publicação' },
+      errors: { interrupted: 'Interrompido por reinício ou implantação; recolocado na fila automaticamente', timeout: 'Tempo máximo de processamento excedido', stuck: 'O processo não parou a tempo após o cancelamento', databaseTimeout: 'Tempo da consulta ao banco de dados esgotado', databaseLock: 'Tempo de espera de bloqueio do banco de dados esgotado', database: 'Erro de banco de dados', quality: 'Não passou nos controles de qualidade', partial: 'Concluído parcialmente; progresso salvo', credential: 'Chave ou cota indisponível', source: 'Fonte indisponível ou dados inválidos', failed: 'Falha na sincronização ({code})' }
     }
   }
 };
