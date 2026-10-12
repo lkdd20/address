@@ -125,16 +125,18 @@ export const profileLanguageStorageKey = 'address-generator-profile-language';
 const displayLanguages = new Set<string>(['native', 'pinyin', ...supportedLocales]);
 type LanguageStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
+// A visit starts in the page language; an explicit choice lasts for the browser session only.
 export const readStoredDisplayLanguage = <T extends AddressDisplayLanguage | ProfileLanguage>(
   key: string,
+  fallback: Locale = 'en',
   storage?: LanguageStorage
-): T | 'en' => {
+): T | Locale => {
   try {
-    const source = storage || (typeof window === 'undefined' ? undefined : window.localStorage);
+    const source = storage || (typeof window === 'undefined' ? undefined : window.sessionStorage);
     const value = source?.getItem(key);
-    return value && displayLanguages.has(value) ? value as T : 'en';
+    return value && displayLanguages.has(value) ? value as T : fallback;
   } catch {
-    return 'en';
+    return fallback;
   }
 };
 const emptyLocationLoadState: Record<LocationField, LocationLoadState> = {
@@ -143,7 +145,7 @@ const emptyLocationLoadState: Record<LocationField, LocationLoadState> = {
 
 export const storeDisplayLanguage = (key: string, value: AddressDisplayLanguage | ProfileLanguage, storage?: LanguageStorage): void => {
   try {
-    (storage || (typeof window === 'undefined' ? undefined : window.localStorage))?.setItem(key, value);
+    (storage || (typeof window === 'undefined' ? undefined : window.sessionStorage))?.setItem(key, value);
   } catch {
     // Storage can be unavailable in restricted browser contexts; state remains authoritative.
   }
@@ -257,8 +259,17 @@ export const exactLocationMatches = (options: LocationOption[], query: string, l
     .some((name) => name && normalizeLocationSearch(name) === typed)) : [];
 };
 type GenerationErrorMessageKey = 'retry' | 'noPoolCoverage' | 'ipNoResult' | 'ipLookupFailed' | 'requestFailed';
+export const GENERATION_BUSY_RETRIES = 3;
+export const generationErrorCode = (error: { code?: string } | string | undefined): string =>
+  (typeof error === 'string' ? error : error?.code) || 'API_ERROR';
+export const abortableDelay = (milliseconds: number, signal: AbortSignal): Promise<void> => new Promise((resolveDelay, reject) => {
+  const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolveDelay(); }, milliseconds);
+  const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+  if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+});
 export const generationErrorMessageKey = (code: string, ipRegion: boolean): GenerationErrorMessageKey => {
   if (code === 'NO_POOL_COVERAGE') return 'noPoolCoverage';
+  if (code === 'GENERATION_BUSY') return 'retry';
   if (code === 'IP_REGION_NO_RESULT') return 'ipNoResult';
   if (code.toUpperCase().includes('TIMEOUT')) return 'retry';
   return ipRegion ? 'ipLookupFailed' : 'requestFailed';
@@ -385,10 +396,10 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [locationMeta, setLocationMeta] = useState<Record<LocationField, LocationMeta>>(emptyLocationMeta);
   const [locationLoadState, setLocationLoadState] = useState<Record<LocationField, LocationLoadState>>(emptyLocationLoadState);
   const [result, setResult] = useState<GeneratedBundle | null>(null);
-  const [addressLanguage, setAddressLanguage] = useState<AddressDisplayLanguage>(() => readStoredDisplayLanguage<AddressDisplayLanguage>(addressLanguageStorageKey));
+  const [addressLanguage, setAddressLanguage] = useState<AddressDisplayLanguage>(() => readStoredDisplayLanguage<AddressDisplayLanguage>(addressLanguageStorageKey, locale));
   const [addressTranslations, setAddressTranslations] = useState<Record<string, AddressTranslation>>({});
   const [translationRetry, setTranslationRetry] = useState(0);
-  const [profileLanguage, setProfileLanguage] = useState<ProfileLanguage>(() => readStoredDisplayLanguage<ProfileLanguage>(profileLanguageStorageKey));
+  const [profileLanguage, setProfileLanguage] = useState<ProfileLanguage>(() => readStoredDisplayLanguage<ProfileLanguage>(profileLanguageStorageKey, locale));
   const [loading, setLoading] = useState(false);
   const [ipLoading, setIpLoading] = useState(false);
   const [error, setError] = useState('');
@@ -421,6 +432,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const locationRevisions = useRef<Map<CountryCode, string>>(new Map());
   const locationQueries = useRef<Record<LocationField, string>>({ region: '', city: '', district: '', postcode: '' });
   const copyToastTimer = useRef<number | undefined>(undefined);
+  const prefetchTimer = useRef<number | undefined>(undefined);
   const prefetchedResults = useRef<Map<string, GeneratedBundle[]>>(new Map());
   const recentAddressIds = useRef<Map<string, string[]>>(new Map());
   const eligibleCounts = useRef<Map<string, number>>(new Map());
@@ -511,7 +523,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     try {
       const responses = await Promise.allSettled(Array.from({ length: needed }, async () => {
         const requestId = createRequestId();
-        const response = await fetchWithTimeout(`${endpoint}/v1/generate?${paramsFor(spec, requestId, 'instant')}`, { signal: controller.signal });
+        const response = await fetchWithTimeout(`${endpoint}/v1/generate?${paramsFor(spec, requestId, 'instant')}`, {
+          signal: controller.signal, headers: { 'X-Generation-Prefetch': '1' }
+        });
         if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return undefined;
         const payload = await response.json() as { data?: GenerateResponseData };
         if (payload.data?.requestId !== requestId) return undefined;
@@ -733,6 +747,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   }, []);
   useEffect(() => () => {
     window.clearTimeout(copyToastTimer.current);
+    window.clearTimeout(prefetchTimer.current);
     prefetchController.current?.abort();
   }, []);
 
@@ -784,7 +799,15 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     };
   }, [locationLoadState.region, locationLoadState.city, countryCode, region]);
 
+  // Passing the pointer over the country list must not fire a prefetch for every button it crosses.
+  const scheduleCountryPrefetch = (nextCountry: CountryCode) => {
+    window.clearTimeout(prefetchTimer.current);
+    prefetchTimer.current = window.setTimeout(() => prefetchCountry(nextCountry), 250);
+  };
+  const cancelCountryPrefetch = () => window.clearTimeout(prefetchTimer.current);
+
   const changeCountry = (nextCountry: CountryCode) => {
+    cancelCountryPrefetch();
     if (nextCountry === countryCode) return;
     userNavigated.current = true;
     window.sessionStorage.setItem(countrySessionKey, nextCountry);
@@ -855,23 +878,29 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     setLoading(true); setError('');
     try {
       let ok = true;
-      let payload: { data?: GenerateResponseData; error?: { code?: string } };
+      let payload: { data?: GenerateResponseData; error?: { code?: string } | string };
       const bootPayload = adoptBoot ? await boot!.payload : null;
       if (bootPayload?.data) payload = bootPayload;
       else {
         const params = paramsFor(spec, context.requestId, strategy);
-        const response = await fetchWithTimeout(
-          `${endpoint}/v1/generate?${params}`,
-          { signal: controller.signal },
-          spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
-        );
+        let response: Response;
+        // A busy server answers 429 within milliseconds; a short bounded retry hides that from the user.
+        for (let attempt = 0; ; attempt += 1) {
+          response = await fetchWithTimeout(
+            `${endpoint}/v1/generate?${params}`,
+            { signal: controller.signal },
+            spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
+          );
+          if (response.status !== 429 || attempt >= GENERATION_BUSY_RETRIES) break;
+          await abortableDelay(400 * 2 ** attempt, controller.signal);
+        }
         if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
-        payload = await response.json() as { data?: GenerateResponseData; error?: { code?: string } };
+        payload = await response.json() as { data?: GenerateResponseData; error?: { code?: string } | string };
         ok = response.ok;
       }
       const current = activeRequest.current;
       if (!current || current.requestId !== context.requestId || current.country !== context.country || current.mode !== context.mode) return;
-      if (!ok || !payload.data) throw new Error(payload.error?.code || 'API_ERROR');
+      if (!ok || !payload.data) throw new Error(generationErrorCode(payload.error));
       const expectedMode = generationResponseMode(context.country, overrides.ipRegion);
       if (payload.data.requestId !== context.requestId || payload.data.mode !== expectedMode) return;
       if (!overrides.ipRegion && payload.data.country !== context.country) return;
@@ -1108,7 +1137,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         : !visibleCountries.length ? <section className="panel availability-state">{t.noCountriesAvailable}</section> : <>
       <section className="country-browser" aria-label={t.countryRegion}>
         {countryGroups.map(({ group, countries: items }) => <div className="country-group" key={group}>
-          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onMouseEnter={() => prefetchCountry(country.code)} onFocus={() => prefetchCountry(country.code)} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`/flags/${country.code.toLowerCase()}.svg`} width="24" height="18" alt="" decoding="async"/>{localizedCountryName(country.code, locale, country.name[textLocale])}</button>)}</div>
+          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onMouseEnter={() => scheduleCountryPrefetch(country.code)} onMouseLeave={cancelCountryPrefetch} onFocus={() => scheduleCountryPrefetch(country.code)} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`/flags/${country.code.toLowerCase()}.svg`} width="24" height="18" alt="" decoding="async"/>{localizedCountryName(country.code, locale, country.name[textLocale])}</button>)}</div>
         </div>)}
       </section>
 

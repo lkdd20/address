@@ -78,6 +78,7 @@ const ANCHOR_CONFIG = {
   }
 };
 
+const cityKey = (value) => String(value || '').normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
 const finiteCoord = (entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude);
 const gridCell = (latitude, longitude) => `${Math.floor(latitude / GRID_DEGREES)}:${Math.floor(longitude / GRID_DEGREES)}`;
 const spatialIndex = (entries) => {
@@ -186,6 +187,11 @@ export class CatalogReverseGeocoder {
       }
     }
     return best && bestScore <= maxDegrees * maxDegrees ? best : null;
+  }
+
+  isKnownCity(value) {
+    this.cityNames ||= new Set(this.cities.flatMap((city) => [city.name, city.native_name]).map(cityKey).filter(Boolean));
+    return this.cityNames.has(cityKey(value));
   }
 
   nearestCity(latitude, longitude, maxDegrees = 1.5) {

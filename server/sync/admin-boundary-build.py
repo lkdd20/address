@@ -108,6 +108,9 @@ for dataset_index, dataset in enumerate(config["datasets"]):
         elif kind == "overture-divisions":
             if not args.overture_release:
                 raise ValueError("overture-divisions requires --overture-release")
+            if args.overture_release == "latest":
+                with urllib.request.urlopen("https://stac.overturemaps.org/catalog.json", timeout=60) as response:
+                    args.overture_release = json.load(response)["latest"]
             language = layer.get("language")
             name = f"coalesce(nullif(trim(names.common[{sql_string(language)}]), ''), names.primary)" if language else "names.primary"
             subtypes = ",".join(sql_string(value) for value in layer["subtypes"])
@@ -115,11 +118,12 @@ for dataset_index, dataset in enumerate(config["datasets"]):
             connection.execute(f"""
 INSERT INTO boundaries
 SELECT {sql_string(layer['role'])}, {priority} + CASE subtype {ordering} ELSE 9 END,
-  trim({name}), coalesce(trim(names.common['en']), ''), CAST(division_id AS VARCHAR),
+  trim({name}), coalesce(trim(names.common['en']), ''),
+  {"coalesce(region, '')" if layer.get("codeField") == "region" else "CAST(division_id AS VARCHAR)"},
   {sql_string(dataset['id'])}, ST_MakeValid(geometry)
 FROM read_parquet({sql_string(f's3://overturemaps-us-west-2/release/{args.overture_release}/theme=divisions/type=division_area/*')},
   hive_partitioning=1)
-WHERE country = {sql_string(country)} AND subtype IN ({subtypes}) AND is_land
+WHERE country IN ({",".join(sql_string(value) for value in [country, *layer.get("countries", [])])}) AND subtype IN ({subtypes}) AND is_land
   AND nullif(trim({name}), '') IS NOT NULL AND geometry IS NOT NULL
 """)
         else:

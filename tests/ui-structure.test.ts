@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import App, {
   createRequestId,
   fetchWithTimeout,
+  generationErrorCode,
   generationErrorMessageKey,
   generatorTitle,
   IP_GENERATION_REQUEST_TIMEOUT_MS,
@@ -265,7 +266,21 @@ describe('strict residential generator page structure', () => {
     expect(generationErrorMessageKey('UPSTREAM_TIMEOUT', false)).toBe('retry');
     expect(generationErrorMessageKey('NO_SOURCE_RESULT', false)).toBe('requestFailed');
     expect(generationErrorMessageKey('IP_DATABASE_UNAVAILABLE', true)).toBe('ipLookupFailed');
+    expect(generationErrorMessageKey('GENERATION_BUSY', false)).toBe('retry');
+    expect(generationErrorCode('GENERATION_BUSY')).toBe('GENERATION_BUSY');
+    expect(generationErrorCode({ code: 'NO_POOL_COVERAGE' })).toBe('NO_POOL_COVERAGE');
+    expect(generationErrorCode(undefined)).toBe('API_ERROR');
     expect(messages['zh-CN'].noPoolCoverage).toBe('当前筛选暂无已同步地址，请更换筛选或等待下次同步。');
+  });
+
+  it('keeps background prefetches from taking user generation slots', () => {
+    const serverSource = readFileSync('server/api/server.ts', 'utf8');
+    const appFile = readFileSync('src/components/App.tsx', 'utf8');
+    expect(appFile).toContain("headers: { 'X-Generation-Prefetch': '1' }");
+    expect(appFile).toContain('response.status !== 429 || attempt >= GENERATION_BUSY_RETRIES');
+    expect(appFile).toContain('onMouseEnter={() => scheduleCountryPrefetch(country.code)}');
+    expect(serverSource).toContain("request.headers.get('x-generation-prefetch') === '1'");
+    expect(serverSource).toContain('const limiter = prefetch ? prefetchLimiter : generationLimiter;');
   });
 
   it('renders IP-region controls and submits the dedicated generation mode', () => {
@@ -292,7 +307,7 @@ describe('strict residential generator page structure', () => {
   it('prefetches database-backed results for every country and retains scoped queues', () => {
     expect(appSource).toContain('prefetchedResults');
     expect(appSource).toContain('paramsFor(spec, requestId, "instant")');
-    expect(appSource).toContain('prefetchCountry(country.code)');
+    expect(appSource).toContain('scheduleCountryPrefetch(country.code)');
     expect(appSource).toContain('onMouseEnter');
     expect(appSource).toContain('onFocus');
     expect(appSource).toContain('prefetchedResults.current.set(key');

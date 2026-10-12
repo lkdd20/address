@@ -17,7 +17,7 @@ describe('PostgreSQL database adapter', () => {
   });
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 31, control_version: 26 }], fields: [], rowCount: 1
+      rows: [{ address_version: 33, control_version: 26 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -31,6 +31,16 @@ describe('PostgreSQL database adapter', () => {
     const statements = query.mock.calls.map(([sql]) => sql);
     expect(statements.some((sql) => sql.includes('CREATE TABLE IF NOT EXISTS address_postcode_inference'))).toBe(true);
     expect(statements.some((sql) => sql.includes('VALUES (31,CURRENT_TIMESTAMP::text)'))).toBe(true);
+  });
+
+  it('builds the recovery status index concurrently when upgrading address version 31', async () => {
+    const query = vi.fn(async () => ({ rows: [{ address_version: 31, control_version: 26 }], fields: [], rowCount: 1 }));
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements.some((sql) => sql.includes('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_translation_recovery_status_address'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('VALUES (32,CURRENT_TIMESTAMP::text)'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_location_groups'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('VALUES (33,CURRENT_TIMESTAMP::text)'))).toBe(true);
   });
 
   it('upgrades control version 25 with per-key concurrency outside a transaction', async () => {
@@ -219,7 +229,7 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 31)");
+    expect(addressSchema).toContain("generate_series(1, 33)");
     expect(addressSchema).toContain('idx_address_pool_active_country_id ON address_pool(country_code, id) WHERE active=1');
     expect(addressSchema).toContain("match_level TEXT NOT NULL DEFAULT 'premise'");
     expect(addressSchema).toContain('DROP CONSTRAINT IF EXISTS address_pool_house_number_check');

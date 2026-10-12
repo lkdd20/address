@@ -1,5 +1,6 @@
 import { isValidPostcode } from './postcode-patterns.mjs';
 import { countryBoundAreas } from './country-bounds.mjs';
+import countryNames from './country-names.json' with { type: 'json' };
 
 const policies = {
   US: { admin1: true, locality: true },
@@ -85,8 +86,6 @@ const addCountryReasons = (country, components, reasons) => {
   if (country === 'US' && !/^(?:[A-Z]{2}|[\p{L} .'-]+)$/u.test(clean(components.admin1Code || admin1))) {
     reasons.push('invalid_us_admin1');
   }
-  // US house numbers always carry digits; a digit-free value is a misplaced street name.
-  if (country === 'US' && clean(components.houseNumber) && !/\d/u.test(components.houseNumber)) reasons.push('invalid_house_number');
   if (country === 'JP') {
     if (!japanese.test(`${admin1}${locality}${district}${street}`)) reasons.push('invalid_japanese_script');
     if (admin1 && !/[都道府県]$/u.test(admin1)) reasons.push('invalid_japanese_prefecture');
@@ -203,6 +202,63 @@ export const addressCanonicalKey = (countryCode, components = {}, matchLevel = '
   ].map((value) => clean(value).toLocaleLowerCase('und')).join('\u001f');
 };
 
+// A premise needs a real house number. Local "no number" markers (S/N, snc, sin valor), values without any digit and
+// whole address strings stored as the number only prove the street. British house names are a valid premise.
+const noNumberMarker = /^(?:s\s*[-/.]?\s*n[º°o.]?|s\.?\s*n\.?\s*c\.?|sin\s+n[uú]mero|sem\s+n[uú]mero|sin\s+valor|n\s*\/\s*a|c\s*\/\s*o|-+)$/iu;
+const houseNameCountries = new Set(['GB']);
+const numerals = /[\p{N}〇一二三四五六七八九十百千]/u;
+export const houseNumberIssue = (countryCode, houseNumber) => {
+  const value = clean(houseNumber);
+  if (!value || clean(countryCode).toUpperCase() === 'CN') return null;
+  if (noNumberMarker.test(clean(value.replace(/\([^)]*\)/gu, ' ')))) return 'no_number_marker';
+  if (value.length > 30) return 'overlong_house_number';
+  if (!numerals.test(value) && !houseNameCountries.has(clean(countryCode).toUpperCase())) return 'house_number_without_digits';
+  return null;
+};
+
+const fold = (value) => clean(value).normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
+const countryNameKeys = (countryCode) => new Set(Object.values(countryNames).map((names) => fold(names?.[countryCode])).filter(Boolean));
+// German and Italian official names append the municipality type after a comma (Polle, Flecken).
+const municipalityType = /^(?:stadt|flecken|gemeinde|markt|kirchspiel|hansestadt|amt|samtgemeinde)$/iu;
+const segments = (value) => clean(value).split(/[,，;]/u).map((part) => clean(part.replace(/\([^)]*\)/gu, ' '))).filter(Boolean);
+const administrativeKeys = (countryCode, components, exclude) => new Set([
+  ...countryNameKeys(countryCode),
+  ...['admin1', 'admin1Code', 'locality', 'postalLocality', 'district', 'postcode']
+    .filter((field) => field !== exclude).map((field) => fold(components[field]))
+].filter(Boolean));
+
+// Splits "suburb, city" style values. The city is the part the catalog knows; without one a single remaining part is
+// kept and anything else is cleared so the caller fills the city from coordinates.
+export const splitConcatenatedLocality = (countryCode, components, isKnownCity = () => false) => {
+  const output = { ...components };
+  for (const field of ['locality', 'postalLocality']) {
+    if (!/[,，;]/u.test(clean(output[field]))) continue;
+    const dropped = administrativeKeys(countryCode, output, field);
+    const parts = segments(output[field]).filter((part) => !dropped.has(fold(part)) && !municipalityType.test(part));
+    const city = [...parts].reverse().find((part) => isKnownCity(part));
+    output[field] = city || (parts.length === 1 ? parts[0] : '');
+    if (field === 'locality' && city && parts[0] !== city && !clean(output.district)) output.district = parts[0];
+  }
+  return output;
+};
+
+// Trailing segments that repeat the city, region, postcode or country are dropped from the street.
+export const trimStreetAdministration = (countryCode, components) => {
+  const street = clean(components.street);
+  if (!/[,，;]/u.test(street)) return components;
+  const dropped = administrativeKeys(countryCode, components, 'street');
+  const parts = segments(street);
+  while (parts.length > 1 && dropped.has(fold(parts.at(-1)))) parts.pop();
+  return { ...components, street: parts.join(', ') };
+};
+// Brazilian addresses legitimately name the block and lot (Quadra 47, Lote 17) after the street.
+const brazilianLot = /^(?:quadra|qd\.?|lote|lt\.?|bloco|conjunto|casa)(?!\p{L})/iu;
+const concatenatedStreet = (countryCode, street) => {
+  const parts = segments(street);
+  if (parts.length < 3) return false;
+  return !(countryCode === 'BR' && parts.slice(1).every((part) => brazilianLot.test(part)));
+};
+
 const corruptedText = /�|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}][?？]|[?？][\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 export const validateAddressQuality = ({ countryCode, components, latitude, longitude, matchLevel = 'premise' } = {}) => {
   const country = clean(countryCode).toUpperCase();
@@ -219,6 +275,9 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   // A Chinese residential address is identified by its community name; road and house number are optional there.
   const chinaCommunity = country === 'CN' && clean(normalizedComponents.buildingName);
   if (!streetLevel && !clean(normalizedComponents.houseNumber) && !chinaCommunity) reasons.push('missing_house_number');
+  else if (!streetLevel && houseNumberIssue(country, normalizedComponents.houseNumber)) reasons.push('invalid_house_number');
+  if (concatenatedStreet(country, normalizedComponents.street)) reasons.push('concatenated_street');
+  if (['locality', 'postalLocality'].some((field) => segments(normalizedComponents[field]).length > 1)) reasons.push('concatenated_locality');
   if (!clean(normalizedComponents.street)) {
     if (!chinaCommunity) reasons.push('missing_street');
   }

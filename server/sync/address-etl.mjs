@@ -25,7 +25,10 @@ import {
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { ADDRESS_POLICY_DEFAULTS, getRuntimePolicy, loadImportPolicy } from './address-policy.mjs';
-import { addressCanonicalKey, englishOnlyComponents, englishOnlyCoreFields, normalizeAddressFacts, streetAddressKey } from '../../src/domain/address-quality.mjs';
+import {
+  addressCanonicalKey, englishOnlyComponents, englishOnlyCoreFields, houseNumberIssue, normalizeAddressFacts, streetAddressKey,
+  trimStreetAdministration
+} from '../../src/domain/address-quality.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -600,14 +603,26 @@ export const normalizeSourceRecord = (value, shard, format) => {
   } else {
     throw new Error(`Unsupported normalized source format: ${format}`);
   }
-  const matchLevel = declaredMatchLevel || (unit ? 'subpremise' : 'premise');
+  // A "no number" marker, a number without digits or a whole address in the number field only proves the street.
+  const numberless = declaredMatchLevel !== 'street' && Boolean(houseNumberIssue(shard.countryCode, houseNumber));
+  if (numberless) {
+    houseNumber = '';
+    buildingName = '';
+    unit = '';
+    propertyType = 'unknown';
+    residentialSourceRecordId = '';
+    residentialSourceClass = '';
+    residentialSourceRecordUrl = '';
+  }
+  const matchLevel = numberless ? 'street' : declaredMatchLevel || (unit ? 'subpremise' : 'premise');
   const streetLevel = matchLevel === 'street' && shard.countryCode !== 'CN';
   if (!['street', 'premise', 'subpremise'].includes(matchLevel) || (matchLevel === 'street' && !streetLevel)) return null;
   if (streetLevel && (houseNumber || buildingName || unit || propertyType !== 'unknown' || residentialSourceRecordId)) return null;
   if (!sourceRecordId || !street || (!streetLevel && !houseNumber) || !finiteCoordinate(longitude, -180, 180) || !finiteCoordinate(latitude, -90, 90)) return null;
-  let components = normalizeAddressFacts(shard.countryCode, {
+  let components = trimStreetAdministration(shard.countryCode, normalizeAddressFacts(shard.countryCode, {
     houseNumber, street, buildingName, unit, district, locality, postalLocality, admin1, postcode
-  });
+  }));
+  street = components.street;
   if (shard.countryCode === 'IN') {
     const english = englishOnlyComponents(components);
     if (english.emptied.some((field) => englishOnlyCoreFields.includes(field) || field === 'houseNumber' && !streetLevel)) return null;
@@ -680,7 +695,9 @@ export const normalizeSourceRecord = (value, shard, format) => {
     formattedAddress: formattedAddress(components, shard.countryCode),
     components,
     englishComponentHints,
-    ...(value.admin_boundary && typeof value.admin_boundary === 'object' ? { administrativeBoundary: value.admin_boundary } : {})
+    ...(value.admin_boundary && typeof value.admin_boundary === 'object' ? { administrativeBoundary: value.admin_boundary } : {}),
+    ...(value.admin_region && typeof value.admin_region === 'object'
+      ? { administrativeRegion: value.admin_region.outside ? { outside: true } : value.admin_region.region || null } : {})
   };
 };
 
@@ -905,6 +922,7 @@ export const runAddressEtl = async ({
   });
   let changed = false;
   const changedCountries = new Set();
+  const importedIds = new Map();
   const plannedRawArtifacts = new Set();
   const disabledCountries = new Set();
   const syncErrors = [];
@@ -1125,7 +1143,10 @@ export const runAddressEtl = async ({
         plannedCacheBytes = await directorySize(cacheDir);
         plannedStorageBytes = await measureUsage();
         changed ||= !imported.skipped;
-        if (!imported.skipped) changedCountries.add(task.shard.countryCode);
+        if (!imported.skipped) {
+          changedCountries.add(task.shard.countryCode);
+          importedIds.set(task.shard.countryCode, [...importedIds.get(task.shard.countryCode) || [], ...imported.addressIds || []]);
+        }
         reports.push(task.report);
         console.log(`[address-sync] ${task.shard.countryCode} ready addresses=${imported.acceptedCount} target=${task.report.targetCount} deficit=${task.report.deficit}`);
       } catch (error) { await recordFailure(task, error); }
@@ -1179,7 +1200,8 @@ export const runAddressEtl = async ({
       for (const countryCode of changedCountries) {
         checkpoint();
         await reportProgress({ phase: 'postcode', countryCode });
-        const postcodes = await runPostcodeInference({ database, countryCode, cacheDir, pythonBin: environment.PYTHON_BIN, signal })
+        const postcodes = await runPostcodeInference({ database, countryCode, cacheDir, pythonBin: environment.PYTHON_BIN, signal,
+          addressIds: importedIds.get(countryCode) || [] })
           .catch((error) => { if (signal?.aborted) throw error; console.error(`[address-sync] ${countryCode} postcode inference failed`, error?.message || error); return null; });
         if (postcodes?.checked) console.log(JSON.stringify({ event: 'postcode_inference', ...postcodes }));
         await reportProgress({ phase: 'coverage', countryCode });

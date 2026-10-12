@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { ensureActiveCountryCursorIndex } from './active-country-index.mjs';
-import { translationRecoverySchema, ensureTranslationStreetIndex, translationStreetIndexSql } from './translation-recovery-schema.mjs';
+import { translationRecoverySchema, ensureTranslationStreetIndex, translationStreetIndexSql, ensureTranslationRecoveryStatusIndex,
+  translationRecoveryStatusIndexSql } from './translation-recovery-schema.mjs';
 import { postcodeInferenceSchema } from './postcode-inference-schema.mjs';
 import { deeplBudgetSchema } from '../credential-broker/deepl.mjs';
 import { administrativeAssignmentSchema, administrativeRuntimeView } from './administrative-assignments.mjs';
@@ -12,7 +13,7 @@ import { translationRoutesSchema } from '../translation/routing.mjs';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 31;
+const ADDRESS_SCHEMA_VERSION = 33;
 const CONTROL_SCHEMA_VERSION = 26;
 
 const integer = (value, fallback, minimum, maximum) => {
@@ -154,6 +155,28 @@ const canonicalIndexState = async (client) => {
     if (predicate !== "(canonical_key <> '')") throw new Error('Unexpected predicate for address.idx_address_pool_canonical_key; refusing modification');
   }
   return index;
+};
+
+// Location filters group one country's published rows; the covering index keeps that an index-only scan.
+const generationLocationIndexSql = `CREATE INDEX IF NOT EXISTS idx_generation_location_groups ON address.address_generation_index
+  (country_code,admin1_key,admin1_code_key,locality_key,postal_locality_key) INCLUDE (residential_ready,postcode_key) WHERE active=1`;
+
+const ensureConcurrentIndex = async (client, name, sql) => {
+  const { rows: [index] } = await client.query(`SELECT index_state.indisvalid AS valid FROM pg_index index_state
+    JOIN pg_class relation ON relation.oid=index_state.indexrelid
+    JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='address' AND relation.relname=$1`, [name]);
+  if (index?.valid) return;
+  const settings = (await client.query("SELECT current_setting('statement_timeout') AS statement_timeout,current_setting('lock_timeout') AS lock_timeout")).rows[0];
+  try {
+    await client.query("SET statement_timeout TO '60min'");
+    await client.query("SET lock_timeout TO '0'");
+    if (index) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS address.${name}`);
+    await client.query(sql.replace('CREATE INDEX ', 'CREATE INDEX CONCURRENTLY '));
+  } finally {
+    await client.query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$2,false)",
+      [settings?.statement_timeout, settings?.lock_timeout]);
+  }
 };
 
 const upgradePostcodeInferenceSchema = async (client) => {
@@ -298,7 +321,7 @@ export const initializePostgres = async (pool, {
       `);
       if (Number(versions.address_version) >= ADDRESS_SCHEMA_VERSION
         && Number(versions.control_version) >= CONTROL_SCHEMA_VERSION) return;
-      if ([23, 24, 25, 26, 27, 28, 29, 30, 31].includes(Number(versions.address_version))
+      if ([23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33].includes(Number(versions.address_version))
         && Number(versions.control_version) >= 19) {
         if (Number(versions.address_version) === 23) await upgradeStreetSchema(client, addressSource);
         if (Number(versions.address_version) < 25) await ensureActiveCountryCursorIndex(client);
@@ -308,6 +331,14 @@ export const initializePostgres = async (pool, {
         if (Number(versions.address_version) < 29) await upgradeCanonicalAddressIdentity(client);
         if (Number(versions.address_version) < 30) await upgradeChinaPublicationSchema(client);
         if (Number(versions.address_version) < 31) await upgradePostcodeInferenceSchema(client);
+        if (Number(versions.address_version) < 32) {
+          await ensureTranslationRecoveryStatusIndex(client);
+          await client.query('INSERT INTO address.schema_migrations(version,applied_at) VALUES (32,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING');
+        }
+        if (Number(versions.address_version) < 33) {
+          await ensureConcurrentIndex(client, 'idx_generation_location_groups', generationLocationIndexSql);
+          await client.query('INSERT INTO address.schema_migrations(version,applied_at) VALUES (33,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING');
+        }
         await client.query('BEGIN');
         await client.query('SET LOCAL search_path TO address, public');
         await client.query("SET LOCAL lock_timeout TO '2s'");
@@ -449,6 +480,8 @@ export const initializePostgres = async (pool, {
     await client.query(administrativeRuntimeView(addressSource));
     await client.query(translationRecoverySchema);
     await client.query(translationStreetIndexSql);
+    await client.query(translationRecoveryStatusIndexSql);
+    await client.query(generationLocationIndexSql);
     await client.query('SET LOCAL search_path TO control, public');
     await client.query(controlSource);
     await client.query(deeplBudgetSchema);

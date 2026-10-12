@@ -17,6 +17,7 @@ import { evaluateMapplsAddressResults, requestMapplsReverse } from './mappls-res
 import { streetAddressKey } from '../../src/domain/address-quality.mjs';
 import { countryBoundAreas } from '../../src/domain/country-bounds.mjs';
 import { runProcess } from './process.mjs';
+import { assignRegionsToFile, regionBoundaryCountries } from './region-boundaries.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const catalogFile = resolve(syncRoot, 'source-shards.json');
@@ -799,9 +800,11 @@ export const createSourceAdapters = ({
   let activeProcesses = 0;
   const processLimit = Number.isSafeInteger(processConcurrency) ? Math.max(1, processConcurrency) : 3;
   const configuredJapanTimeout = Number(environment.ADDRESS_SYNC_JAPAN_PROCESS_TIMEOUT_MS);
+  // Japan saves a checkpoint when its exporter times out; the limit leaves room for download and import within the
+  // 150-minute job limit so the checkpoint is written before the job itself is cancelled.
   const japanProcessTimeoutMs = Number.isInteger(configuredJapanTimeout)
-    ? Math.min(Math.max(configuredJapanTimeout, processTimeoutMs), 140 * 60_000)
-    : Math.min(Math.max(processTimeoutMs, 120 * 60_000), 140 * 60_000);
+    ? Math.min(Math.max(configuredJapanTimeout, processTimeoutMs), 95 * 60_000)
+    : Math.min(Math.max(processTimeoutMs, 90 * 60_000), 95 * 60_000);
   const timeoutForPhase = (phase) => String(phase || '').startsWith('materialize:japan-abr-')
     ? japanProcessTimeoutMs : processTimeoutMs;
   const acquireProcessSlot = (runSignal) => {
@@ -3614,6 +3617,25 @@ export const createSourceAdapters = ({
     return { ...result, file: output, cacheFile: result.file };
   };
 
+  // First-level region polygons correct conflicting regions and reject points outside the country.
+  const assignRegionBoundaries = async (shard, result, options) => {
+    if (!result?.file || !adminBoundaryAdapters.has(shard.source?.adapter) || !adminBoundaryFormats.has(result.format)
+      || !regionBoundaryCountries.has(shard.countryCode)) return result;
+    const output = resolve(options.cacheDir, 'boundaries', 'assigned', `${shard.id}.regions.jsonl`);
+    await mkdir(resolve(options.cacheDir, 'boundaries', 'assigned'), { recursive: true });
+    try {
+      await assignRegionsToFile({ countryCode: shard.countryCode, input: result.file, output, format: result.format,
+        cacheDir: options.cacheDir, pythonBin, execute: runExecute, signal });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Region polygons only refine a snapshot; their absence must not fail the source.
+      console.error(`[address-sync] ${shard.countryCode} region boundaries unavailable`, error?.code || error?.message || error);
+      return result;
+    }
+    if (result.cacheFile && result.file !== result.cacheFile) await rm(result.file, { force: true });
+    return { ...result, file: output, cacheFile: result.cacheFile || result.file };
+  };
+
   const materialize = async (shard, discovery, options) => {
     let result;
     if (discovery.adapter === 'overture') result = await materializeOverture(shard, discovery, options);
@@ -3637,6 +3659,7 @@ export const createSourceAdapters = ({
     else if (discovery.adapter === 'pdok-bag') result = await materializePdokBag(shard, discovery, options);
     else if (!result) throw new Error(`Unsupported source adapter: ${discovery.adapter}`);
     result = await assignAdminBoundaries(shard, result, options);
+    result = await assignRegionBoundaries(shard, result, options);
     return { ...result, snapshotMode: result.snapshotMode || shard.source?.snapshotMode || 'merge' };
   };
 

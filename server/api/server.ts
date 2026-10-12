@@ -54,9 +54,13 @@ const batchGenerationLimiter = new InFlightLimiter(Math.min(
 ));
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.trim() || process.env.ALLOWED_ORIGIN?.trim() || '*';
 parseAllowedOrigins(allowedOrigins);
-const runGenerationRequest = async (path: string, task: () => Promise<Response>): Promise<Response> => {
+// Background prefetches from the web app have their own smaller limit so they can never take the slots that
+// user-initiated generation needs.
+const prefetchLimiter = new InFlightLimiter(Math.max(1, Math.floor(Math.min(generationInFlightLimit, 128) / 2)));
+const runGenerationRequest = async (path: string, task: () => Promise<Response>, prefetch = false): Promise<Response> => {
   if (!isGenerationPath(path) || path.endsWith('/batch')) return task();
-  if (!generationLimiter.tryAcquire()) {
+  const limiter = prefetch ? prefetchLimiter : generationLimiter;
+  if (!limiter.tryAcquire()) {
     return Response.json({ error: 'GENERATION_BUSY' }, {
       status: 429,
       headers: { 'Cache-Control': 'no-store', 'Retry-After': '2' }
@@ -65,7 +69,7 @@ const runGenerationRequest = async (path: string, task: () => Promise<Response>)
   try {
     return await task();
   } finally {
-    generationLimiter.release();
+    limiter.release();
   }
 };
 const triggerCountrySync = async (countryCode: string): Promise<Record<string, unknown>> => {
@@ -222,7 +226,8 @@ const server = serve({
       target.pathname = target.pathname.replace(/^\/web-api\/v1/u, '/api/v1');
       return securityHeaders(await runGenerationRequest(
         target.pathname,
-        async () => app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node })
+        async () => app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node }),
+        request.headers.get('x-generation-prefetch') === '1'
       ));
     }
     if (url.pathname.startsWith('/api/')) {

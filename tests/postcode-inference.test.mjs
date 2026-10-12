@@ -73,6 +73,18 @@ describe('postcode inference', () => {
     expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('mixed').first('postcode')).toBe('');
   });
 
+  it('scans a country once per revision and afterwards checks only the rows an import wrote', async () => {
+    await insertAddress(database, 'first');
+    expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup: async () => new Map(), now: () => new Date(at) }))
+      .toMatchObject({ checked: 1 });
+    await insertAddress(database, 'later');
+    await insertAddress(database, 'imported');
+    expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup: async () => new Map() })).toMatchObject({ checked: 0 });
+    expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup: async () => new Map(), addressIds: ['imported', 'first'] }))
+      .toMatchObject({ checked: 1, catalog: 1 });
+    expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('later').first('postcode')).toBe('');
+  });
+
   it('never derives postcodes for countries with building or street level codes', async () => {
     await insertAddress(database, 'gb', { country: 'GB', admin1: 'ENG', locality: 'LONDON' });
     expect(await runPostcodeInference({ database, countryCode: 'GB' })).toMatchObject({ checked: 0 });

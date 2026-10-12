@@ -20,21 +20,21 @@ const STALE_CREDENTIAL_CHECKPOINT_MS = 24 * 60 * 60_000;
 // skips same-signature retries itself, so a fruitless pass latches immediately.
 const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED']);
 const timeoutFailureCodes = new Set([
-  '57014', 'QUERY_CANCELED', 'SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'
+  '57014', 'QUERY_CANCELED', 'SYNC_JOB_TIMEOUT', 'SYNC_WORKER_STUCK', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'
 ]);
 const circuitBreakerFailureCodes = new Set([...timeoutFailureCodes, 'SYNC_PROCESS_FAILED']);
 const executionCapabilityRevisions = Object.freeze({
-  import: 'postgres-publish-v2',
+  import: 'postgres-publish-v3-touched-finalization',
   materialize: 'child-process-diagnostics-v2',
   discover: 'source-discovery-v1',
   interrupted: 'restart-recovery-v3',
-  runtime: 'sync-runtime-v2'
+  runtime: 'sync-runtime-v3-recovery-index'
 });
 // Adapter-specific execution fixes release only matching suspended failures.
 // They are intentionally excluded from source fingerprints, so exhausted and
 // successfully checked sources remain terminal.
 const adapterExecutionCapabilityRevisions = Object.freeze({
-  'japan-abr': { materialize: 'japan-abr-materialize-v4' },
+  'japan-abr': { materialize: 'japan-abr-materialize-v5-checkpoint-before-job-limit' },
   'korea-kapt': { materialize: 'korea-kapt-bridge-v3' },
   'google-residential-enrichment': { discover: 'google-checkpoint-discovery-v5-legacy-raw-url' },
   geofabrik: { discover: 'geofabrik-redirect-resolver-v3-dated-probe' }

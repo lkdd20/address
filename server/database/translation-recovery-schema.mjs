@@ -22,6 +22,28 @@ CREATE TABLE IF NOT EXISTS translation_backfill_usage (
   reserved_characters INTEGER NOT NULL DEFAULT 0 CHECK (reserved_characters >= 0)
 );`;
 
+// Failed and rejected rows are read in address order; the due index cannot serve that order.
+export const translationRecoveryStatusIndexSql = `CREATE INDEX IF NOT EXISTS idx_translation_recovery_status_address
+  ON address.translation_recovery(status,address_id) INCLUDE (reason,service_revision)`;
+
+export const ensureTranslationRecoveryStatusIndex = async (client) => {
+  const { rows: [index] } = await client.query(`SELECT index_state.indisvalid AS valid FROM pg_index index_state
+    JOIN pg_class relation ON relation.oid=index_state.indexrelid
+    JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='address' AND relation.relname='idx_translation_recovery_status_address'`);
+  if (index?.valid) return;
+  const settings = (await client.query("SELECT current_setting('statement_timeout') AS statement_timeout,current_setting('lock_timeout') AS lock_timeout")).rows[0];
+  try {
+    await client.query("SET statement_timeout TO '30min'");
+    await client.query("SET lock_timeout TO '0'");
+    if (index) await client.query('DROP INDEX CONCURRENTLY IF EXISTS address.idx_translation_recovery_status_address');
+    await client.query(translationRecoveryStatusIndexSql.replace('CREATE INDEX ', 'CREATE INDEX CONCURRENTLY '));
+  } finally {
+    await client.query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$2,false)",
+      [settings.statement_timeout, settings.lock_timeout]);
+  }
+};
+
 export const translationStreetIndexSql = `CREATE INDEX idx_translation_street_cursor ON address.address_pool(id)
   WHERE country_code<>'CN' AND match_level='street' AND (active=1 OR retired_at LIKE 'publication-validation:%')`;
 

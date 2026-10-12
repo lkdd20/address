@@ -916,12 +916,10 @@
       "updateCadence": "daily",
       "extracts": [
         { "countryCode": "AU", "extractId": "australia" },
-        { "countryCode": "CA", "extractId": "canada" },
         { "countryCode": "ES", "extractId": "spain" },
         { "countryCode": "IT", "extractId": "italy" },
         { "countryCode": "MX", "extractId": "mexico" },
         { "countryCode": "TW", "extractId": "taiwan" },
-        { "countryCode": "GB", "extractId": "united-kingdom", "capabilityInputs": { "processTimeout": "75m-retry-20261011" } },
         { "countryCode": "HK", "extractId": "china", "boundaryIso3": "HKG" },
         { "countryCode": "KR", "extractId": "south-korea" },
         { "countryCode": "NG", "extractId": "nigeria" },
@@ -946,8 +944,99 @@
         { "countryCode": "SA", "extractId": "gcc-states", "boundaryIso3": "SAU" },
         { "countryCode": "IN", "extractId": "india" },
         { "countryCode": "ZA", "extractId": "south-africa" },
-        { "countryCode": "RU", "extractId": "russia", "capabilityInputs": { "processTimeout": "75m-retry-20261011" } },
         { "countryCode": "BR", "extractId": "brazil" }
+      ]
+    },
+    {
+      "id": "geofabrik-osm-gb",
+      "adapter": "geofabrik",
+      "name": "Geofabrik OpenStreetMap United Kingdom nation extracts",
+      "homepageUrl": "https://download.geofabrik.de/europe/united-kingdom.html",
+      "dataUrl": "https://download.geofabrik.de/index-v1-nogeom.json",
+      "licenseCode": "ODbL-1.0",
+      "licenseName": "Open Database License 1.0",
+      "licenseUrl": "https://opendatacommons.org/licenses/odbl/1-0/",
+      "attributionText": "OpenStreetMap contributors and Geofabrik GmbH",
+      "attributionUrl": "https://www.openstreetmap.org/copyright",
+      "termsUrl": "https://download.geofabrik.de/technical.html",
+      "shareAlike": true,
+      "redistributionAllowed": true,
+      "updateCadence": "daily",
+      "extractDefaults": {
+        "maxRecords": 200000,
+        "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
+      },
+      "extracts": [
+        { "countryCode": "GB", "shardId": "england", "name": "England", "extractId": "england" },
+        { "countryCode": "GB", "shardId": "scotland", "name": "Scotland", "extractId": "scotland" },
+        { "countryCode": "GB", "shardId": "wales", "name": "Wales", "extractId": "wales" },
+        { "countryCode": "GB", "shardId": "northern-ireland", "name": "Northern Ireland", "extractId": "ireland-and-northern-ireland", "boundaryIso3": "GBR" }
+      ]
+    },
+    {
+      "id": "geofabrik-osm-ru",
+      "adapter": "geofabrik",
+      "name": "Geofabrik OpenStreetMap Russia federal district extracts",
+      "homepageUrl": "https://download.geofabrik.de/russia.html",
+      "dataUrl": "https://download.geofabrik.de/index-v1-nogeom.json",
+      "licenseCode": "ODbL-1.0",
+      "licenseName": "Open Database License 1.0",
+      "licenseUrl": "https://opendatacommons.org/licenses/odbl/1-0/",
+      "attributionText": "OpenStreetMap contributors and Geofabrik GmbH",
+      "attributionUrl": "https://www.openstreetmap.org/copyright",
+      "termsUrl": "https://download.geofabrik.de/technical.html",
+      "shareAlike": true,
+      "redistributionAllowed": true,
+      "updateCadence": "daily",
+      "extractDefaults": {
+        "maxRecords": 200000,
+        "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
+      },
+      "extracts": [
+        { "countryCode": "RU", "shardId": "central-fed-district", "name": "Central Federal District", "extractId": "central-fed-district" },
+        { "countryCode": "RU", "shardId": "far-eastern-fed-district", "name": "Far Eastern Federal District", "extractId": "far-eastern-fed-district" },
+        { "countryCode": "RU", "shardId": "kaliningrad", "name": "Kaliningrad", "extractId": "kaliningrad" },
+        { "countryCode": "RU", "shardId": "north-caucasus-fed-district", "name": "North Caucasus Federal District", "extractId": "north-caucasus-fed-district" },
+        { "countryCode": "RU", "shardId": "northwestern-fed-district", "name": "Northwestern Federal District", "extractId": "northwestern-fed-district" },
+        { "countryCode": "RU", "shardId": "siberian-fed-district", "name": "Siberian Federal District", "extractId": "siberian-fed-district" },
+        { "countryCode": "RU", "shardId": "south-fed-district", "name": "South Federal District", "extractId": "south-fed-district" },
+        { "countryCode": "RU", "shardId": "ural-fed-district", "name": "Ural Federal District", "extractId": "ural-fed-district" },
+        { "countryCode": "RU", "shardId": "volga-fed-district", "name": "Volga Federal District", "extractId": "volga-fed-district" }
+      ]
+    },
+    {
+      "id": "geofabrik-osm-ca",
+      "adapter": "geofabrik",
+      "name": "Geofabrik OpenStreetMap Canada province extracts",
+      "homepageUrl": "https://download.geofabrik.de/north-america/canada.html",
+      "dataUrl": "https://download.geofabrik.de/index-v1-nogeom.json",
+      "licenseCode": "ODbL-1.0",
+      "licenseName": "Open Database License 1.0",
+      "licenseUrl": "https://opendatacommons.org/licenses/odbl/1-0/",
+      "attributionText": "OpenStreetMap contributors and Geofabrik GmbH",
+      "attributionUrl": "https://www.openstreetmap.org/copyright",
+      "termsUrl": "https://download.geofabrik.de/technical.html",
+      "shareAlike": true,
+      "redistributionAllowed": true,
+      "updateCadence": "daily",
+      "extractDefaults": {
+        "maxRecords": 200000,
+        "qualityGate": { "minimumRecords": 10, "minimumAdmin1": 1, "minimumCountRatio": 0, "minimumAdmin1Ratio": 0 }
+      },
+      "extracts": [
+        { "countryCode": "CA", "shardId": "alberta", "name": "Alberta", "extractId": "alberta" },
+        { "countryCode": "CA", "shardId": "british-columbia", "name": "British Columbia", "extractId": "british-columbia" },
+        { "countryCode": "CA", "shardId": "manitoba", "name": "Manitoba", "extractId": "manitoba" },
+        { "countryCode": "CA", "shardId": "new-brunswick", "name": "New Brunswick", "extractId": "new-brunswick" },
+        { "countryCode": "CA", "shardId": "newfoundland-and-labrador", "name": "Newfoundland And Labrador", "extractId": "newfoundland-and-labrador" },
+        { "countryCode": "CA", "shardId": "northwest-territories", "name": "Northwest Territories", "extractId": "northwest-territories" },
+        { "countryCode": "CA", "shardId": "nova-scotia", "name": "Nova Scotia", "extractId": "nova-scotia" },
+        { "countryCode": "CA", "shardId": "nunavut", "name": "Nunavut", "extractId": "nunavut" },
+        { "countryCode": "CA", "shardId": "ontario", "name": "Ontario", "extractId": "ontario" },
+        { "countryCode": "CA", "shardId": "prince-edward-island", "name": "Prince Edward Island", "extractId": "prince-edward-island" },
+        { "countryCode": "CA", "shardId": "quebec", "name": "Quebec", "extractId": "quebec" },
+        { "countryCode": "CA", "shardId": "saskatchewan", "name": "Saskatchewan", "extractId": "saskatchewan" },
+        { "countryCode": "CA", "shardId": "yukon", "name": "Yukon", "extractId": "yukon" }
       ]
     },
     {

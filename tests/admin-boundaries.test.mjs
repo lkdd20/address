@@ -33,14 +33,10 @@ describe('administrative boundary catalog', () => {
     expect(adminBoundaryRevision('PH')).not.toBe(adminBoundaryRevision('TH'));
   });
 
-  it('lets one Geofabrik extract change its own fingerprint without touching the other extracts', async () => {
-    const { loadSourceCatalog } = await import('../server/sync/source-adapters.mjs');
-    const shards = new Map((await loadSourceCatalog(undefined, {})).shards.map((shard) => [shard.id, shard]));
-    for (const id of ['geofabrik-osm-gb', 'geofabrik-osm-ru']) {
-      expect(sourceCapabilityRevision(shards.get(id)).startsWith(`${sourceAdapterRevisions.geofabrik}:cap-`)).toBe(true);
-    }
-    expect(sourceCapabilityRevision(shards.get('geofabrik-osm-au'))).toBe(sourceAdapterRevisions.geofabrik);
-    expect(shards.get('geofabrik-osm-gb').source.id).toBe('geofabrik-osm');
+  it('lets one Geofabrik extract change its own fingerprint without touching the other extracts', () => {
+    const shard = (capabilityInputs) => ({ countryCode: 'AU', source: { adapter: 'geofabrik', ...(capabilityInputs ? { capabilityInputs } : {}) } });
+    expect(sourceCapabilityRevision(shard({ processTimeout: '75m' })).startsWith(`${sourceAdapterRevisions.geofabrik}:cap-`)).toBe(true);
+    expect(sourceCapabilityRevision(shard())).toBe(sourceAdapterRevisions.geofabrik);
   });
 });
 

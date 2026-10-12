@@ -155,27 +155,39 @@ const withPostcode = (row, postcode, countryCode) => {
   return { components: JSON.stringify(components), addresses: JSON.stringify(addresses) };
 };
 
+// Without address ids the whole country is scanned once per inference revision; imports pass the rows they wrote.
 export const runPostcodeInference = async ({
   database, countryCode, cacheDir, pythonBin, boundaryLookup = boundaryPostcodes,
-  pageSize = 5_000, now = () => new Date(), signal
+  pageSize = 5_000, now = () => new Date(), signal, addressIds
 }) => {
   const country = String(countryCode || '').toUpperCase();
   const summary = { countryCode: country, checked: 0, boundary: 0, catalog: 0, township: 0, neighbor: 0 };
   const revision = inferenceRevision(country);
   if (POSTCODE_INFERENCE_EXCLUDED.has(country)) return summary;
+  const markerKey = `postcode-inference:${country}`;
+  const scoped = Array.isArray(addressIds);
+  if (!scoped && await database.prepare('SELECT value_json FROM translation_backfill_progress WHERE key=?')
+    .bind(markerKey).first('value_json') === JSON.stringify({ revision })) return summary;
+  const ids = scoped ? [...new Set(addressIds.map(String))].sort() : [];
   const boundary = postcodeBoundarySources[country];
   let places;
   let townships;
   let cursor = '';
-  for (;;) {
+  for (let offset = 0; ; offset += pageSize) {
     signal?.throwIfAborted();
+    const batch = ids.slice(offset, offset + pageSize);
+    if (scoped && !batch.length) break;
     const rows = (await database.prepare(`SELECT pool.id,pool.latitude,pool.longitude,pool.admin1,pool.admin1_code,pool.locality,
         pool.postal_locality,pool.district,pool.component_variants_json,pool.address_variants_json
       FROM address_pool pool LEFT JOIN address_postcode_inference inferred ON inferred.address_id=pool.id
-      WHERE pool.country_code=? AND pool.active=1 AND pool.postcode='' AND pool.id>?
+      WHERE pool.country_code=? AND pool.active=1 AND pool.postcode=''
+        AND ${scoped ? `pool.id IN (${batch.map(() => '?').join(',')})` : 'pool.id>?'}
         AND (inferred.address_id IS NULL OR inferred.checked_revision<>?)
-      ORDER BY pool.id LIMIT ?`).bind(country, cursor, revision, pageSize).all()).results;
-    if (!rows.length) break;
+      ORDER BY pool.id LIMIT ?`).bind(country, ...(scoped ? batch : [cursor]), revision, pageSize).all()).results;
+    if (!rows.length) {
+      if (scoped) continue;
+      break;
+    }
     cursor = rows.at(-1).id;
     const results = new Map();
     if (boundary) {
@@ -221,6 +233,11 @@ export const runPostcodeInference = async ({
     });
     if (updated.length) await refreshAddressGenerationIndex(database, country, { addressIds: updated });
     summary.checked += rows.length;
+  }
+  if (!scoped) {
+    await database.prepare(`INSERT INTO translation_backfill_progress(key,value_json,updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+      .bind(markerKey, JSON.stringify({ revision }), now().toISOString()).run();
   }
   return summary;
 };

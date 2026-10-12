@@ -107,10 +107,9 @@ export const deriveAdministrativeAssignment = (row, regions, cities) => {
 
 export const refreshAdministrativeAssignments = async (database, country, { addressIds, signal } = {}) => {
   if (!['HK', 'SG'].includes(country) || addressIds?.length === 0) return 0;
-  const [regions, cities] = await Promise.all([
-    database.prepare('SELECT id,code,name,native_name,zh_name FROM catalog_regions WHERE country_code=? ORDER BY id').bind(country).all(),
-    database.prepare('SELECT id,region_id,name,native_name,zh_name FROM catalog_cities WHERE country_code=? ORDER BY id').bind(country).all()
-  ]);
+  // Sequential: inside a transaction both statements share one client.
+  const regions = await database.prepare('SELECT id,code,name,native_name,zh_name FROM catalog_regions WHERE country_code=? ORDER BY id').bind(country).all();
+  const cities = await database.prepare('SELECT id,region_id,name,native_name,zh_name FROM catalog_cities WHERE country_code=? ORDER BY id').bind(country).all();
   const reference = `${country}-administrative-v1:${createHash('sha256').update(JSON.stringify([regions.results, cities.results])).digest('hex')}`;
   let cursor = '';
   let changed = 0;

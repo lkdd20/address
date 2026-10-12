@@ -15,24 +15,25 @@ const memoryStorage = () => {
 };
 
 describe('generator language preferences', () => {
-  it('defaults missing and invalid preferences to English', () => {
+  it('defaults missing and invalid preferences to the page language', () => {
     const storage = memoryStorage();
-    expect(readStoredDisplayLanguage(addressLanguageStorageKey, storage)).toBe('en');
+    expect(readStoredDisplayLanguage(addressLanguageStorageKey, 'en', storage)).toBe('en');
+    expect(readStoredDisplayLanguage(addressLanguageStorageKey, 'de', storage)).toBe('de');
     storage.setItem(addressLanguageStorageKey, 'invalid');
-    expect(readStoredDisplayLanguage(addressLanguageStorageKey, storage)).toBe('en');
+    expect(readStoredDisplayLanguage(addressLanguageStorageKey, 'en', storage)).toBe('en');
   });
 
   it('persists address and profile languages independently', () => {
     const storage = memoryStorage();
     storeDisplayLanguage(addressLanguageStorageKey, 'zh-CN', storage);
     storeDisplayLanguage(profileLanguageStorageKey, 'ja', storage);
-    expect(readStoredDisplayLanguage(addressLanguageStorageKey, storage)).toBe('zh-CN');
-    expect(readStoredDisplayLanguage(profileLanguageStorageKey, storage)).toBe('ja');
+    expect(readStoredDisplayLanguage(addressLanguageStorageKey, 'en', storage)).toBe('zh-CN');
+    expect(readStoredDisplayLanguage(profileLanguageStorageKey, 'en', storage)).toBe('ja');
   });
 
   it('accepts the original-language preference', () => {
     const storage = memoryStorage();
     storeDisplayLanguage(addressLanguageStorageKey, 'native', storage);
-    expect(readStoredDisplayLanguage(addressLanguageStorageKey, storage)).toBe('native');
+    expect(readStoredDisplayLanguage(addressLanguageStorageKey, 'en', storage)).toBe('native');
   });
 });

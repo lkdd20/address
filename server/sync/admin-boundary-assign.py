@@ -13,6 +13,10 @@ parser.add_argument("--boundaries", required=True)
 parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--format", required=True, choices=["overture-jsonl", "geofabrik-geojsonseq"])
+parser.add_argument("--field", default="admin_boundary")
+# Points just off a generalized coastline still belong to the nearest polygon; anything farther is marked outside.
+parser.add_argument("--nearest-degrees", type=float, default=0.0)
+parser.add_argument("--mark-unassigned", action="store_true")
 args = parser.parse_args()
 
 rows = duckdb.connect().execute(
@@ -70,6 +74,11 @@ def assign(batch):
             rank = (row[1], row[7])
             if point_index not in best or rank < best[point_index][0]:
                 best[point_index] = (rank, row)
+        missing = [index for index in range(len(located)) if index not in best]
+        if missing and args.nearest_degrees > 0:
+            near_points, near_polygons = tree.query_nearest(points[missing], max_distance=args.nearest_degrees)
+            for point_index, polygon_index in zip(near_points.tolist(), near_polygons.tolist()):
+                best.setdefault(missing[point_index], ((0, 0), selected[polygon_index]))
         for point_index, (_, row) in best.items():
             results[located[point_index][0]][role] = {
                 "name": row[2], "nameEn": row[3] or "", "code": row[4] or "", "dataset": row[5]
@@ -86,8 +95,10 @@ with open(args.input, encoding="utf-8") as source, open(partial, "w", encoding="
         global assigned
         for (value, _), boundary in zip(batch, assign(batch)):
             if boundary:
-                value["admin_boundary"] = boundary
+                value[args.field] = boundary
                 assigned += 1
+            elif args.mark_unassigned:
+                value[args.field] = {"outside": True}
             target.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     batch = []

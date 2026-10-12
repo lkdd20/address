@@ -563,7 +563,7 @@ try {
   });
   await check('failed translation retains the original address and offers a working retry', async (page) => {
     let fail = true;
-    await page.addInitScript(() => localStorage.setItem('address-generator-address-language', 'ja'));
+    await page.addInitScript(() => sessionStorage.setItem('address-generator-address-language', 'ja'));
     await mount(page, { web: async (route, path) => {
       if (path !== '/address-translation') return;
       await fulfill(route, fail ? {} : { components: { ...source.components, street: 'テスト通り' }, lines: ['テスト通り'], singleLine: 'テスト通り' }, fail ? 503 : 200);

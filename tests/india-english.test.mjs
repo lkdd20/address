@@ -36,7 +36,7 @@ describe('India English-only text', () => {
     });
     expect(osm({ 'addr:city': 'சென்னை' })).toBeNull();
     expect(osm({ 'addr:street': 'பாலாஜி நகர் 10வது தெரு' })).toBeNull();
-    expect(osm({ 'addr:housenumber': 'कोमत्त' })).toBeNull();
+    expect(osm({ 'addr:housenumber': 'कोमत्त' })).toMatchObject({ matchLevel: 'street', houseNumber: '' });
   });
 });
 

@@ -110,14 +110,13 @@ export const refreshResidentialCoverage = async (
       WHERE address.country_code=? AND address.active=1
         AND ${addressPublicationSqlClause('address.')}
       GROUP BY ${admin1},${admin1Code},${cityColumn('address')}`;
-  const [regionsResult, citiesResult, groupsResult] = await Promise.all([
-    database.prepare(`SELECT id,parent_id,code,name,native_name,zh_name,type,path FROM catalog_regions
-      WHERE country_code=?`).bind(country).all(),
-    database.prepare(`SELECT id,region_id,name,native_name,zh_name FROM catalog_cities
-      WHERE country_code=?`).bind(country).all(),
-    database.prepare(groupsQuery)
-      .bind(...(useGenerationIndex ? [country, country] : [country])).all()
-  ]);
+  // Sequential: this runs inside a transaction, where all statements share one client.
+  const regionsResult = await database.prepare(`SELECT id,parent_id,code,name,native_name,zh_name,type,path FROM catalog_regions
+    WHERE country_code=?`).bind(country).all();
+  const citiesResult = await database.prepare(`SELECT id,region_id,name,native_name,zh_name FROM catalog_cities
+    WHERE country_code=?`).bind(country).all();
+  const groupsResult = await database.prepare(groupsQuery)
+    .bind(...(useGenerationIndex ? [country, country] : [country])).all();
   checkpoint();
   const regions = regionsResult.results || [];
   const cities = citiesResult.results || [];

@@ -20,6 +20,7 @@ import { repairChineseAddressStrings } from './chinese-address-repair.mjs';
 import { repairTaiwanOfficialNames } from './taiwan-name-repair.mjs';
 import { repairCatalogNativeAddresses } from './catalog-native-repair.mjs';
 import { repairIndiaEnglishAddresses } from './india-english-repair.mjs';
+import { repairAddressStructure } from './address-structure-repair.mjs';
 import { ensureEvidenceDatasetIndex } from '../database/evidence-dataset-index.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
@@ -170,6 +171,15 @@ export const createSyncRuntime = async ({
     await startupStep('india english addresses', async () => {
       const summary = await repairIndiaEnglishAddresses({ database });
       if (summary.cleaned || summary.retired || summary.duplicates) console.log(JSON.stringify({ event: 'india_english_repair', ...summary }));
+    });
+    await startupStep('address structure', async () => {
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await repairAddressStructure({ database, countryCode,
+          cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'), pythonBin: environment.PYTHON_BIN || 'python3' })
+          .catch((error) => ({ countryCode, error: error?.code || error?.message || String(error) }));
+        if (summary.changed || summary.retired || summary.duplicates || summary.error) console.log(JSON.stringify({ event: 'address_structure_repair', ...summary }));
+      }
     });
     await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
     await startupStep('generation index refresh', () => refreshStaleAddressGenerationIndexes(database));

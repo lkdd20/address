@@ -102,11 +102,13 @@ describe('synchronization process diagnostics', () => {
 });
 
 describe('PostgreSQL publication query shape', () => {
-  it('uses anti-joins for country retirement and orphan cleanup', async () => {
+  it('limits import finalization to the addresses the import touched', async () => {
     const source = await readFile(new URL('../server/sync/postgres-address-importer.mjs', import.meta.url), 'utf8');
     expect(source).not.toMatch(/active=1 AND id NOT IN/u);
     expect(source).not.toMatch(/active=0\s+AND id NOT IN/u);
-    expect(source.match(/LEFT JOIN[\s\S]+?\.address_id IS NULL/gu)).toHaveLength(2);
+    expect(source.match(/LEFT JOIN[\s\S]+?\.address_id IS NULL/gu)).toHaveLength(1);
+    expect(source).not.toContain('WHERE address.country_code=? AND candidate.is_current=1');
+    expect(source).toContain('WHERE target.id IN (${placeholders(ids)}) AND target.active=0');
   });
 
   it('reactivates current evidence and retires rows that fail the publication gate', async () => {
@@ -131,7 +133,7 @@ const source = {
 describe('address source shard catalog', () => {
   it('expands independently supported country shards with explicit refresh intervals', async () => {
     const catalog = await loadSourceCatalog();
-    expect(catalog.shards).toHaveLength(207);
+    expect(catalog.shards).toHaveLength(230);
     expect(catalog.shards.filter((shard) => shard.id !== 'korea-kapt-residential')
       .every((shard) => shard.intervalDays === 30)).toBe(true);
     expect(catalog.shards.some((shard) => shard.countryCode === 'CN')).toBe(false);
@@ -142,7 +144,7 @@ describe('address source shard catalog', () => {
     }
     expect(catalog.shards.filter((shard) => shard.source.adapter === 'overture' && ['BR', 'SG'].includes(shard.countryCode))).toHaveLength(2);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'ES')).toHaveLength(5);
-    expect(catalog.shards.filter((shard) => shard.countryCode === 'CA')).toHaveLength(3);
+    expect(catalog.shards.filter((shard) => shard.countryCode === 'CA')).toHaveLength(15);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'FR')).toHaveLength(32);
     expect(catalog.shards.filter((shard) => [
       'france-bdnb-gironde-residential', 'france-bdnb-rhone-residential', 'france-bdnb-paris-residential'
@@ -248,9 +250,15 @@ describe('address source shard catalog', () => {
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-au')).toMatchObject({
       countryCode: 'AU', extractId: 'australia'
     });
-    expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-ca')).toMatchObject({
-      countryCode: 'CA', extractId: 'canada'
+    expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-ca-ontario')).toMatchObject({
+      countryCode: 'CA', extractId: 'ontario', maxRecords: 200000, source: { id: 'geofabrik-osm-ca-ontario' }
     });
+    expect(catalog.shards.filter((shard) => shard.source.id.startsWith('geofabrik-osm-ca-'))).toHaveLength(13);
+    expect(catalog.shards.filter((shard) => shard.source.id.startsWith('geofabrik-osm-ru-'))).toHaveLength(9);
+    expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-gb-northern-ireland')).toMatchObject({
+      countryCode: 'GB', extractId: 'ireland-and-northern-ireland', boundaryIso3: 'GBR'
+    });
+    expect(catalog.shards.some((shard) => ['geofabrik-osm-gb', 'geofabrik-osm-ru', 'geofabrik-osm-ca'].includes(shard.id))).toBe(false);
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-es')).toMatchObject({
       countryCode: 'ES', extractId: 'spain'
     });
@@ -835,7 +843,7 @@ describe('address source shard catalog', () => {
     expect(calls.filter(({ phase }) => phase.startsWith('extract:'))).toHaveLength(1);
     const materializeCall = calls.find(({ args }) => args.includes('plateau'));
     expect(materializeCall).toMatchObject({ file: 'python-fixture' });
-    expect(materializeCall.timeoutMs).toBe(120 * 60_000);
+    expect(materializeCall.timeoutMs).toBe(90 * 60_000);
     expect(materializeCall.args).toEqual(expect.arrayContaining([
       expect.stringContaining('japan-abr-export.py'), '--abr-url', shard.source.dataUrl,
       '--checkpoint-file', expect.stringContaining('checkpoint.json'),
@@ -2514,6 +2522,36 @@ describe('built-in ETL planning and publishing', () => {
     expect(japanAbr).toContain('if building_id in claimed_buildings:');
   });
 
+  it('corrects a conflicting region from its polygon and rejects points outside the country', async () => {
+    const directory = resolve('.data-cache', 'sync-etl-tests', randomUUID());
+    directories.push(directory);
+    await mkdir(directory, { recursive: true });
+    const file = resolve(directory, 'regions.jsonl');
+    const base = { locality: 'Philadelphia', postal_city: 'Philadelphia', postcode: '19103', street: 'Market Street', longitude: -75.169, latitude: 39.953 };
+    await writeFile(file, `${[
+      { ...base, id: 'wrong-state', admin1: 'New Jersey', number: '1700', admin_region: { region: { name: 'Pennsylvania', nameEn: 'Pennsylvania', code: 'US-PA' } } },
+      { ...base, id: 'abroad', admin1: 'Pennsylvania', number: '1701', admin_region: { outside: true } }
+    ].map(JSON.stringify).join('\n')}\n`, 'utf8');
+    const database = openTestDatabase(':memory:');
+    const importer = new PostgresAddressImporter({
+      database, normalizeRecord: normalizeSourceRecord, hash: (value) => createHash('sha256').update(value).digest('hex'),
+      localizeRecords: async (records) => records.map((record) => ({
+        ...record,
+        localizations: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, {
+          components: record.components, formattedAddress: record.formattedAddress, source: 'source'
+        }]))
+      }))
+    });
+    const result = await importer.importShard({
+      shard: { id: 'fixture-us', countryCode: 'US', source },
+      discovery: { version: '2026-10-11.0', publishedAt: '2026-10-11T00:00:00Z', dataUrl: source.dataUrl, sourceBytes: 1 },
+      materialized: { file, format: 'overture-jsonl', checksum: 'c'.repeat(64), cacheBytes: 1 },
+      maxRecords: 10, perLocality: 2
+    });
+    expect(result).toMatchObject({ acceptedCount: 1, rejectionReasons: { invalid_administrative_hierarchy: 1 } });
+    expect(await database.prepare('SELECT admin1,admin1_code FROM address_pool').first()).toEqual({ admin1: 'Pennsylvania', admin1_code: 'PA' });
+  });
+
   it('atomically imports localized records, evidence and coverage into PostgreSQL', async () => {
     const directory = resolve('.data-cache', 'sync-etl-tests', randomUUID());
     directories.push(directory);
@@ -2564,7 +2602,7 @@ describe('built-in ETL planning and publishing', () => {
     expect(await database.prepare('SELECT COUNT(*) AS count FROM pool_coverage').first('count')).toBe(2);
     expect(await database.prepare('SELECT SUM(residential_count) AS count FROM pool_coverage').first('count')).toBe(1);
     const importerSource = await readFile('server/sync/postgres-address-importer.mjs', 'utf8');
-    expect(importerSource).toContain('FROM address_pool_runtime address');
+    expect(importerSource).toContain('FROM address_pool address JOIN address_generation_index indexed');
     expect(importerSource).toContain('JOIN address_generation_index indexed');
     expect(importerSource).toContain('sum(indexed.residential_ready)');
     const aliasRetry = await importer.importShard({

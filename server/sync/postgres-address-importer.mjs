@@ -1,14 +1,17 @@
 import { applyHierarchicalQuota } from './address-policy.mjs';
-import { addressCanonicalKey, validateAddressQuality, streetAddressKey } from '../../src/domain/address-quality.mjs';
+import { addressCanonicalKey, splitConcatenatedLocality, validateAddressQuality, streetAddressKey } from '../../src/domain/address-quality.mjs';
 import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
+import { correctedRegion, regionCorrectionCountries } from './region-boundaries.mjs';
 import { semanticAddressFields, usableAddressTranslation } from '../../src/domain/address-localization.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
 const randomKey = (hash) => Number.parseInt(hash.slice(0, 8), 16) & 0x7fffffff;
 const DEFAULT_MINIMUM_RATIO = 0.7;
+const GENERATION_REFRESH_BATCH = 5_000;
+const placeholders = (values) => values.map(() => '?').join(',');
 
 // Minimum administrative completeness per country. A record must carry at least
 // one region-level field and (where listed) a city-level field, else it is dropped.
@@ -79,6 +82,12 @@ const softLocalityFixes = {
 const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddress) => {
   const components = record.components;
   const streetLevel = record.matchLevel === 'street';
+  if (countryCode !== 'CN' && ['locality', 'postalLocality'].some((field) => /[,，;]/u.test(String(components[field] || '')))) {
+    Object.assign(components, splitConcatenatedLocality(countryCode, components, (value) => Boolean(geocoder?.isKnownCity?.(value))));
+    record.locality = components.locality || '';
+    record.postalLocality = components.postalLocality || '';
+    record.district = components.district || record.district || '';
+  }
   if (geoAnchorCountries.has(countryCode) && geocoder?.hierarchyReady) {
     // Cross-border source label guard: china.pbf carries Taiwan/HK/Macau points.
     const sourceRegion = `${components.admin1 || ''} ${record.admin1 || ''}`;
@@ -140,6 +149,20 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
     if (policy.district && !(components.district || '').trim()) return false;
     return true;
   }
+  // Region polygons: a point outside every first-level region is not in the country; a conflicting or unknown source
+  // region is replaced by the region that contains the point.
+  if (record.administrativeRegion?.outside) return false;
+  const region = correctedRegion(countryCode, components, record.administrativeRegion, [...(geocoder?.regionsById?.values() || [])]);
+  if (region) {
+    components.admin1 = region.admin1;
+    components.admin1Code = region.admin1Code;
+    record.admin1 = region.admin1;
+    record.admin1Code = region.admin1Code;
+    record.englishComponentHints = { ...(record.englishComponentHints || {}), admin1: region.admin1En };
+    if (region.admin1Zh) record.chineseComponentHints = { ...(record.chineseComponentHints || {}), admin1: region.admin1Zh };
+    if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(components, countryCode);
+  }
+  const regionFromBoundary = Boolean(record.administrativeRegion?.code) && regionCorrectionCountries.has(countryCode);
   const softFix = softLocalityFixes[countryCode];
   if (softFix) {
     const locality = String(components.locality || '').trim();
@@ -167,7 +190,7 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
       if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(components, countryCode);
     }
   }
-  if (catalogAnchoredAdmin1Countries.has(countryCode) && geocoder?.regions?.length) {
+  if (catalogAnchoredAdmin1Countries.has(countryCode) && geocoder?.regions?.length && !regionFromBoundary) {
     const sourceAdmin1 = String(components.admin1 || '').trim();
     if (sourceAdmin1 && !matchesCatalogRegion(geocoder, sourceAdmin1)) {
       if (streetLevel) return false;
@@ -720,6 +743,25 @@ export class PostgresAddressImporter {
         await new Promise((resolve) => setImmediate(resolve));
       }
       checkpoint();
+      const supersededDatasets = (await this.database.prepare(`SELECT id FROM address_datasets
+        WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')`)
+        .bind(shard.source.id, shard.countryCode, datasetId).all()).results.map((row) => String(row.id));
+      // Only addresses this import wrote or whose evidence it supersedes can change state; the rest of the country is left
+      // alone, so a small shard no longer rewrites a whole large country inside one long transaction.
+      const touched = new Set(localized.map((record) => record.id));
+      if (authoritativeReplacement && supersededDatasets.length) {
+        for (const row of (await this.database.prepare(`SELECT DISTINCT address_id FROM address_pool_evidence
+          WHERE is_current=1 AND dataset_id IN (${placeholders(supersededDatasets)})`).bind(...supersededDatasets).all()).results) {
+          touched.add(String(row.address_id));
+        }
+      }
+      const touchedIds = [...touched].sort();
+      const eachBatch = async (ids, work) => {
+        for (let offset = 0; offset < ids.length; offset += batchSize) {
+          checkpoint();
+          await work(ids.slice(offset, offset + batchSize));
+        }
+      };
       await this.database.batch([
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0
           WHERE is_primary=1 AND address_id IN (
@@ -741,123 +783,97 @@ export class PostgresAddressImporter {
               WHERE evidence.is_current=1 AND current.source_id=? AND current.country_code=?)`)
           .bind(shard.source.id, shard.countryCode, datasetId, shard.source.id, shard.countryCode),
         this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=?,source_complete=? WHERE id=?")
-          .bind(localized.length, rejectedCount, Number(sourceComplete), datasetId),
-        this.database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id IN (
-          SELECT target.id FROM address_pool target
-          LEFT JOIN (
-            SELECT DISTINCT evidence.address_id FROM address_pool_evidence evidence
-            JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-            JOIN address_sources source ON source.id=dataset.source_id
-            WHERE evidence.is_current=1 AND dataset.status IN ('pending','active') AND dataset.country_code=?
-              AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
-          ) retained ON retained.address_id=target.id
-          WHERE target.country_code=? AND target.active=1 AND retained.address_id IS NULL
-        )`).bind(observedAt, shard.countryCode, shard.countryCode),
-        // Rows retired by publication validation stay out of the pool even while their evidence is current.
-        this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
-          WHERE country_code=? AND active=1 AND retired_at LIKE 'publication-validation:%'`).bind(observedAt, shard.countryCode)
-      ]).then((results) => { retiredCount += results.slice(-2).reduce((sum, result) => sum + Number(result?.meta?.changes || 0), 0); });
-      checkpoint();
-      const primaryEvidenceRows = (await this.database.prepare(`SELECT candidate.id,candidate.address_id
+          .bind(localized.length, rejectedCount, Number(sourceComplete), datasetId)
+      ]);
+      const evidenceFor = (ids, statuses) => this.database.prepare(`SELECT candidate.id,candidate.address_id
         FROM address_pool_evidence candidate
         JOIN address_datasets dataset ON dataset.id=candidate.dataset_id
-        JOIN address_pool address ON address.id=candidate.address_id
         JOIN address_sources source ON source.id=dataset.source_id
-        WHERE address.country_code=? AND candidate.is_current=1
-          AND candidate.evidence_type='address_existence' AND dataset.status='active'
+        WHERE candidate.address_id IN (${placeholders(ids)}) AND candidate.is_current=1
+          AND candidate.evidence_type='address_existence' AND dataset.status IN (${placeholders(statuses)})
           AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
-        ORDER BY candidate.address_id,dataset.imported_at DESC,candidate.id`).bind(shard.countryCode).all()).results;
-      checkpoint();
-      const primaryEvidenceIds = new Set();
-      const primaryAddresses = new Set();
-      for (const row of primaryEvidenceRows) {
-        if (primaryAddresses.has(row.address_id)) continue;
-        primaryAddresses.add(row.address_id);
-        primaryEvidenceIds.add(row.id);
-      }
-      // Only flags that change are written; rewriting every evidence row of the country made large imports time out.
-      const currentPrimaryIds = new Set((await this.database.prepare(`SELECT evidence.id FROM address_pool_evidence evidence
-        JOIN address_pool address ON address.id=evidence.address_id
-        WHERE address.country_code=? AND evidence.evidence_type='address_existence' AND evidence.is_primary=1`)
-        .bind(shard.countryCode).all()).results.map((row) => row.id));
-      for (const [flag, changed] of [
-        [0, [...currentPrimaryIds].filter((id) => !primaryEvidenceIds.has(id))],
-        [1, [...primaryEvidenceIds].filter((id) => !currentPrimaryIds.has(id))]
-      ]) {
-        for (let offset = 0; offset < changed.length; offset += batchSize) {
-          checkpoint();
-          const ids = changed.slice(offset, offset + batchSize);
-          await this.database.prepare(`UPDATE address_pool_evidence SET is_primary=?
-            WHERE id IN (${ids.map(() => '?').join(',')})`).bind(flag, ...ids).run();
+        ORDER BY candidate.address_id,dataset.imported_at DESC,candidate.id`).bind(...ids, ...statuses).all();
+      const statusChanged = [];
+      await eachBatch(touchedIds, async (ids) => {
+        const retained = new Set((await evidenceFor(ids, ['pending', 'active'])).results.map((row) => row.address_id));
+        const unretained = ids.filter((id) => !retained.has(id));
+        if (unretained.length) {
+          const retired = await this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
+            WHERE active=1 AND id IN (${placeholders(unretained)}) RETURNING id`).bind(observedAt, ...unretained).all();
+          retiredCount += retired.results.length;
+          statusChanged.push(...retired.results.map((row) => row.id));
         }
-      }
-      checkpoint();
-      const countryCandidates = (await this.database.prepare(`SELECT id,country_code,admin1,locality,postal_locality,district,
-          quality_score,random_key FROM address_pool
-        WHERE country_code=? AND id IN (
-          SELECT evidence.address_id FROM address_pool_evidence evidence
-          JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-          JOIN address_sources source ON source.id=dataset.source_id
-          WHERE evidence.is_current=1 AND dataset.status='active' AND dataset.country_code=?
-            AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1
-        ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode, shard.countryCode).all()).results;
-      checkpoint();
-      for (let offset = 0; offset < countryCandidates.length; offset += batchSize) {
-        checkpoint();
-        const ids = countryCandidates.slice(offset, offset + batchSize).map(({ id }) => String(id));
+        // Rows retired by publication validation stay out of the pool even while their evidence is current.
+        const invalid = await this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
+          WHERE active=1 AND retired_at LIKE 'publication-validation:%' AND id IN (${placeholders(ids)}) RETURNING id`)
+          .bind(observedAt, ...ids).all();
+        retiredCount += invalid.results.length;
+        statusChanged.push(...invalid.results.map((row) => row.id));
+        const primaryEvidenceIds = new Set();
+        const listed = new Set();
+        for (const row of (await evidenceFor(ids, ['active'])).results) {
+          if (listed.has(row.address_id)) continue;
+          listed.add(row.address_id);
+          primaryEvidenceIds.add(row.id);
+        }
+        // Only flags that change are written; rewriting every evidence row made large imports time out.
+        const currentPrimaryIds = new Set((await this.database.prepare(`SELECT id FROM address_pool_evidence
+          WHERE evidence_type='address_existence' AND is_primary=1 AND address_id IN (${placeholders(ids)})`)
+          .bind(...ids).all()).results.map((row) => row.id));
+        for (const [flag, changed] of [
+          [0, [...currentPrimaryIds].filter((id) => !primaryEvidenceIds.has(id))],
+          [1, [...primaryEvidenceIds].filter((id) => !currentPrimaryIds.has(id))]
+        ]) {
+          if (changed.length) await this.database.prepare(`UPDATE address_pool_evidence SET is_primary=?
+            WHERE id IN (${placeholders(changed)})`).bind(flag, ...changed).run();
+        }
+        const listedIds = [...listed];
+        if (!listedIds.length) return;
         const reactivated = await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
           WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%') AND active=0
-            AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
-        reactivatedCount += Number(reactivated.meta?.changes || 0);
+            AND id IN (${placeholders(listedIds)}) RETURNING id`).bind(...listedIds).all();
+        reactivatedCount += reactivated.results.length;
+        statusChanged.push(...reactivated.results.map((row) => row.id));
         await this.database.prepare(`UPDATE address_pool SET retired_at=NULL
           WHERE active=1 AND retired_at IS NOT NULL AND retired_at NOT LIKE 'publication-validation:%'
-            AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
-      }
-      const activeDatasets = (await this.database.prepare(`SELECT id FROM address_datasets
-        WHERE country_code=? AND status='active'`).bind(shard.countryCode).all()).results;
-      for (const dataset of activeDatasets) {
+            AND id IN (${placeholders(listedIds)})`).bind(...listedIds).run();
+      });
+      const countedDatasets = new Set([datasetId, ...supersededDatasets]);
+      await eachBatch(statusChanged, async (ids) => {
+        for (const row of (await this.database.prepare(`SELECT DISTINCT dataset_id FROM address_pool_evidence
+          WHERE is_current=1 AND address_id IN (${placeholders(ids)})`).bind(...ids).all()).results) countedDatasets.add(String(row.dataset_id));
+      });
+      for (const id of countedDatasets) {
         checkpoint();
         const activeCount = await this.database.prepare(`SELECT COUNT(DISTINCT evidence.address_id) AS total
           FROM address_pool_evidence evidence JOIN address_pool address ON address.id=evidence.address_id
           JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
           JOIN address_sources source ON source.id=dataset.source_id
           WHERE evidence.dataset_id=? AND evidence.is_current=1 AND address.active=1
-            AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1`).bind(dataset.id).first('total');
-        await this.database.prepare('UPDATE address_datasets SET active_count=? WHERE id=?')
-          .bind(Number(activeCount || 0), dataset.id).run();
+            AND dataset.redistribution_allowed=1 AND source.redistribution_allowed=1`).bind(id).first('total');
+        await this.database.prepare("UPDATE address_datasets SET active_count=? WHERE id=? AND status='active'")
+          .bind(Number(activeCount || 0), id).run();
       }
-      await refreshAddressGenerationIndex(this.database, shard.countryCode);
-      const coverageTarget = activePolicy.levelLimits[1] || perLocality;
-      checkpoint();
-      await this.database.prepare('DELETE FROM pool_coverage WHERE country_code=?').bind(shard.countryCode).run();
-      checkpoint();
-      await this.database.prepare(`INSERT INTO pool_coverage(
-          coverage_key,country_code,admin1_key,locality_key,postcode_key,property_type,target_count,
-          active_count,shadow_count,residential_count,refresh_status,generation,last_refreshed_at,expires_at
-        ) SELECT address.coverage,address.country_code,
-          coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
-          coalesce(nullif(address.postal_locality_key,''),address.locality_key),min(address.postcode_key),address.property_type,CAST(? AS INTEGER),
-          count(*),0,sum(indexed.residential_ready),
-          CASE WHEN count(*)>=CAST(? AS INTEGER) THEN 'ready' ELSE 'low' END,?,?,?
-        FROM address_pool_runtime address JOIN address_generation_index indexed
-          ON indexed.address_id=address.id AND indexed.country_code=address.country_code AND indexed.active=1
-        WHERE address.country_code=? AND address.active=1
-        GROUP BY address.coverage,address.country_code,coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
-          coalesce(nullif(address.postal_locality_key,''),address.locality_key),address.property_type`
-      ).bind(coverageTarget, coverageTarget, datasetId, observedAt, context.expiresAt, shard.countryCode).run();
+      for (let offset = 0; offset < touchedIds.length; offset += GENERATION_REFRESH_BATCH) {
+        checkpoint();
+        await refreshAddressGenerationIndex(this.database, shard.countryCode,
+          { addressIds: touchedIds.slice(offset, offset + GENERATION_REFRESH_BATCH) });
+      }
       checkpoint();
       await this.database.batch([
         this.database.prepare(`DELETE FROM address_pool_evidence WHERE dataset_id IN (
           SELECT id FROM address_datasets WHERE source_id=? AND country_code=? AND status='retired'
         )`).bind(shard.source.id, shard.countryCode),
         this.database.prepare("DELETE FROM address_datasets WHERE source_id=? AND country_code=? AND status='retired'")
-          .bind(shard.source.id, shard.countryCode),
-        this.database.prepare(`DELETE FROM address_pool WHERE id IN (
+          .bind(shard.source.id, shard.countryCode)
+      ]);
+      await eachBatch(touchedIds, async (ids) => {
+        await this.database.prepare(`DELETE FROM address_pool WHERE id IN (
           SELECT target.id FROM address_pool target
           LEFT JOIN address_pool_evidence evidence ON evidence.address_id=target.id
-          WHERE target.country_code=? AND target.active=0 AND evidence.address_id IS NULL
-        )`).bind(shard.countryCode)
-      ]);
+          WHERE target.id IN (${placeholders(ids)}) AND target.active=0 AND evidence.address_id IS NULL
+        )`).bind(...ids).run();
+      });
       checkpoint();
       const newlyListed = localized.map((record) => record.id).filter((id) => !previouslyActive.has(id));
       for (let offset = 0; offset < newlyListed.length; offset += batchSize) {
@@ -866,15 +882,45 @@ export class PostgresAddressImporter {
           WHERE active=1 AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).first('total') || 0);
       }
     }, { signal });
+    await this.refreshDerivedCountryState(shard.countryCode, activePolicy.levelLimits[1] || perLocality, datasetId, observedAt)
+      .catch((error) => { if (signal?.aborted) throw error; console.error(`[address-sync] ${shard.countryCode} pool coverage deferred`, error?.code || error?.message || error); });
     const residentialCount = localized.filter((record) => record.propertyType === 'residential' || record.propertyType === 'apartment').length;
     return {
       datasetId, acceptedCount: localized.length, rejectedCount, localityCount: localityCounts.size,
+      addressIds: localized.map((record) => record.id),
       netGrowth: addedCount + reactivatedCount - retiredCount, changedCount: addedCount + reactivatedCount + retiredCount,
       admin1Count: candidateAdmin1Count, residentialCount,
       metrics,
       rejectionReasons: Object.fromEntries([...rejectionReasons].sort(([left], [right]) => left.localeCompare(right))),
       skipped: false
     };
+  }
+
+  // Derived per-country state is rebuilt after the import commits so it never holds the import transaction open.
+  async refreshDerivedCountryState(countryCode, coverageTarget, datasetId, observedAt) {
+    const ranks = await this.database.prepare(`SELECT COUNT(*) AS total,MAX(country_rank) AS maximum
+      FROM address_generation_index WHERE country_code=? AND active=1`).bind(countryCode).first();
+    // Targeted index refreshes append ranks; once retirements leave too many gaps the country is renumbered.
+    if (Number(ranks?.maximum || 0) > Number(ranks?.total || 0) * 1.25 + 1_000) {
+      await refreshAddressGenerationIndex(this.database, countryCode);
+    }
+    await this.database.batch([
+      this.database.prepare('DELETE FROM pool_coverage WHERE country_code=?').bind(countryCode),
+      this.database.prepare(`INSERT INTO pool_coverage(
+          coverage_key,country_code,admin1_key,locality_key,postcode_key,property_type,target_count,
+          active_count,shadow_count,residential_count,refresh_status,generation,last_refreshed_at,expires_at
+        ) SELECT address.coverage,address.country_code,
+          coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
+          coalesce(nullif(address.postal_locality_key,''),address.locality_key),min(address.postcode_key),address.property_type,CAST(? AS INTEGER),
+          count(*),0,sum(indexed.residential_ready),
+          CASE WHEN count(*)>=CAST(? AS INTEGER) THEN 'ready' ELSE 'low' END,?,?,NULL
+        FROM address_pool address JOIN address_generation_index indexed
+          ON indexed.address_id=address.id AND indexed.country_code=address.country_code AND indexed.active=1
+        WHERE address.country_code=? AND address.active=1
+        GROUP BY address.coverage,address.country_code,coalesce(nullif(address.admin1_code_key,''),address.admin1_key),
+          coalesce(nullif(address.postal_locality_key,''),address.locality_key),address.property_type`)
+        .bind(coverageTarget, coverageTarget, datasetId, observedAt, countryCode)
+    ]);
   }
 
   async close() {}
