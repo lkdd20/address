@@ -20,6 +20,7 @@ Add keys in the admin console under **Integrations → Map keys**. They are stor
 | [DeepL API Free](#deepl-api-free) | Address translation | Online translation → DeepL |
 | [Youdao Text Translation](#youdao-text-translation) | Address translation (paid) | Online translation → Youdao |
 | [OpenAI-compatible API](#openai-compatible-api) | Translate addresses with any Chat Completions model | Online translation → OpenAI-compatible |
+| [Index-Translate](#index-translate) | Keyless bilibili translation model | Online translation → Index-Translate |
 | [AMap JavaScript API](#amap-javascript-api) | Show AMap on the web UI | AMap frontend map credential |
 
 **Multiple keys rotate automatically.** Add several keys for the same provider: a failing key cools down while the others take over, and when none is available the system waits for the earliest to recover. Each key can have its own quota limit.
@@ -99,6 +100,14 @@ Add a free key ending in `:fx` under “DeepL” and set the project character l
 > **Paid service.** Youdao bills by usage. Once the trial credit is used up, both tests and automatic translation are charged. The quota set in Address is only an internal limit and does not mean you stay within any free tier. Do not add or enable it if you do not accept the cost.
 
 Create an application with text translation enabled at [Youdao AI](https://ai.youdao.com/), then enter the app ID and app secret under “Youdao”. See the [official pricing](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html).
+
+### Index-Translate
+
+bilibili's translation model at `https://index-translate.bilibili.com/v1` needs no key. Turn it on under “Online translation → Index-Translate”, set its priority and concurrency, and click “Test”.
+
+- Requests follow bilibili's `inference/llm/call_api.py`: one user message with the instTrans JSON constraint prompt, `temperature: 0` and `chat_template_kwargs.enable_thinking=false`; no reasoning setting and no authorization header are sent.
+- A self-hosted deployment can replace the endpoint (HTTPS, or HTTP on localhost) and model.
+- Address components are sent to bilibili. Limits are not published: start with concurrency 1; HTTP 429 cools the route down, and three failures stop it until its settings change.
 
 ### OpenAI-compatible API
 

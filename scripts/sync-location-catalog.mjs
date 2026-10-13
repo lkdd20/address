@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { strFromU8, unzipSync } from 'fflate';
 import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
-import { catalogHierarchyPaths, correctSpanishProvinceParents } from '../server/database/catalog-hierarchy.mjs';
+import { catalogCityRegions, catalogHierarchyPaths, correctRegionParents } from '../server/database/catalog-hierarchy.mjs';
 import { implausibleChineseTranslation } from '../src/domain/address-localization.mjs';
 import { chinaCityNames, chinaCityRegionCode } from '../server/database/china-catalog-corrections.mjs';
 import { correctedNativeName } from '../server/database/catalog-native-names.mjs';
@@ -63,7 +63,7 @@ const cities = JSON.parse(gunzipSync(await readFile(citiesFile)).toString('utf8'
 const postcodes = JSON.parse(gunzipSync(await readFile(postcodesFile)).toString('utf8'));
 const residentialCoverage = JSON.parse(await readFile(residentialCoverageUrl, 'utf8'));
 const includedState = (state) => countryCodes.has(state.country_code) && (state.country_code !== 'US' || usStateCodes.has(state.iso2));
-const selectedStates = correctSpanishProvinceParents(states.filter((state) => includedState(state) && state.country_code !== 'HK'));
+const selectedStates = correctRegionParents(states.filter((state) => includedState(state) && state.country_code !== 'HK'));
 selectedStates.push(...hongKongRegions.map((region) => ({
   id: region.id, country_code: 'HK', iso2: region.code, name: region.name, native: region.native,
   translations: { 'zh-CN': region.zh }, type: 'region', parent_id: null, latitude: null, longitude: null
@@ -73,8 +73,11 @@ const stateIds = new Set(selectedStates.map((state) => state.id));
 const chinaStateIds = new Map(selectedStates.filter((state) => state.country_code === 'CN' && !state.parent_id)
   .map((state) => [state.iso2, state.id]));
 const chinaStateCodes = new Map([...chinaStateIds].map(([code, id]) => [id, code]));
+const stateIdsByCode = new Map(selectedStates.map((state) => [`${state.country_code}:${state.iso2}`, state.id]));
 const selectedCities = cities.filter((city) => city.country_code !== 'HK' && countryCodes.has(city.country_code)
   && (!city.state_id || stateIds.has(city.state_id))).map((city) => {
+  const reviewed = catalogCityRegions[city.country_code]?.get(city.id);
+  if (reviewed) return { ...city, state_id: stateIdsByCode.get(`${city.country_code}:${reviewed}`) ?? city.state_id };
   if (city.country_code !== 'CN') return city;
   const names = chinaCityNames({ name: city.name, native: city.native, zh: city.translations?.['zh-CN'], latitude: city.latitude, longitude: city.longitude });
   const stateCode = chinaStateCodes.get(city.state_id);

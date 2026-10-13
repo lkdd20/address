@@ -12,7 +12,7 @@ afterEach(async () => {
 describe('France CSTB BDNB residential source', () => {
   it('registers the strict Creuse source independently', async () => {
     const catalog = await loadSourceCatalog();
-    expect(sourceAdapterRevisions['france-bdnb-residential']).toBe('bdnb-ban-fiabilite17-v2+capacity-20261003');
+    expect(sourceAdapterRevisions['france-bdnb-residential']).toBe('bdnb-ban-fiabilite17-v3+capacity-20261003');
     expect(catalog.shards.find((entry) => entry.id === 'france-bdnb-creuse-residential')).toMatchObject({
       countryCode: 'FR', maxRecords: 200000, qualityGate: { minimumRecords: 30000 },
       source: {

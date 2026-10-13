@@ -1,3 +1,4 @@
+import { indexTranslate, INDEX_TRANSLATE_SETTINGS_KEY, normalizeIndexTranslateSettings } from '../translation/index-translate.mjs';
 import { Worker } from 'node:worker_threads';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
@@ -708,16 +709,26 @@ export const createAdminApi = ({
     return context.json({ data: { ...value, customized: false } });
   });
 
-  app.get('/admin/api/settings/translation', async (context) => context.json({ data: {
+  const indexTranslateSettings = async () => {
+    try { return normalizeIndexTranslateSettings(await control.setting(INDEX_TRANSLATE_SETTINGS_KEY, {})); } catch { return normalizeIndexTranslateSettings({}); }
+  };
+  const translationSettings = async () => ({
     googleTranslationEnabled: Boolean(await control.setting('google_translation_enabled', true)),
     googleTranslationConcurrency: Number(await control.setting('google_translation_concurrency', 1)),
+    indexTranslate: await indexTranslateSettings(),
     routes: await control.translationRoutes()
-  } }));
+  });
+  app.get('/admin/api/settings/translation', async (context) => context.json({ data: await translationSettings() }));
   app.put('/admin/api/settings/translation', async (context) => {
-    const input = await context.req.json<{ googleTranslationEnabled?: unknown; googleTranslationConcurrency?: unknown }>();
+    const input = await context.req.json<{ googleTranslationEnabled?: unknown; googleTranslationConcurrency?: unknown; indexTranslate?: unknown }>();
     const hasEnabled = input.googleTranslationEnabled !== undefined;
     const hasConcurrency = input.googleTranslationConcurrency !== undefined;
-    if ((!hasEnabled && !hasConcurrency) || (hasEnabled && typeof input.googleTranslationEnabled !== 'boolean')
+    let indexTranslateUpdate: ReturnType<typeof normalizeIndexTranslateSettings> | undefined;
+    if (input.indexTranslate !== undefined) {
+      try { indexTranslateUpdate = normalizeIndexTranslateSettings(input.indexTranslate, await indexTranslateSettings()); }
+      catch { return context.json({ error: 'INVALID_TRANSLATION_CONFIG' }, 400); }
+    }
+    if ((!hasEnabled && !hasConcurrency && !indexTranslateUpdate) || (hasEnabled && typeof input.googleTranslationEnabled !== 'boolean')
       || (hasConcurrency && !(Number.isInteger(input.googleTranslationConcurrency)
         && Number(input.googleTranslationConcurrency) >= 1 && Number(input.googleTranslationConcurrency) <= 50))) {
       return context.json({ error: 'INVALID_TRANSLATION_CONFIG' }, 400);
@@ -728,15 +739,33 @@ export const createAdminApi = ({
       await control.setSetting('google_translation_enabled', input.googleTranslationEnabled);
     }
     if (hasConcurrency) await control.setSetting('google_translation_concurrency', input.googleTranslationConcurrency);
+    if (indexTranslateUpdate) await control.setSetting(INDEX_TRANSLATE_SETTINGS_KEY, indexTranslateUpdate);
     await control.audit('admin', 'settings.translation.update', 'translation', {
       ...(hasEnabled ? { googleTranslationEnabled: input.googleTranslationEnabled } : {}),
-      ...(hasConcurrency ? { googleTranslationConcurrency: input.googleTranslationConcurrency } : {})
+      ...(hasConcurrency ? { googleTranslationConcurrency: input.googleTranslationConcurrency } : {}),
+      ...(indexTranslateUpdate ? { indexTranslate: indexTranslateUpdate } : {})
     });
-    return context.json({ data: {
-      googleTranslationEnabled: Boolean(await control.setting('google_translation_enabled', true)),
-      googleTranslationConcurrency: Number(await control.setting('google_translation_concurrency', 1)),
-      routes: await control.translationRoutes()
-    } });
+    return context.json({ data: await translationSettings() });
+  });
+  // Translates the diagnostic values with the saved settings or the unsaved ones in the form; nothing is stored.
+  app.post('/admin/api/settings/translation/index-translate/test', async (context) => {
+    const input: Record<string, unknown> = await context.req.json<Record<string, unknown>>().catch(() => ({}));
+    let settings;
+    try { settings = normalizeIndexTranslateSettings({ ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}),
+      ...(input.model !== undefined ? { model: input.model } : {}) }, await indexTranslateSettings()); }
+    catch { return context.json({ error: 'INVALID_TRANSLATION_CONFIG' }, 400); }
+    const started = Date.now();
+    try {
+      const translations = await indexTranslate([...OPENAI_COMPATIBLE_DIAGNOSTIC_VALUES], 'zh-CN', settings, fetch);
+      const intact = Boolean(translations?.every((item, index) => preservesAddressNumbers(OPENAI_COMPATIBLE_DIAGNOSTIC_VALUES[index], item)
+        && preservesAddressIdentifiers(OPENAI_COMPATIBLE_DIAGNOSTIC_VALUES[index], item)));
+      await control.audit('admin', 'settings.translation.index_translate.test', 'index-translate', { success: intact });
+      return intact
+        ? context.json({ data: { success: true, translations, durationMs: Date.now() - started } })
+        : context.json({ error: 'PROVIDER_TEST_FAILED', detail: 'INDEX_TRANSLATE_IDENTIFIERS_CHANGED', translations }, 502);
+    } catch (error) {
+      return context.json({ error: 'PROVIDER_TEST_FAILED', detail: (error as { code?: string }).code || 'INDEX_TRANSLATE_FAILED' }, 502);
+    }
   });
   app.put('/admin/api/settings/translation/routes', async (context) => {
     const input = await context.req.json<{ routes?: unknown }>().catch(() => ({ routes: undefined }));

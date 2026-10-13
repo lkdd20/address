@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 import { OPENAI_COMPATIBLE_TIMEOUT_MS } from '../credential-broker/openai-compatible.mjs';
 import { googleTranslate } from './address-etl.mjs';
+import { indexTranslate, readIndexTranslateSettings } from '../translation/index-translate.mjs';
 import { ensureTranslationRoutes, TranslationRouteScheduler, translationRouteRevision, translationRouteStatus } from '../translation/routing.mjs';
 
 const translationRouteScheduler = new TranslationRouteScheduler();
@@ -40,17 +41,21 @@ export const createImportTranslationProviders = async ({ database, environment, 
   const googleEnabled = setting === null ? !/^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true')) : parse(setting, false) === true;
   const broker = brokerClient === undefined ? await createCredentialBrokerClient(environment, { fetchImpl }) : brokerClient;
   const googleConcurrency = await googleTranslationConcurrency(database);
+  const indexSettings = await readIndexTranslateSettings(database);
   const rows = (await database.prepare(`SELECT route.id,route.provider,route.credential_id,route.priority,route.enabled,
       route.prompt,credential.enabled AS credential_enabled,credential.status,credential.cooldown_until,credential.max_concurrency
     FROM translation_routes route LEFT JOIN provider_credentials credential ON credential.id=route.credential_id
-    WHERE route.credential_id IS NOT NULL OR route.provider='google'`).all()).results;
-  const routes = rows.map((row) => ({ ...row, credentialId: row.credential_id, enabled: Boolean(row.enabled) && (row.provider === 'google'
-    ? googleEnabled : Boolean(broker && row.credential_enabled)), status: translationRouteStatus(row.status || 'healthy', row.cooldown_until) }));
+    WHERE route.credential_id IS NOT NULL OR route.provider IN ('google','index-translate')`).all()).results;
+  const keylessEnabled = { google: googleEnabled, 'index-translate': indexSettings.enabled };
+  const routes = rows.map((row) => ({ ...row, credentialId: row.credential_id, enabled: Boolean(row.enabled) && (row.provider in keylessEnabled
+    ? keylessEnabled[row.provider] : Boolean(broker && row.credential_enabled)), status: translationRouteStatus(row.status || 'healthy', row.cooldown_until) }));
   return { translationChain: translationRouteScheduler.order(routes).map((route) => ({ id: route.id, provider: route.provider,
     priority: Number(route.priority),
-    maxConcurrency: route.provider === 'google' ? googleConcurrency : Number(route.max_concurrency || 1),
+    maxConcurrency: route.provider === 'google' ? googleConcurrency
+      : route.provider === 'index-translate' ? indexSettings.concurrency : Number(route.max_concurrency || 1),
     translate: async (values, target) => {
       if (route.provider === 'google') return googleTranslate(values, target, fetchImpl, signal);
+      if (route.provider === 'index-translate') return indexTranslate(values, target, indexSettings, fetchImpl, signal);
       const result = await waitForBusyKey(() => broker.request(`${route.provider}.translate`, {
         values, target, credentialId: route.credentialId,
         ...(route.provider === 'openai-compatible' && route.prompt ? { prompt: route.prompt } : {})
@@ -73,18 +78,20 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     FROM provider_credentials WHERE provider IN ('deepl','youdao','openai-compatible') ORDER BY id`).all()).results;
   await ensureTranslationRoutes(database, now());
   const googleConcurrency = await googleTranslationConcurrency(database);
+  const indexSettings = await readIndexTranslateSettings(database);
   const routeRows = (await database.prepare(`SELECT route.id,route.provider,route.credential_id,route.priority,route.enabled,
       route.prompt,route.updated_at,credential.label,credential.enabled AS credential_enabled,
       credential.status AS credential_status,credential.cooldown_until,credential.last_used_at,credential.max_concurrency
     FROM translation_routes route LEFT JOIN provider_credentials credential ON credential.id=route.credential_id
-    WHERE route.credential_id IS NOT NULL OR route.provider='google'
+    WHERE route.credential_id IS NOT NULL OR route.provider IN ('google','index-translate')
     ORDER BY route.priority,route.id`).all()).results;
   const routes = routeRows.map((row) => ({
     id: String(row.id), provider: String(row.provider), credentialId: row.credential_id ? String(row.credential_id) : null,
     priority: Number(row.priority), enabled: Boolean(row.enabled) && (row.credential_id ? Boolean(row.credential_enabled) : true),
     prompt: String(row.prompt || ''), status: translationRouteStatus(String(row.credential_status || 'healthy'), row.cooldown_until, now()), model: '',
     lastUsedAt: row.last_used_at ? String(row.last_used_at) : null, updatedAt: String(row.updated_at || ''),
-    maxConcurrency: row.credential_id ? Number(row.max_concurrency || 1) : googleConcurrency
+    maxConcurrency: row.credential_id ? Number(row.max_concurrency || 1)
+      : row.provider === 'index-translate' ? indexSettings.concurrency : googleConcurrency
   }));
   const configured = (provider) => credentials.some((row) => row.provider === provider && row.enabled && !row.needs_review);
   const broker = brokerClient === undefined ? await createCredentialBrokerClient(environment, { fetchImpl }) : brokerClient;
@@ -94,16 +101,18 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     try { availability = await broker.availability(brokerProviders, { signal }); }
     catch { availability = Object.fromEntries(brokerProviders.map((provider) => [provider, { available: false }])); }
   }
-  const revision = createHash('sha256').update(JSON.stringify({ googleEnabled, credentials, routes: translationRouteRevision(routes),
+  const revision = createHash('sha256').update(JSON.stringify({ googleEnabled, indexSettings, credentials, routes: translationRouteRevision(routes),
     brokerRevision: Object.fromEntries(Object.entries(availability).map(([provider, value]) => [provider, value?.revision || ''])) })).digest('hex');
   const date = new Date(now().getTime() + 480 * 60_000).toISOString().slice(0, 10);
   const resetAt = new Date(Date.parse(`${date}T16:00:00Z`)).toISOString();
   const state = await readBackfillProgress(database, 'providers');
   const googleRevision = String(googleEnabled);
   if (state.googleRevision !== googleRevision) Object.assign(state, { googleRevision, googleFailures: 0, googleRetryAt: null });
+  const indexRevision = JSON.stringify(indexSettings);
+  if (state.indexRevision !== indexRevision) Object.assign(state, { indexRevision, indexFailures: 0, indexRetryAt: null });
   let requests = 0;
   let wait = null;
-  let googleUnavailable = false;
+  const unavailable = new Set();
   const dispatched = new Set();
   const failed = new Set();
   const key = (value, target) => JSON.stringify([target, value]);
@@ -117,6 +126,46 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     }
     requests += count;
     return true;
+  };
+  // Keyless routes share one failure budget per route: three failures stop it until its settings change, and HTTP 429
+  // only cools it down. State persists before dispatch so a lost response or restart still consumes an attempt.
+  const keyless = (name, enabled, call) => async (values, target, _fetch, requestSignal) => {
+    const failures = `${name}Failures`;
+    const retryAt = `${name}RetryAt`;
+    if (!enabled || unavailable.has(name)) return null;
+    if (state[retryAt] && Date.parse(state[retryAt]) > now().getTime()) {
+      wait = { reason: `${name}_cooldown`, retryAt: state[retryAt] };
+      return null;
+    }
+    if (state[failures] >= 3) return null;
+    if (!reserveRequest()) return null;
+    state[failures] = (state[failures] || 0) + 1;
+    await writeBackfillProgress(database, 'providers', state, now());
+    if (signal.aborted) {
+      state[failures] -= 1;
+      requests -= 1;
+      await writeBackfillProgress(database, 'providers', state, now());
+      signal.throwIfAborted();
+    }
+    record(dispatched, values, target);
+    try {
+      const result = await call(values, target, requestSignal);
+      if (!result) throw new Error(`${name.toUpperCase()}_INVALID_RESPONSE`);
+      state[failures] = 0;
+      state[retryAt] = null;
+      await writeBackfillProgress(database, 'providers', state, now());
+      return result;
+    } catch (error) {
+      unavailable.add(name);
+      if (/_HTTP_429$/u.test(String(error.code || ''))) state[failures] = Math.max(0, state[failures] - 1);
+      else record(failed, values, target);
+      state[retryAt] = state[failures] < 3 ? error.retryAt
+        || new Date(now().getTime() + 60_000 * 2 ** Math.max(0, state[failures] - 1)).toISOString() : null;
+      if (state[retryAt]) wait = { reason: `${name}_cooldown`, retryAt: state[retryAt] };
+      await writeBackfillProgress(database, 'providers', state, now());
+      if (signal.aborted) throw error;
+      return null;
+    }
   };
   const providers = {
     async deepl(values, target, _fetch, _signal, credentialId) {
@@ -135,43 +184,9 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
         return null;
       }
     },
-    async google(values, target, _fetch, requestSignal) {
-      if (!googleEnabled || googleUnavailable) return null;
-      if (state.googleRetryAt && Date.parse(state.googleRetryAt) > now().getTime()) {
-        wait = { reason: 'google_cooldown', retryAt: state.googleRetryAt };
-        return null;
-      }
-      if (state.googleFailures >= 3) return null;
-      if (!reserveRequest()) return null;
-      // Persist before dispatch so a lost response or process restart consumes an attempt.
-      state.googleFailures = (state.googleFailures || 0) + 1;
-      await writeBackfillProgress(database, 'providers', state, now());
-      if (signal.aborted) {
-        state.googleFailures -= 1;
-        requests -= 1;
-        await writeBackfillProgress(database, 'providers', state, now());
-        signal.throwIfAborted();
-      }
-      record(dispatched, values, target);
-      try {
-        const result = await googleTranslate(values, target, fetchImpl, requestSignal);
-        if (!result) throw new Error('GOOGLE_INVALID_RESPONSE');
-        state.googleFailures = 0;
-        state.googleRetryAt = null;
-        await writeBackfillProgress(database, 'providers', state, now());
-        return result;
-      } catch (error) {
-        googleUnavailable = true;
-        if (error.code === 'GOOGLE_HTTP_429') state.googleFailures = Math.max(0, state.googleFailures - 1);
-        else record(failed, values, target);
-        state.googleRetryAt = state.googleFailures < 3 ? error.retryAt
-          || new Date(now().getTime() + 60_000 * 2 ** Math.max(0, state.googleFailures - 1)).toISOString() : null;
-        if (state.googleRetryAt) wait = { reason: 'google_cooldown', retryAt: state.googleRetryAt };
-        await writeBackfillProgress(database, 'providers', state, now());
-        if (signal.aborted) throw error;
-        return null;
-      }
-    },
+    google: keyless('google', googleEnabled, (values, target, requestSignal) => googleTranslate(values, target, fetchImpl, requestSignal)),
+    'index-translate': keyless('index', indexSettings.enabled,
+      (values, target, requestSignal) => indexTranslate(values, target, indexSettings, fetchImpl, requestSignal)),
     async 'openai-compatible'(values, target) {
       if (!broker || !configured('openai-compatible') || !['en', 'zh-CN'].includes(target)) return null;
       const current = availability['openai-compatible'];
@@ -232,6 +247,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
     'disabled', 'needs_review', 'unconfigured', 'expired', 'quota_exhausted', 'cooldown', 'failed'
   ].includes(route.status) && (
     route.provider === 'google' && googleEnabled
+      || route.provider === 'index-translate' && indexSettings.enabled
       || ['deepl', 'youdao'].includes(route.provider) && configured(route.provider)
       || route.provider === 'openai-compatible' && route.credentialId
         && configured('openai-compatible') && !['disabled', 'needs_review'].includes(route.status)
@@ -265,7 +281,7 @@ export const createBackfillProviders = async ({ database, environment, fetchImpl
       }
     };
   });
-  return { providers: { ...providers, translationChain }, translationChain, revision, googleEnabled,
+  return { providers: { ...providers, translationChain }, translationChain, revision, googleEnabled, indexTranslateEnabled: indexSettings.enabled,
     enabled: Boolean(translationChain.length),
     wasDispatched: (value, target) => dispatched.has(key(value, target)),
     failed: (value, target) => failed.has(key(value, target)),

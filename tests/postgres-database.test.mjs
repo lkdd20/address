@@ -17,12 +17,20 @@ describe('PostgreSQL database adapter', () => {
   });
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 33, control_version: 27 }], fields: [], rowCount: 1
+      rows: [{ address_version: 33, control_version: 28 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
     expect(query).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('allows the Index-Translate route when upgrading control version 27', async () => {
+    const query = vi.fn(async () => ({ rows: [{ address_version: 33, control_version: 27 }], fields: [], rowCount: 1 }));
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements.some((sql) => sql.includes("'google','index-translate'"))).toBe(true);
+    expect(statements.some((sql) => sql.includes('VALUES (28,CURRENT_TIMESTAMP::text)'))).toBe(true);
   });
 
   it('adds the per-key DeepL ledger when upgrading control version 26', async () => {
@@ -244,7 +252,7 @@ describe('PostgreSQL database adapter', () => {
     expect(addressSchema).toContain('idx_cn_communities_city_random');
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
     expect(controlSchema).toContain("WHERE provider='mappls' AND status='needs_review'");
-    expect(controlSchema).toContain("generate_series(1, 27)");
+    expect(controlSchema).toContain("generate_series(1, 28)");
   });
 
   it('does not mark version 25 applied when the cursor index cannot be verified', async () => {

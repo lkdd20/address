@@ -260,6 +260,27 @@ const concatenatedStreet = (countryCode, street) => {
 };
 
 const corruptedText = /�|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}][?？]|[?？][\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+// Object-replacement marks and emoji are rendering debris or decoration, never part of an address name.
+export const junkCharacters = /[\uFFFC\p{Extended_Pictographic}]/u;
+// A city field that holds a region code, a bare number, a postcode or a chained Thai subdistrict/district/province
+// names no city.
+// One district label (อำเภอ X) names a city; two labels or a trailing Bangkok segment chain several levels.
+const thaiAdministrativeLabel = /ตำบล|ตําบล|อำเภอ|อําเภอ|จังหวัด|แขวง|เขต/gu;
+const thaiAdministrativeChain = (value) => (value.match(thaiAdministrativeLabel) || []).length > 1
+  || /\S\s+\S+\s(?:กรุงเทพฯ|กรุงเทพมหานคร)$/u.test(value);
+export const localityIssue = (countryCode, components = {}) => {
+  const regionCodes = [components.admin1, components.admin1Code].map((value) => clean(value).toUpperCase()).filter(Boolean);
+  for (const field of ['locality', 'postalLocality']) {
+    const value = clean(components[field]);
+    if (!value) continue;
+    if (/^\p{N}+$/u.test(value)) return 'locality_number';
+    if (/\p{N}{4,}/u.test(value)) return 'locality_postcode';
+    if (/^[A-Z]{1,3}$/u.test(value) && regionCodes.includes(value)) return 'locality_region_code';
+    if (clean(countryCode).toUpperCase() === 'TH' && thaiAdministrativeChain(value)) return 'locality_concatenated';
+  }
+  return '';
+};
+
 export const validateAddressQuality = ({ countryCode, components, latitude, longitude, matchLevel = 'premise' } = {}) => {
   const country = clean(countryCode).toUpperCase();
   const policy = policies[country];
@@ -278,6 +299,7 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   else if (!streetLevel && houseNumberIssue(country, normalizedComponents.houseNumber)) reasons.push('invalid_house_number');
   if (concatenatedStreet(country, normalizedComponents.street)) reasons.push('concatenated_street');
   if (['locality', 'postalLocality'].some((field) => segments(normalizedComponents[field]).length > 1)) reasons.push('concatenated_locality');
+  if (country !== 'CN' && localityIssue(country, normalizedComponents)) reasons.push('invalid_locality');
   if (!clean(normalizedComponents.street)) {
     if (!chinaCommunity) reasons.push('missing_street');
   }
@@ -294,6 +316,8 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   // A "?" or U+FFFD next to CJK text is a character the source lost in an encoding step (e.g. ?榔路 for 檳榔路).
   if (['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit']
     .some((field) => corruptedText.test(String(normalizedComponents[field] ?? '')))) reasons.push('corrupted_text');
+  if (['admin1', 'locality', 'postalLocality', 'district', 'dependentLocality', 'street', 'buildingName', 'unit', 'houseNumber']
+    .some((field) => junkCharacters.test(String(normalizedComponents[field] ?? '')))) reasons.push('junk_characters');
   addDuplicateReasons(country, normalizedComponents, reasons);
   addCountryReasons(country, normalizedComponents, reasons);
   addCoordinateReasons(country, latitude, longitude, reasons);

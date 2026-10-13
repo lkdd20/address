@@ -21,6 +21,7 @@ import { repairTaiwanOfficialNames } from './taiwan-name-repair.mjs';
 import { repairCatalogNativeAddresses } from './catalog-native-repair.mjs';
 import { repairIndiaEnglishAddresses } from './india-english-repair.mjs';
 import { repairAddressStructure } from './address-structure-repair.mjs';
+import { repairAdministrativeNames } from './administrative-names-repair.mjs';
 import { ensureEvidenceDatasetIndex } from '../database/evidence-dataset-index.mjs';
 import { masterKeyFrom } from '../control/security';
 import { ControlStore } from '../control/store';
@@ -179,6 +180,15 @@ export const createSyncRuntime = async ({
           cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'), pythonBin: environment.PYTHON_BIN || 'python3' })
           .catch((error) => ({ countryCode, error: error?.code || error?.message || String(error) }));
         if (summary.changed || summary.retired || summary.duplicates || summary.error) console.log(JSON.stringify({ event: 'address_structure_repair', ...summary }));
+      }
+    });
+    await startupStep('administrative names', async () => {
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await repairAdministrativeNames({ database, countryCode,
+          cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'), pythonBin: environment.PYTHON_BIN || 'python3' })
+          .catch((error) => ({ countryCode, error: error?.code || error?.message || String(error) }));
+        if (summary.changed || summary.retired || summary.duplicates || summary.error) console.log(JSON.stringify({ event: 'administrative_names_repair', ...summary }));
       }
     });
     await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));

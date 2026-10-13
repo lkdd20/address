@@ -35,7 +35,8 @@ export interface TranslationRoute {
   prompt: string; status: string; model: string; baseUrl: string; reasoningEffort: string; maxTokens: number | null;
   lastUsedAt: string | null; updatedAt: string;
 }
-export interface TranslationSettings { googleTranslationEnabled: boolean; googleTranslationConcurrency?: number; routes: TranslationRoute[] }
+export interface IndexTranslateSettings { enabled: boolean; concurrency: number; baseUrl: string; model: string }
+export interface TranslationSettings { googleTranslationEnabled: boolean; googleTranslationConcurrency?: number; indexTranslate?: IndexTranslateSettings; routes: TranslationRoute[] }
 export interface ProviderViewData { credentials?: Credential[]; maps?: MapSettings; translation?: TranslationSettings }
 export interface ApiTokenView { id: string; name: string; scopes: string[]; rate_limit_per_minute: number; expires_at: string | null; revoked_at: string | null; token_mask: string; token_revealable: boolean }
 export type Mutate = <T = unknown>(path: string, method: string, body?: unknown, success?: string) => Promise<T | undefined>;

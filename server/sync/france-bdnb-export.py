@@ -23,10 +23,14 @@ RESIDENTIAL_USAGES = {
     "Résidentiel individuel": ("residential", "individual-residential"),
     "Résidentiel collectif": ("apartment", "collective-residential"),
 }
-ADMIN1 = "Nouvelle-Aquitaine"
-ADMIN1_CODE = "NAQ"
-DEPARTMENT = "Creuse"
-DEPARTMENT_CODE = "23"
+# Department (first two INSEE commune digits) -> name and region of the shards the source publishes. A commune
+# outside these departments is rejected rather than given another shard's region.
+DEPARTMENTS = {
+    "23": ("Creuse", "Nouvelle-Aquitaine", "NAQ"),
+    "33": ("Gironde", "Nouvelle-Aquitaine", "NAQ"),
+    "69": ("Rhône", "Auvergne-Rhône-Alpes", "ARA"),
+    "75": ("Paris", "Île-de-France", "IDF"),
+}
 
 
 def clean(value):
@@ -129,6 +133,9 @@ def normalized_record(row, evidence):
         return None
     if not POSTCODE_PATTERN.fullmatch(postcode) or not COMMUNE_CODE_PATTERN.fullmatch(commune_code):
         return None
+    if commune_code[:2] not in DEPARTMENTS:
+        return None
+    department, admin1, admin1_code = DEPARTMENTS[commune_code[:2]]
     house_number = " ".join(filter(None, (number, suffix.lower())))
     street = " ".join(filter(None, (street_type.capitalize(), street_name)))
     fiability, building_id, usage = residence
@@ -139,14 +146,14 @@ def normalized_record(row, evidence):
         "source_record_id": f"bdnb-ban:{address_id}",
         "source_dataset": "CSTB BDNB and Base Adresse Nationale",
         "country": "FR",
-        "admin1": ADMIN1,
-        "admin1_code": ADMIN1_CODE,
-        "district": DEPARTMENT,
-        "district_code": DEPARTMENT_CODE,
+        "admin1": admin1,
+        "admin1_code": admin1_code,
+        "district": "" if department.casefold() == commune.casefold() else department,
+        "district_code": "" if department.casefold() == commune.casefold() else commune_code[:2],
         "locality": commune,
         "locality_code": commune_code,
         "postal_city": commune,
-        "address_levels": [ADMIN1, DEPARTMENT, commune],
+        "address_levels": [admin1, department, commune],
         "postcode": postcode,
         "street": street,
         "number": house_number,

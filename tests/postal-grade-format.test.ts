@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAddressPresentation } from '../src/domain/address-format';
+import { formatAddressPresentation, taiwanEnglishPremise } from '../src/domain/address-format';
 import { generateBundle } from '../src/domain/generator';
 import type { AddressComponents, CountryCode, GeneratedUnit, VerifiedAddress } from '../src/domain/types';
 
@@ -133,5 +133,21 @@ describe('postal-grade formats per docs/address-formats.md', () => {
     expect(krBundle.generatedUnit).toBeUndefined();
     expect(krBundle.addressFormats.native.singleLine).toContain('신원로3길 57');
     expect(krBundle.addressFormats.native.singleLine).not.toMatch(/\d+동 \d+호/);
+  });
+});
+
+describe('Taiwanese English house numbers', () => {
+  it('writes 號, 之 and 樓 in Chunghwa Post English', () => {
+    expect(taiwanEnglishPremise('34號', '之1')).toEqual({ houseNumber: 'No. 34-1', unit: '' });
+    expect(taiwanEnglishPremise('41', '之2號')).toEqual({ houseNumber: 'No. 41-2', unit: '' });
+    expect(taiwanEnglishPremise('12之3號', '')).toEqual({ houseNumber: 'No. 12-3', unit: '' });
+    expect(taiwanEnglishPremise('8號之2', '')).toEqual({ houseNumber: 'No. 8-2', unit: '' });
+    expect(taiwanEnglishPremise('5號', '四樓之2')).toEqual({ houseNumber: 'No. 5', unit: '4F.-2' });
+    expect(taiwanEnglishPremise('5號', '十二樓')).toEqual({ houseNumber: 'No. 5', unit: '12F.' });
+    expect(taiwanEnglishPremise('5號', '地下一樓')).toEqual({ houseNumber: 'No. 5', unit: 'B1F.' });
+    expect(taiwanEnglishPremise('66號', '7')).toEqual({ houseNumber: 'No. 66', unit: 'Rm. 7' });
+    expect(taiwanEnglishPremise('', '')).toEqual({ houseNumber: '', unit: '' });
+    expect(taiwanEnglishPremise('5號', '頂樓加蓋')).toBeUndefined();
+    expect(taiwanEnglishPremise('A棟', '')).toBeUndefined();
   });
 });

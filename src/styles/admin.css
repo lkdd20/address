@@ -450,6 +450,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .translation-google-priority { padding: 0 22px 20px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
 .translation-google-priority label { max-width: 140px; }
 .translation-google-priority small { flex-basis: 100%; color: var(--ink-3); font-size: 12.5px; line-height: 1.6; }
+.index-translate-form { padding: 0 22px 20px; grid-template-columns: 120px 120px minmax(220px, 1.4fr) minmax(180px, 1fr) auto; align-items: end; gap: 12px; }
+.index-translate-form small { grid-column: 1 / -1; color: var(--ink-3); font-size: 12.5px; line-height: 1.6; }
+.index-translate-actions { display: flex; gap: 8px; }
 .translation-provider { display: grid; border-top: 1px solid var(--hairline); }
 .translation-empty-state { padding-left: 74px; }
 
@@ -747,6 +750,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .world-map-layout, .world-map-layout .world-distribution-map { min-height: 460px; height: 460px; }
   .address-source-list article { grid-template-columns: 1fr; }
   .provider-key-row, .provider-key-row.amap-browser-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .index-translate-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-key-actions { justify-content: flex-start; }
 }
 @media (max-width: 960px) {
@@ -787,7 +791,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .dashboard-kpi { min-height: 96px; padding: 16px; grid-template-columns: 1fr; gap: 10px; }
   .dashboard-kpi-icon { width: 36px; height: 36px; border-radius: 11px; }
   .dashboard-kpi strong { font-size: 22px; }
-  .provider-key-row, .provider-key-row.amap-browser-row, .amap-browser-secrets, .coverage-filters, .policy-grid, .address-data-summary { grid-template-columns: minmax(0, 1fr); }
+  .provider-key-row, .provider-key-row.amap-browser-row, .amap-browser-secrets, .coverage-filters, .policy-grid, .address-data-summary, .index-translate-form { grid-template-columns: minmax(0, 1fr); }
   .provider-key-row { padding: 16px; }
   .provider-empty-state, .translation-empty-state { padding-left: 16px; }
   .map-display-grid { grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr)); }

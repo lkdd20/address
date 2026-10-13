@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 
 CREATE TABLE IF NOT EXISTS translation_routes (
   id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK (provider IN ('openai-compatible','deepl','youdao','google')),
+  provider TEXT NOT NULL CHECK (provider IN ('openai-compatible','deepl','youdao','google','index-translate')),
   credential_id TEXT REFERENCES provider_credentials(id) ON DELETE CASCADE,
   priority INTEGER NOT NULL DEFAULT 100 CHECK (priority BETWEEN 1 AND 10000),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
@@ -346,5 +346,5 @@ WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000
   AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=25);
 
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 27) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 28) AS version
 ON CONFLICT (version) DO NOTHING;

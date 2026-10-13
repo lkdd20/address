@@ -197,14 +197,22 @@ const buildAdminSnapshot = async (db: Database, country: CountryCode, residentia
   ]);
   const regionNames = regionAliasResolver(catalog);
   const regions = new Map<string, SnapshotItem>();
-  for (const row of catalog.filter((row) => row.parent_id == null)) {
+  const roots = catalog.filter((row) => row.parent_id == null);
+  // Two regions may share an English name (Moscow city and oblast); their filter value is then the native name where
+  // that one is unique. Regions alike in every name stay one option.
+  const repeated = (values: string[]) => new Set(values.filter((name, index) => values.indexOf(name) !== index));
+  const sharedNames = repeated(roots.map((row) => lowerKey(row.name)));
+  const sharedNatives = repeated(roots.map((row) => lowerKey(row.native_name)));
+  for (const row of roots) {
     const names = poolLocationAliases(regionNames(row.id));
     const availableCount = groups.reduce((count, group) => count + (regionMatches(group, names) ? Number(group.address_count) : 0), 0);
-    const key = row.name.toLocaleLowerCase();
-    if (!availableCount || regions.has(key)) continue;
-    regions.set(key, {
+    const value = sharedNames.has(lowerKey(row.name)) && row.native_name && !sharedNatives.has(lowerKey(row.native_name))
+      ? row.native_name : row.name;
+    if (!availableCount || regions.has(lowerKey(value))) continue;
+    regions.set(lowerKey(value), {
       option: {
-        value: row.name, label: regionLabel(row, country), availableCount, disabled: false,
+        value,
+        label: regionLabel(row, country), availableCount, disabled: false,
         id: String(row.id), regionCode: row.code || undefined, native: row.native_name, en: row.name, zhCN: row.zh_name
       },
       search: [row.name, row.native_name, row.zh_name, row.code].map(lowerKey)

@@ -20,6 +20,7 @@
 | [DeepL API Free](#deepl-api-free) | 地址翻译 | 在线翻译 → DeepL |
 | [有道文本翻译](#有道文本翻译) | 地址翻译（付费） | 在线翻译 → 有道翻译 |
 | [OpenAI 兼容接口](#openai-兼容接口) | 用任意 Chat Completions 模型翻译地址 | 在线翻译 → OpenAI 兼容接口 |
+| [Index-Translate](#index-translate) | bilibili 免密钥翻译模型 | 在线翻译 → Index-Translate |
 | [高德 JavaScript API](#高德-javascript-api) | 在网页上显示高德地图 | 高德前端地图凭据 |
 
 **多个密钥自动轮换。** 同一平台可以添加多个密钥：某个密钥失败时会先冷却，系统改用其他密钥；全部不可用时，等待最早恢复的那个。每个密钥都可以单独设置额度上限。
@@ -99,6 +100,14 @@
 > **付费服务。** 有道按用量计费，试用额度用完后，测试和自动翻译都会产生费用。项目中设置的额度只是内部限制，不代表处于免费额度内。不接受费用时请不要添加或启用。
 
 在[有道智云](https://ai.youdao.com/)创建应用并开通文本翻译，在“有道翻译”下填写应用 ID 和应用密钥。计费说明见[官方价格页](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html)。
+
+### Index-Translate
+
+bilibili 的翻译模型，公共接口 `https://index-translate.bilibili.com/v1` 无需密钥。在“在线翻译 → Index-Translate”中开启，设置优先级和并发后点击“测试”。
+
+- 请求格式与 bilibili 的 `inference/llm/call_api.py` 一致：只发一条 user 消息（instTrans JSON 约束提示词），`temperature: 0`、`chat_template_kwargs.enable_thinking=false`，不传思考强度，也不带鉴权头；
+- 自建部署可改接口地址（HTTPS，或 localhost 的 HTTP）和模型；
+- 地址组件会发送给 bilibili。官方未公布限额，建议并发从 1 开始；HTTP 429 时冷却，连续 3 次失败后停用，直到设置变化。
 
 ### OpenAI 兼容接口
 

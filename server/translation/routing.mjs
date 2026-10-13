@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const TRANSLATION_ROUTE_PROVIDERS = Object.freeze(['openai-compatible', 'deepl', 'youdao', 'google']);
+export const TRANSLATION_ROUTE_PROVIDERS = Object.freeze(['openai-compatible', 'deepl', 'youdao', 'index-translate', 'google']);
 export const OPENAI_TRANSLATION_ROUTE_PREFIX = 'openai:';
 export const TRANSLATION_PROMPT_MAX_LENGTH = 4_000;
 export const TRANSLATION_PRIORITY_MIN = 1;
@@ -9,11 +9,12 @@ export const DEFAULT_TRANSLATION_ROUTE_PRIORITIES = Object.freeze({
   'openai-compatible': 10,
   deepl: 20,
   youdao: 30,
+  'index-translate': 35,
   google: 40
 });
 export const translationRoutesSchema = `CREATE TABLE IF NOT EXISTS translation_routes (
   id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK (provider IN ('openai-compatible','deepl','youdao','google')),
+  provider TEXT NOT NULL CHECK (provider IN ('openai-compatible','deepl','youdao','google','index-translate')),
   credential_id TEXT REFERENCES provider_credentials(id) ON DELETE CASCADE,
   priority INTEGER NOT NULL DEFAULT 100 CHECK (priority BETWEEN 1 AND 10000),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
@@ -28,6 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_translation_routes_credential ON translation_rout
 const logicalRoutes = [
   ['deepl', 'deepl', DEFAULT_TRANSLATION_ROUTE_PRIORITIES.deepl],
   ['youdao', 'youdao', DEFAULT_TRANSLATION_ROUTE_PRIORITIES.youdao],
+  ['index-translate', 'index-translate', DEFAULT_TRANSLATION_ROUTE_PRIORITIES['index-translate']],
   ['google', 'google', DEFAULT_TRANSLATION_ROUTE_PRIORITIES.google]
 ];
 

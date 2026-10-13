@@ -17,6 +17,7 @@ import { InFlightLimiter, isGenerationPath } from './in-flight-limiter';
 import { parseAllowedOrigins } from '../lib/origin-policy';
 import { TranslationRouteScheduler } from '../translation/routing.mjs';
 import { translateGoogleBatch } from './services/google-translator.ts';
+import { indexTranslate, INDEX_TRANSLATE_SETTINGS_KEY, normalizeIndexTranslateSettings } from '../translation/index-translate.mjs';
 import { prewarmLocationCatalog } from './repositories/location-catalog';
 import { countries } from '../../src/domain/countries';
 
@@ -133,13 +134,17 @@ const translationRouteScheduler = new TranslationRouteScheduler();
 const requestEnvironment = async () => {
   const youdao = credentialBroker ? undefined : parseYoudaoSecret(await serviceCredential('youdao'));
   const googleTranslationEnabled = Boolean(await control.setting('google_translation_enabled', true));
+  let indexSettings = normalizeIndexTranslateSettings({});
+  try { indexSettings = normalizeIndexTranslateSettings(await control.setting(INDEX_TRANSLATE_SETTINGS_KEY, {})); } catch { /* defaults stay disabled */ }
   const translationRoutes = credentialBroker
     ? translationRouteScheduler.order((await control.translationRoutes()).filter((route) => route.enabled
       && !['disabled', 'needs_review', 'unconfigured'].includes(route.status)
-      && (route.provider !== 'google' || googleTranslationEnabled))).map((route) => ({
+      && (route.provider !== 'google' || googleTranslationEnabled)
+      && (route.provider !== 'index-translate' || indexSettings.enabled))).map((route) => ({
         id: route.id, provider: route.provider,
         translate: async (values: string[], target: string) => {
           if (route.provider === 'google') return translateGoogleBatch(values, 'auto', target, fetch);
+          if (route.provider === 'index-translate') return await indexTranslate(values, target, indexSettings, fetch) ?? undefined;
           if (route.provider === 'deepl') {
             const result = await credentialBroker.request('deepl.translate', { values, target, credentialId: route.credentialId }, { maxDispatches: 2 }) as { translations: Array<{ text: string }> };
             return result.translations.map((item: { text: string }) => item.text);

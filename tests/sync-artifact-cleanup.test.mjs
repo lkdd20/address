@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe('synchronization artifact cleanup', () => {
-  it('removes parent-pid artifacts whenever the queue is idle and retains fresh resumable parts', async () => {
+  it('removes artifacts of exited processes, keeps those of live writers and retains fresh resumable parts', async () => {
     const root = testRoot();
     const current = new Date('2026-08-04T00:00:00Z');
     const old = new Date(current.getTime() - 7 * 60 * 60_000);
@@ -50,18 +50,19 @@ describe('synchronization artifact cleanup', () => {
       cacheDir: root,
       now: () => current.getTime(),
       staleMs: 6 * 60 * 60_000,
+      isProcessAlive: (pid) => pid === 42,
       log: { log: () => {}, error: () => {} }
     });
     const result = await cleanup.runOnce();
 
-    expect(result).toMatchObject({ removedFiles: 3, removedDirectories: 3, removedBytes: 21 });
+    expect(result).toMatchObject({ removedFiles: 2, removedDirectories: 2 });
     expect(await exists(dead)).toBe(false);
     expect(await exists(expiredPart)).toBe(false);
     expect(await exists(plateau)).toBe(false);
     expect(await exists(deadDirectory)).toBe(false);
-    expect(await exists(live)).toBe(false);
+    expect(await exists(live)).toBe(true);
     expect(await exists(freshPart)).toBe(true);
-    expect(await exists(liveDirectory)).toBe(false);
+    expect(await exists(liveDirectory)).toBe(true);
   });
 
   it('does not scan while a synchronization job is running', async () => {

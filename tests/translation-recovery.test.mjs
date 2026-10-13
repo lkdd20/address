@@ -143,6 +143,18 @@ describe('source-backed translation recovery', () => {
     expect(await database.prepare('SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1').first('total')).toBe(1);
   });
 
+  it('leaves rows the region repairs retired for their own next revision', async () => {
+    await new PostgresTranslationCache(database).set(translations, 'zh-CN');
+    for (const retiredAt of ['publication-validation:administrative-names-v5:2026-10-13T00:00:00.000Z',
+      'publication-validation:address-structure-v1:2026-10-12T00:00:00.000Z']) {
+      await database.prepare("UPDATE address_pool SET retired_at=? WHERE id='street-fixture'").bind(retiredAt).run();
+      expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: vi.fn(), now, cacheOnly: true, countryCodes: ['US'] }))
+        .updated).toBe(0);
+      expect(await database.prepare("SELECT active,retired_at FROM address_pool WHERE id='street-fixture'").first())
+        .toEqual({ active: 0, retired_at: retiredAt });
+    }
+  });
+
   it('updates multiple source dataset counts without recounting them', async () => {
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status)

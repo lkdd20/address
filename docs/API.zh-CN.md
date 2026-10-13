@@ -150,7 +150,7 @@ curl -fsS "https://address.example.com/api/v1/locations/search?country=CN&field=
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
-返回的 `id` 请原样传给 `/generate` 的 `*Id` 参数。邮编选项可能没有目录 ID，此时把 `value` 作为 `postcode` 传入即可。中国区县选项同时返回所属城市（`parentValue`、`parentId`）和省份（`regionValue`、`regionId`），因为区县名会在不同城市重复；只传 `districtId` 即可精确选中该区县。
+返回的 `id` 请原样传给 `/generate` 的 `*Id` 参数。邮编选项可能没有目录 ID，此时把 `value` 作为 `postcode` 传入即可。中国区县选项同时返回所属城市（`parentValue`、`parentId`）和省份（`regionValue`、`regionId`），因为区县名会在不同城市重复；只传 `districtId` 即可精确选中该区县。英文名与其他一级行政区相同的地区（莫斯科市与莫斯科州）以本地语言名作为 `value`，把 `value` 作为 `region` 传入也不会混淆。
 
 选项列表来自每个国家的快照，快照在后台重建，因此数量可能比刚发布的地址晚几分钟。
 

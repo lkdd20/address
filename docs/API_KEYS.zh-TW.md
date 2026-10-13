@@ -20,6 +20,7 @@
 | [DeepL API Free](#deepl-api-free) | 地址翻譯 | 線上翻譯 → DeepL |
 | [有道文本翻譯](#有道文本翻譯) | 地址翻譯（付費） | 線上翻譯 → 有道翻譯 |
 | [OpenAI 相容介面](#openai-相容介面) | 用任意 Chat Completions 模型翻譯地址 | 線上翻譯 → OpenAI 相容介面 |
+| [Index-Translate](#index-translate) | bilibili 免金鑰翻譯模型 | 線上翻譯 → Index-Translate |
 | [高德 JavaScript API](#高德-javascript-api) | 在網頁上顯示高德地圖 | 高德前端地圖憑據 |
 
 **多個金鑰自動輪換。** 同一平臺可以新增多個金鑰：某個金鑰失敗時會先冷卻，系統改用其他金鑰；全部不可用時，等待最早恢復的那個。每個金鑰都可以單獨設定額度上限。
@@ -99,6 +100,14 @@
 > **付費服務。** 有道按用量計費，試用額度用完後，測試和自動翻譯都會產生費用。專案中設定的額度只是內部限制，不代表處於免費額度內。不接受費用時請不要新增或啟用。
 
 在[有道智雲](https://ai.youdao.com/)建立應用並開通文本翻譯，在「有道翻譯」下填寫應用 ID 和應用金鑰。計費說明見[官方價格頁](https://ai.youdao.com/DOCSIRMA/html/trans/price/plwbfy/index.html)。
+
+### Index-Translate
+
+bilibili 的翻譯模型，公共介面 `https://index-translate.bilibili.com/v1` 無需金鑰。在「線上翻譯 → Index-Translate」中開啟，設定優先級和並行數後點選「測試」。
+
+- 請求格式與 bilibili 的 `inference/llm/call_api.py` 一致：只發一則 user 訊息（instTrans JSON 約束提示詞），`temperature: 0`、`chat_template_kwargs.enable_thinking=false`，不傳思考強度，也不帶驗證標頭；
+- 自建部署可改介面位址（HTTPS，或 localhost 的 HTTP）和模型；
+- 地址元件會傳送給 bilibili。官方未公布限額，建議並行數從 1 開始；HTTP 429 時冷卻，連續 3 次失敗後停用，直到設定變化。
 
 ### OpenAI 相容介面
 

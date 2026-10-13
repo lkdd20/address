@@ -75,3 +75,14 @@ def test_lambert93_conversion_matches_reference_point():
     longitude, latitude = BDNB.lambert93_to_wgs84(652469.022709, 6862035.259420)
     assert abs(longitude - 2.3522) < 0.0002
     assert abs(latitude - 48.8566) < 0.0002
+
+
+def test_region_and_department_follow_the_commune():
+    evidence = {"a": (20, "bg", "Résidentiel individuel"), "b": (20, "bg", "Résidentiel individuel")}
+    row = {"cle_interop_adr": "a", "source": "BAN", "numero": "4", "nom_voie": "de la République", "type_voie": "rue",
+           "code_postal": "69003", "code_commune_insee": "69383", "libelle_commune": "Lyon 3e Arrondissement",
+           "WKT": "POINT (843000 6519000)"}
+    record = BDNB.normalized_record(row, evidence)
+    assert (record["admin1"], record["admin1_code"], record["district"], record["district_code"]) == (
+        "Auvergne-Rhône-Alpes", "ARA", "Rhône", "69")
+    assert BDNB.normalized_record({**row, "cle_interop_adr": "b", "code_commune_insee": "13055", "code_postal": "13001"}, evidence) is None

@@ -16,6 +16,7 @@ import {
   validateAdministrativeHierarchy
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
+import { taiwanEnglishPremise } from '../../../src/domain/address-format';
 import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
 import { componentLooksLocalized, implausibleChineseTranslation, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
@@ -206,6 +207,18 @@ const storedAddress = (components: AddressComponents, country: CountryCode): str
   country === 'CN' || country === 'HK' ? '' : components.postcode
 ].filter(Boolean).join(', ');
 
+const taiwanEnglishAddress = (components: AddressComponents): string => [
+  components.unit,
+  components.houseNumber,
+  components.street,
+  components.buildingName,
+  components.district || components.dependentLocality,
+  components.postalLocality || components.locality,
+  components.admin1,
+  components.postcode,
+  'Taiwan'
+].filter(Boolean).join(', ');
+
 const nativeStoredAddress = (components: AddressComponents, country: CountryCode): string => {
   if (country === 'HK' || country === 'TW') return [
     components.postcode,
@@ -322,10 +335,18 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
     }
   }
   const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
+  // Taiwanese English addresses carry the house number and floor in Chunghwa Post style instead of romanized 號/之/樓.
+  const taiwanPremise = row.country_code === 'TW'
+    ? taiwanEnglishPremise(componentVariants.native.houseNumber || '', componentVariants.native.unit || '') : undefined;
+  if (row.country_code === 'TW' && !taiwanPremise && hanScript.test(`${componentVariants.en.houseNumber}${componentVariants.en.unit}`)) {
+    return reject('translation', 'invalid_target_script', { language: 'en', field: 'houseNumber' });
+  }
+  if (taiwanPremise) componentVariants.en = { ...componentVariants.en, ...taiwanPremise };
   const addressVariants = ['HK', 'TW'].includes(row.country_code) && hanScript.test(Object.values(componentVariants.native).join(' '))
     ? {
         ...parsedAddresses,
-        native: nativeStoredAddress(componentVariants.native, row.country_code)
+        native: nativeStoredAddress(componentVariants.native, row.country_code),
+        ...(taiwanPremise ? { en: taiwanEnglishAddress(componentVariants.en) } : {})
       }
     : /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
     ? {

@@ -4,7 +4,8 @@ import { normalizeOpenAICompatibleBaseUrl, openAICompatibleBaseHasVersion, openA
 import { DEFAULT_TRANSLATION_PROMPT } from '../../domain/translation-prompt.mjs';
 import { adminText, credentialDisplayLabel, credentialRemovalPrompt, dateTime, deeplText, googleQuotaText, openAIText, providerCredentialCount, providerLabel, providerQuotaDefaults, UNLIMITED_QUOTA, providerQuotaPeriods, translationCostText, usagePercent } from './text';
 import { localeText } from './locale-text';
-import type { AdminLocale, AmapBrowserStatus, Credential, MapSettings, Mutate, RequestData, Reveal, TranslationSettings } from './types';
+import type { AdminLocale, AmapBrowserStatus, Credential, IndexTranslateSettings, MapSettings, Mutate, RequestData, Reveal, TranslationSettings } from './types';
+import { indexTranslateText } from './index-translate-text';
 import { Dialog, Panel, SecretCell, useConfirm } from './ui';
 
 export function MapDisplayPanel({ value, locale, busy, mutate, openAmapBrowser }: { value: MapSettings; locale: AdminLocale; busy: boolean; mutate: Mutate; openAmapBrowser: () => void }) {
@@ -99,6 +100,7 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
         }
       }}><label><span>{openAI.routePriority}</span><input name="googleTranslationPriority" type="number" min="1" max="10000" required value={googlePriority} onChange={(event) => setGooglePriority(event.target.value)} /></label>
       <ConcurrencyField value={googleConcurrency} onChange={setGoogleConcurrency} locale={locale} hint={false} /><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button><small>{concurrencyText(locale).hint} {openAI.routingHint}</small></form>
+      <IndexTranslateSection value={value.indexTranslate} route={value.routes?.find((route) => route.provider === 'index-translate')} locale={locale} busy={busy} mutate={mutate} />
       <section className="translation-provider deepl-provider">
         <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>DeepL API Free</h3><span className="provider-key-count">{providerCredentialCount(locale, deeplCredentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openDeepL('create')}><Plus size={14} aria-hidden="true" />{deeplText(locale).add}</button></header>
         <p className="security-note translation-notice">{deeplText(locale).notice}</p>
@@ -125,6 +127,38 @@ export function TranslationSettingsPanel({ value, credentials, deeplCredentials,
     </div>
     {testing && <ProviderTestDialog credential={testing} locale={locale} request={request} close={() => setTesting(null)} refresh={() => void mutate('/providers', 'GET', undefined, '')} />}
   </Panel>;
+}
+const defaultIndexTranslate: IndexTranslateSettings = { enabled: false, concurrency: 1, baseUrl: 'https://index-translate.bilibili.com/v1', model: 'Index-Translate-35B-A3B' };
+// Keyless bilibili route: settings live beside the Google route; the test translates the diagnostic values with the form values.
+function IndexTranslateSection({ value = defaultIndexTranslate, route, locale, busy, mutate }: {
+  value?: IndexTranslateSettings; route?: { id: string; priority: number }; locale: AdminLocale; busy: boolean; mutate: Mutate;
+}) {
+  const text = indexTranslateText[locale];
+  const t = adminText[locale];
+  const [form, setForm] = useState({ priority: String(route?.priority ?? 35), concurrency: String(value.concurrency), baseUrl: value.baseUrl, model: value.model });
+  useEffect(() => setForm({ priority: String(route?.priority ?? 35), concurrency: String(value.concurrency), baseUrl: value.baseUrl, model: value.model }),
+    [route?.priority, value.concurrency, value.baseUrl, value.model]);
+  const field = (name: keyof typeof form) => (event: { target: { value: string } }) => setForm((current) => ({ ...current, [name]: event.target.value }));
+  return <section className="translation-provider index-translate-provider">
+    <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>{text.title}</h3><span className="provider-key-count">{text.keyless}</span></div></div>
+      <button type="button" className="toggle-switch" role="switch" aria-label={text.toggle} aria-checked={value.enabled} disabled={busy}
+        onClick={() => void mutate('/settings/translation', 'PUT', { indexTranslate: { enabled: !value.enabled } }, t.translationSaved)}><span aria-hidden="true" /></button></header>
+    <p className="security-note translation-notice">{text.notice}</p>
+    <form className="index-translate-form admin-form" onSubmit={async (event) => {
+      event.preventDefault();
+      if (route && !await mutate('/settings/translation/routes', 'PUT', { routes: [{ id: route.id, priority: Number(form.priority) }] }, t.translationSaved)) return;
+      await mutate('/settings/translation', 'PUT', { indexTranslate: { concurrency: Number(form.concurrency), baseUrl: form.baseUrl.trim(), model: form.model.trim() } }, t.translationSaved);
+    }}>
+      <label><span>{openAIText(locale).routePriority}</span><input name="indexTranslatePriority" type="number" min="1" max="10000" required value={form.priority} onChange={field('priority')} /></label>
+      <ConcurrencyField value={form.concurrency} onChange={(concurrency) => setForm((current) => ({ ...current, concurrency }))} locale={locale} hint={false} />
+      <label><span>{text.baseUrl}</span><input name="indexTranslateBaseUrl" type="url" required value={form.baseUrl} onChange={field('baseUrl')} /></label>
+      <label><span>{text.model}</span><input name="indexTranslateModel" required pattern={'[\\w.:\\/\\-]{1,128}'} value={form.model} onChange={field('model')} /></label>
+      <div className="index-translate-actions"><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button>
+        <button type="button" className="secondary-action" disabled={busy} onClick={() => void mutate('/settings/translation/index-translate/test', 'POST',
+          { baseUrl: form.baseUrl.trim(), model: form.model.trim() }, text.testSuccess)}><FlaskConical size={14} aria-hidden="true" />{text.test}</button></div>
+      <small>{concurrencyText(locale).hint} {text.hint}</small>
+    </form>
+  </section>;
 }
 const concurrencyText = (locale: AdminLocale) => ({
   'zh-CN': { label: '并发数', hint: '同时进行的请求数（1-50）；超出时排队等待。' },

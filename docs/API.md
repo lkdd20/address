@@ -150,7 +150,7 @@ curl -fsS "https://address.example.com/api/v1/locations/search?country=GB&field=
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
-Pass returned `id` values unchanged to the `*Id` parameters of `/generate`. Postcode options may have no catalog ID; pass their `value` as `postcode` instead. China district options also return their city (`parentValue`, `parentId`) and province (`regionValue`, `regionId`) because district names repeat across cities; a `districtId` alone selects that exact district.
+Pass returned `id` values unchanged to the `*Id` parameters of `/generate`. Postcode options may have no catalog ID; pass their `value` as `postcode` instead. China district options also return their city (`parentValue`, `parentId`) and province (`regionValue`, `regionId`) because district names repeat across cities; a `districtId` alone selects that exact district. A region whose English name another region shares (Moscow city and Moscow Oblast) is listed with its native name as `value`, so passing `value` as `region` stays unambiguous.
 
 Option lists are served from a per-country snapshot that is rebuilt in the background, so counts can trail newly published addresses by a few minutes.
 

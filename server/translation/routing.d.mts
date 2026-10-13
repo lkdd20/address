@@ -1,6 +1,6 @@
 import type { Database } from '../database/database.mjs';
 
-export type TranslationRouteProvider = 'openai-compatible' | 'deepl' | 'youdao' | 'google';
+export type TranslationRouteProvider = 'openai-compatible' | 'deepl' | 'youdao' | 'index-translate' | 'google';
 
 export interface TranslationRoute {
   id: string;

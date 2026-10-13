@@ -14,7 +14,7 @@ const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
 const ADDRESS_SCHEMA_VERSION = 33;
-const CONTROL_SCHEMA_VERSION = 27;
+const CONTROL_SCHEMA_VERSION = 28;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -46,6 +46,22 @@ export const createPostgresPool = (options = {}) => {
     event: 'postgres_idle_client_error', code: error.code || null, message: error.message
   })));
   return pool;
+};
+
+// Startup DDL waits behind live sync and API transactions; short lock windows are retried instead of failing a deploy.
+const lockedTransaction = async (client, run) => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await client.query('BEGIN');
+      await run();
+      await client.query('COMMIT');
+      return;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (error?.code !== '55P03' || attempt >= 60) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
 };
 
 const upgradeStreetSchema = async (client, source) => {
@@ -339,14 +355,14 @@ export const initializePostgres = async (pool, {
           await ensureConcurrentIndex(client, 'idx_generation_location_groups', generationLocationIndexSql);
           await client.query('INSERT INTO address.schema_migrations(version,applied_at) VALUES (33,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING');
         }
-        await client.query('BEGIN');
-        await client.query('SET LOCAL search_path TO address, public');
-        await client.query("SET LOCAL lock_timeout TO '2s'");
-        await client.query("SET LOCAL statement_timeout TO '30s'");
-        await client.query(translationRecoverySchema);
-        await client.query(`INSERT INTO address.schema_migrations(version,applied_at) VALUES (25,CURRENT_TIMESTAMP::text),(26,CURRENT_TIMESTAMP::text)
-          ON CONFLICT (version) DO NOTHING`);
-        await client.query('COMMIT');
+        await lockedTransaction(client, async () => {
+          await client.query('SET LOCAL search_path TO address, public');
+          await client.query("SET LOCAL lock_timeout TO '2s'");
+          await client.query("SET LOCAL statement_timeout TO '30s'");
+          await client.query(translationRecoverySchema);
+          await client.query(`INSERT INTO address.schema_migrations(version,applied_at) VALUES (25,CURRENT_TIMESTAMP::text),(26,CURRENT_TIMESTAMP::text)
+            ON CONFLICT (version) DO NOTHING`);
+        });
         if (Number(versions.control_version) < 20) {
           await client.query('BEGIN');
           await client.query("SET LOCAL lock_timeout TO '250ms'");
@@ -465,13 +481,23 @@ export const initializePostgres = async (pool, {
             ON CONFLICT (version) DO NOTHING`);
         }
         if (Number(versions.control_version) < 27) {
-          await client.query('BEGIN');
-          await client.query('SET LOCAL search_path TO control, public');
-          await client.query("SET LOCAL lock_timeout TO '2s'");
-          await client.query(deeplBudgetSchema);
-          await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (27,CURRENT_TIMESTAMP::text)
-            ON CONFLICT (version) DO NOTHING`);
-          await client.query('COMMIT');
+          await lockedTransaction(client, async () => {
+            await client.query('SET LOCAL search_path TO control, public');
+            await client.query("SET LOCAL lock_timeout TO '2s'");
+            await client.query(deeplBudgetSchema);
+            await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (27,CURRENT_TIMESTAMP::text)
+              ON CONFLICT (version) DO NOTHING`);
+          });
+        }
+        if (Number(versions.control_version) < 28) {
+          await lockedTransaction(client, async () => {
+            await client.query("SET LOCAL lock_timeout TO '2s'");
+            await client.query(`ALTER TABLE control.translation_routes DROP CONSTRAINT IF EXISTS translation_routes_provider_check;
+              ALTER TABLE control.translation_routes ADD CONSTRAINT translation_routes_provider_check
+              CHECK (provider IN ('openai-compatible','deepl','youdao','google','index-translate'))`);
+            await client.query(`INSERT INTO control.control_migrations(version,applied_at) VALUES (28,CURRENT_TIMESTAMP::text)
+              ON CONFLICT (version) DO NOTHING`);
+          });
         }
         return;
       }

@@ -104,6 +104,34 @@ const uniquePlaces = (values: Array<string | undefined>): string[] => {
   });
 };
 
+const chineseDigits: Record<string, number> = { 〇: 0, 零: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const chineseNumber = (value: string): number | undefined => {
+  if (/^\d+$/u.test(value)) return Number(value);
+  const match = /^([一二兩三四五六七八九])?(十)?([〇零一二兩三四五六七八九])?$/u.exec(value);
+  if (!match || !value) return undefined;
+  const [, tens, ten, ones] = match;
+  if (!ten) return tens && ones ? undefined : chineseDigits[tens || ones];
+  return (tens ? chineseDigits[tens] : 1) * 10 + (ones ? chineseDigits[ones] : 0);
+};
+
+// Taiwanese house numbers in Chunghwa Post English: 34號 with unit 之1 is "No. 34-1", 四樓之2 is "4F.-2", 地下一樓 is
+// "B1F.", a bare room number is "Rm. 5". Returns undefined when the native parts follow no such pattern.
+export const taiwanEnglishPremise = (houseNumber: string, unit: string): { houseNumber: string; unit: string } | undefined => {
+  const house = /^(\d+)(?:之(\d+))?號?(?:之(\d+))?$/u.exec(houseNumber.trim());
+  if (!house) return houseNumber.trim() ? undefined : { houseNumber: '', unit: '' };
+  let sub = house[2] || house[3] || '';
+  let room = '';
+  const rest = unit.trim();
+  const subUnit = /^之(\d+)號?$/u.exec(rest);
+  const floor = /^(地下)?(\S+?)樓(?:之(\d+))?$/u.exec(rest);
+  if (subUnit && !sub) sub = subUnit[1];
+  else if (/^\d+$/u.test(rest)) room = `Rm. ${rest}`;
+  else if (floor && chineseNumber(floor[2]) !== undefined) {
+    room = `${floor[1] ? 'B' : ''}${chineseNumber(floor[2])}F.${floor[3] ? `-${floor[3]}` : ''}`;
+  } else if (rest) return undefined;
+  return { houseNumber: `No. ${house[1]}${sub ? `-${sub}` : ''}`, unit: room };
+};
+
 const chinaEnglishHouseNumber = (value: string): string =>
   value.replace(/(?:号|號|弄)$/u, '');
 

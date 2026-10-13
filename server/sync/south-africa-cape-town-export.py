@@ -69,8 +69,13 @@ def load_postcodes(path):
     return values
 
 
+# The national table repeats suburb names (Sandown in Sandton, Windermere in Durban); only City of Cape Town postcodes
+# (7000-8099) can belong to a Cape Town parcel.
+CAPE_TOWN_POSTCODE = re.compile(r"7\d{3}|80\d{2}")
+
+
 def resolve_postcode(postcodes, suburb):
-    matches = postcodes.get(key(suburb), set())
+    matches = {match for match in postcodes.get(key(suburb), set()) if CAPE_TOWN_POSTCODE.fullmatch(match[1])}
     return next(iter(matches)) if len(matches) == 1 else None
 
 

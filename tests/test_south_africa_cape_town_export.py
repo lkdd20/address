@@ -18,6 +18,9 @@ class SouthAfricaCapeTownExportTest(unittest.TestCase):
             '"KOMMETJIE","7975","FISH HOEK"\n'
             '"DUPLICATE","1111","TOWN A"\n'
             '"DUPLICATE","2222","TOWN B"\n'
+            '"SANDOWN","2196","SANDTON"\n'
+            '"WINDERMERE","4001","DURBAN"\n'
+            '"WINDERMERE","7405","MAITLAND"\n'
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False) as source:
             source.write(content)
@@ -27,6 +30,8 @@ class SouthAfricaCapeTownExportTest(unittest.TestCase):
             self.assertEqual(MODULE.resolve_postcode(postcodes, "Kommetjie"), ("FISH HOEK", "7975"))
             self.assertIsNone(MODULE.resolve_postcode(postcodes, "Duplicate"))
             self.assertIsNone(MODULE.resolve_postcode(postcodes, "Missing"))
+            self.assertIsNone(MODULE.resolve_postcode(postcodes, "Sandown"))
+            self.assertEqual(MODULE.resolve_postcode(postcodes, "Windermere"), ("MAITLAND", "7405"))
         finally:
             pathlib.Path(path).unlink(missing_ok=True)
 

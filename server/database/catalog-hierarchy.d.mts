@@ -7,5 +7,6 @@ export interface CatalogRegionIdentity {
   parent_id?: number | null;
 }
 
-export function correctSpanishProvinceParents<T extends CatalogRegionIdentity>(regions: T[]): T[];
+export function correctRegionParents<T extends CatalogRegionIdentity>(regions: T[]): T[];
+export const catalogCityRegions: Record<string, Map<number, string>>;
 export function catalogHierarchyPaths(regions: CatalogRegionIdentity[]): Map<number, string>;

@@ -10,6 +10,15 @@ const ownerPid = (name) => {
   const match = name.match(/\.(\d+)\.tmp(?:\.|$)/u);
   return match ? Number.parseInt(match[1], 10) : null;
 };
+// A pid-named artifact belongs to its writer while that process lives; startup repairs write them outside any job.
+const processAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+};
 const cacheArtifact = (root, target) => {
   const parts = relative(root, target).split(/[\\/]/u);
   if (parts[0] === 'normalized') return parts[1] !== 'duckdb-home';
@@ -26,6 +35,7 @@ export const createSyncArtifactCleanup = ({
   staleMs = 6 * 60 * 60_000,
   intervalMs = 15 * 60_000,
   retainRaw = false,
+  isProcessAlive = processAlive,
   log = console
 }) => {
   const root = resolve(cacheDir);
@@ -46,6 +56,7 @@ export const createSyncArtifactCleanup = ({
           const metadata = await stat(target).catch(() => null);
           const expired = metadata && now() - metadata.mtimeMs >= staleMs;
           const pid = ownerPid(entry.name);
+          if (pid && isProcessAlive(pid)) continue;
           const removable = pid ? true : expired;
           if (removable && temporaryDirectory(entry.name, retainRaw)) {
             if (isBusy()) return;
@@ -61,7 +72,7 @@ export const createSyncArtifactCleanup = ({
         if (!metadata) continue;
         const pid = ownerPid(entry.name);
         const expired = now() - metadata.mtimeMs >= staleMs;
-        const removable = temporaryFile(entry.name) ? (pid ? true : expired) : expired && cacheArtifact(root, target);
+        const removable = temporaryFile(entry.name) ? (pid ? !isProcessAlive(pid) : expired) : expired && cacheArtifact(root, target);
         if (!removable) continue;
         if (isBusy()) return;
         await rm(target, { force: true });

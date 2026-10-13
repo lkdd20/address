@@ -1265,7 +1265,7 @@ describe('address source shard catalog', () => {
     const discovery = await adapters.discover(shard);
     expect(discovery).toMatchObject({
       adapter: 'cape-town-residential',
-      version: '2026-07-27-2026-07-31-official-parcel-zoning-postcode-v1',
+      version: '2026-07-27-2026-07-31-official-parcel-zoning-postcode-v2',
       postalBytes: 6,
       residentialBuildingAvailable: true
     });

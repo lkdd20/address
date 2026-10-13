@@ -12,6 +12,7 @@ const RADIANS = Math.PI / 180;
 const GRID_DEGREES = 1;
 
 import { pinyin } from 'pinyin-pro';
+import { mixedLevelCountries } from './administrative-names.mjs';
 
 // GeoNames Chinese alternate names are machine-sourced and occasionally garbage
 // (e.g. 痴汉 for Chikan 赤坎). A native_name is trusted only when its pinyin
@@ -93,8 +94,9 @@ const spatialIndex = (entries) => {
 };
 
 export class CatalogReverseGeocoder {
-  constructor(countryCode, regions, cities) {
+  constructor(countryCode, regions, cities, postcodes = []) {
     this.countryCode = countryCode;
+    this.postcodes = postcodes;
     this.anchorConfig = ANCHOR_CONFIG[countryCode] || null;
     const cityTierTypes = this.anchorConfig?.cityTypes
       ? new Set(this.anchorConfig.cityTypes)
@@ -140,12 +142,15 @@ export class CatalogReverseGeocoder {
   static async load(database, countryCode) {
     if (!database) return new CatalogReverseGeocoder(countryCode, [], []);
     try {
-      const regions = (await database.prepare(`SELECT id, code, name, native_name, zh_name, type, latitude, longitude
+      const regions = (await database.prepare(`SELECT id, parent_id, code, name, native_name, zh_name, type, latitude, longitude
         FROM catalog_regions WHERE country_code = ?`).bind(countryCode).all()).results || [];
       const cities = (await database.prepare(`SELECT name, native_name, zh_name, region_id, type, latitude, longitude
         FROM catalog_cities WHERE country_code = ? AND latitude IS NOT NULL AND longitude IS NOT NULL`)
         .bind(countryCode).all()).results || [];
-      return new CatalogReverseGeocoder(countryCode, regions, cities);
+      // Mixed-level countries choose an address's province from its catalog postcode.
+      const postcodes = mixedLevelCountries.has(countryCode) ? (await database.prepare(`SELECT region_id,code FROM catalog_postcodes
+        WHERE country_code=? AND region_id IS NOT NULL`).bind(countryCode).all()).results || [] : [];
+      return new CatalogReverseGeocoder(countryCode, regions, cities, postcodes);
     } catch {
       return new CatalogReverseGeocoder(countryCode, [], []);
     }

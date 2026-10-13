@@ -344,7 +344,11 @@ try {
   assert.equal(await translationPanel.getByRole('switch', { name: '启用谷歌翻译', exact: true }).count(), 1);
   assert.equal(await translationPanel.locator('input[name=googleTranslationEnabled]').count(), 0);
   await translationPanel.getByText('未配置', { exact: true }).first().waitFor();
-  assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 0);
+  assert.equal(await translationPanel.locator('.translation-provider:not(.index-translate-provider)').getByRole('button', { name: '测试', exact: true }).count(), 0);
+  const indexTranslate = translationPanel.locator('.index-translate-provider');
+  assert.equal(await indexTranslate.getByRole('switch', { name: '启用 Index-Translate', exact: true }).getAttribute('aria-checked'), 'false');
+  assert.equal(await indexTranslate.locator('input[name=indexTranslateBaseUrl]').inputValue(), 'https://index-translate.bilibili.com/v1');
+  assert.equal(await indexTranslate.getByRole('button', { name: '测试', exact: true }).count(), 1);
   const originalViewport = page.viewportSize();
   const translationConsoleErrors = [];
   const onTranslationConsole = (message) => { if (message.type() === 'error') translationConsoleErrors.push(message.text()); };
@@ -360,7 +364,7 @@ try {
       const settings = page.locator('.translation-settings');
       await settings.getByText(fee).waitFor();
       await settings.getByText(/Cloud Translation/u).waitFor();
-      const addButton = settings.locator('.translation-provider:not(.deepl-provider):not(.openai-provider) .translation-provider-header button');
+      const addButton = settings.locator('.translation-provider:not(.deepl-provider):not(.openai-provider):not(.index-translate-provider) .translation-provider-header button');
       await addButton.click();
       const dialog = page.getByRole('dialog');
       await dialog.getByText(fee).waitFor();
@@ -438,7 +442,7 @@ try {
   await page.locator('.admin-notice').filter({ hasText: '有道翻译密钥已保存' }).waitFor();
   await translationPanel.getByText('2 个密钥', { exact: true }).waitFor();
   assert.equal(await translationPanel.locator('.provider-key-row').count(), 2);
-  assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 2);
+  assert.equal(await translationPanel.locator('.provider-key-row').getByRole('button', { name: '测试', exact: true }).count(), 2);
   assert.equal((await page.locator('body').textContent()).includes('e2e-youdao-app-secret'), false);
   const youdaoPrimary = translationPanel.locator('.provider-key-row').filter({ hasText: 'e2e-youdao-primary' });
   const youdaoAppKey = youdaoPrimary.locator('.provider-key-secret').filter({ hasText: '应用 ID（AppKey）' });

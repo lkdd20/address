@@ -1,11 +1,16 @@
 import { hongKongDistricts, hongKongRegions } from '../../src/domain/hk-administrative-divisions.mjs';
-import { catalogHierarchyPaths, correctSpanishProvinceParents } from './catalog-hierarchy.mjs';
+import { catalogCityRegions, catalogHierarchyPaths, correctRegionParents } from './catalog-hierarchy.mjs';
 import type { PostgresDatabase } from './postgres.mjs';
 import { implausibleChineseTranslation } from '../../src/domain/address-localization.mjs';
 import { chinaCityNames, chinaCityRegionCode } from './china-catalog-corrections.mjs';
 import { catalogNativeCorrections } from './catalog-native-names.mjs';
 
 const chineseRegionCorrections = [{ countryCode: 'TR', code: '16', zh: '布尔萨' }];
+// Upstream gives Altai Krai the Altai Republic's names in every language, so neither can be selected by name.
+const regionNameCorrections = [
+  { countryCode: 'RU', code: 'AL', name: 'Altai Republic', native: 'Республика Алтай', zh: '阿尔泰共和国' },
+  { countryCode: 'RU', code: 'ALT', name: 'Altai Krai', native: 'Алтайский край', zh: '阿尔泰边疆区' }
+];
 // Upstream catalog Chinese names that are literal translations (Emerald → 翠) fall back to the source name, as for
 // entries without a translation, so address translation supplies the Chinese name instead.
 const repairChinaCatalog = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
@@ -31,6 +36,10 @@ const repairCatalogChineseNames = async (transaction: Pick<PostgresDatabase, 'pr
   for (const { countryCode, code, zh } of chineseRegionCorrections) {
     await transaction.prepare("UPDATE catalog_regions SET zh_name=? WHERE country_code=? AND code=? AND zh_name<>?")
       .bind(zh, countryCode, code, zh).run();
+  }
+  for (const { countryCode, code, name, native, zh } of regionNameCorrections) {
+    await transaction.prepare(`UPDATE catalog_regions SET name=?,native_name=?,zh_name=? WHERE country_code=? AND code=? AND parent_id IS NULL
+      AND (name<>? OR native_name<>? OR zh_name<>?)`).bind(name, native, zh, countryCode, code, name, native, zh).run();
   }
   for (const table of ['catalog_regions', 'catalog_cities']) {
     const rows = (await transaction.prepare(`SELECT id,name,native_name,zh_name FROM ${table}
@@ -110,17 +119,31 @@ export const applyAdministrativeCatalogOverrides = async (database: PostgresData
   const regionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
   let changed = false;
   await database.transaction(async (transaction) => {
-    const spanishRegions = (await transaction.prepare(`SELECT id,country_code,code,type,parent_id,path
-      FROM catalog_regions WHERE country_code='ES'`).all<{
-        id: number; country_code: string; code: string; type: string; parent_id: number | null; path: string;
-      }>()).results;
-    const corrected = correctSpanishProvinceParents(spanishRegions);
-    const paths = catalogHierarchyPaths(corrected);
-    const repairs = corrected.filter((region, index) => region.parent_id !== spanishRegions[index].parent_id
-      || paths.get(region.id) !== spanishRegions[index].path);
-    if (repairs.length) {
-      await transaction.batch(repairs.map((region) => transaction.prepare(`UPDATE catalog_regions
-        SET parent_id=?,path=? WHERE country_code='ES' AND id=?`).bind(region.parent_id, paths.get(region.id), region.id)));
+    for (const countryCode of ['ES', 'FR', 'IT', 'GB']) {
+      const regions = (await transaction.prepare(`SELECT id,country_code,code,type,parent_id,path
+        FROM catalog_regions WHERE country_code=?`).bind(countryCode).all<{
+          id: number; country_code: string; code: string; type: string; parent_id: number | null; path: string;
+        }>()).results;
+      const corrected = correctRegionParents(regions);
+      if (corrected.every((region, index) => region === regions[index]) && countryCode !== 'ES') continue;
+      const paths = catalogHierarchyPaths(corrected);
+      const repairs = corrected.filter((region, index) => region.parent_id !== regions[index].parent_id
+        || paths.get(region.id) !== regions[index].path);
+      if (repairs.length) {
+        await transaction.batch(repairs.map((region) => transaction.prepare(`UPDATE catalog_regions
+          SET parent_id=?,path=? WHERE country_code=? AND id=?`).bind(region.parent_id, paths.get(region.id), countryCode, region.id)));
+        changed = true;
+      }
+    }
+    for (const [countryCode, cities] of Object.entries(catalogCityRegions)) {
+      const regionIds = new Map(((await transaction.prepare('SELECT id,code FROM catalog_regions WHERE country_code=?')
+        .bind(countryCode).all<{ id: number; code: string }>()).results || []).map((region) => [region.code, Number(region.id)]));
+      const current = new Map(((await transaction.prepare('SELECT id,region_id FROM catalog_cities WHERE country_code=?')
+        .bind(countryCode).all<{ id: number; region_id: number | null }>()).results || []).map((city) => [Number(city.id), city.region_id]));
+      const moves = [...cities].filter(([id, code]) => current.has(id) && regionIds.has(code) && current.get(id) !== regionIds.get(code));
+      if (!moves.length) continue;
+      await transaction.batch(moves.map(([id, code]) => transaction.prepare('UPDATE catalog_cities SET region_id=? WHERE country_code=? AND id=?')
+        .bind(regionIds.get(code), countryCode, id)));
       changed = true;
     }
     const cleanup = await transaction.prepare(`UPDATE address_pool SET

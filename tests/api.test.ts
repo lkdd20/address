@@ -188,6 +188,29 @@ describe('synchronized address registry', () => {
     }
   });
 
+  it('lists both regions that share an English name under their native names', async () => {
+    const database = openTestDatabase(':memory:');
+    try {
+      await database.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (911,'RU','MOW','Moscow','Москва','莫斯科','city',NULL,'/911'),
+          (912,'RU','MOS','Moscow','Московская область','莫斯科州','oblast',NULL,'/912');
+        INSERT INTO address_pool(id,country_code,street,latitude,longitude,native_language,
+          component_variants_json,address_variants_json,quality_score,generation,coverage,random_key,first_seen_at,last_seen_at)
+        VALUES ('moscow-city','RU','Тверская улица',55.76,37.6,'ru','{}','{}',.95,'fixture','fixture',1,'2026-01-01','2026-01-01'),
+          ('moscow-oblast','RU','Советская улица',55.9,37.8,'ru','{}','{}',.95,'fixture','fixture',2,'2026-01-01','2026-01-01');
+        INSERT INTO address_generation_index(address_id,country_code,admin1_key,admin1_code_key,residential_ready,random_key,updated_at)
+        VALUES ('moscow-city','RU','москва','mow',1,1,'2026-01-01'),('moscow-oblast','RU','московская область','mos',1,2,'2026-01-01');`);
+      const response = await app.request('/api/v1/locations/hierarchy?country=RU&parentType=country&childType=region', {}, {
+        ALLOWED_ORIGIN: '*', LOCATION_DB: database
+      });
+      const payload = await response.json() as { data: { children: LocationOption[] } };
+      expect(payload.data.children.map(({ id, value }) => [id, value]).sort())
+        .toEqual([['911', 'Москва'], ['912', 'Московская область']]);
+    } finally {
+      database.close();
+    }
+  });
+
   it('returns not found for an address ID outside the published synchronized pool', async () => {
     const response = await app.request('/api/v1/addresses/pool-v2-missing', {}, { ALLOWED_ORIGIN: '*' });
     expect(response.status).toBe(404);

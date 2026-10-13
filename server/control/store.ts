@@ -40,7 +40,7 @@ export interface CredentialInput {
   apiKey?: string; baseUrl?: string; model?: string; reasoningEffort?: string; maxTokens?: number;
   translationPriority?: number; translationPrompt?: string;
 }
-export type TranslationRouteProvider = 'openai-compatible' | 'deepl' | 'youdao' | 'google';
+export type TranslationRouteProvider = 'openai-compatible' | 'deepl' | 'youdao' | 'index-translate' | 'google';
 export interface TranslationRoute {
   id: string; provider: TranslationRouteProvider; credentialId: string | null; label: string;
   priority: number; enabled: boolean; prompt: string; status: string; model: string; baseUrl: string;
@@ -392,7 +392,7 @@ const translationRouteFromRow = (row: Record<string, unknown>, masterKey: Buffer
     label: row.credential_id ? String(row.credential_label || row.route_id) : provider,
     priority: Number(row.route_priority), enabled: Boolean(row.route_enabled)
       && (row.credential_id ? Boolean(row.credential_enabled) : true), prompt: String(row.prompt || ''),
-    status: translationRouteStatus(String(row.credential_status || (provider === 'google' ? 'healthy' : 'unconfigured')),
+    status: translationRouteStatus(String(row.credential_status || (['google', 'index-translate'].includes(provider) ? 'healthy' : 'unconfigured')),
       row.cooldown_until ? String(row.cooldown_until) : null),
     model: config?.model || '', baseUrl: config?.baseUrl || '',
     reasoningEffort: config?.reasoningEffort || '', maxTokens: config?.maxTokens || null,
@@ -487,7 +487,7 @@ export class ControlStore {
           MAX(1) AS has_any
         FROM provider_credentials WHERE provider IN ('deepl','youdao') GROUP BY provider
       ) logical_state ON logical_state.provider=route.provider
-      WHERE route.credential_id IS NOT NULL OR route.provider='google'
+      WHERE route.credential_id IS NOT NULL OR route.provider IN ('google','index-translate')
       ORDER BY route.priority,route.id`).all<Record<string, unknown>>()).results;
     return rows.map((row) => translationRouteFromRow(row, this.masterKey));
   }

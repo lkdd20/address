@@ -1,9 +1,10 @@
 import { applyHierarchicalQuota } from './address-policy.mjs';
-import { addressCanonicalKey, splitConcatenatedLocality, validateAddressQuality, streetAddressKey } from '../../src/domain/address-quality.mjs';
+import { addressCanonicalKey, localityIssue, splitConcatenatedLocality, validateAddressQuality, streetAddressKey } from '../../src/domain/address-quality.mjs';
 import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
 import { correctedRegion, regionCorrectionCountries } from './region-boundaries.mjs';
+import { administrativeNameCountries, createAdministrativeNames, mixedLevelCountries } from './administrative-names.mjs';
 import { semanticAddressFields, usableAddressTranslation } from '../../src/domain/address-localization.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
@@ -77,11 +78,36 @@ const softLocalityFixes = {
   RU: { demote: /район|поселение|сельсовет|городской округ/iu, replaceWith: 'anchor' }
 };
 
+// A city field holding a region code, a number or a postcode is cleared so the catalog or boundary fill can name the city.
+const clearInvalidLocality = (record, countryCode) => {
+  const { components } = record;
+  for (const field of ['locality', 'postalLocality']) {
+    if (!localityIssue(countryCode, { admin1: components.admin1, admin1Code: components.admin1Code, locality: components[field] })) continue;
+    components[field] = '';
+    record[field] = '';
+  }
+};
+// Catalog names replace machine translations of regions and cities, and the admin1 text corrects its code.
+const administrativeNamesOf = (geocoder, countryCode) => geocoder.administrativeNames ||= createAdministrativeNames(countryCode,
+  [...geocoder.regionsById.values()], geocoder.cities || [], geocoder.postcodes || []);
+const applyAdministrativeNames = (record, geocoder, countryCode) => {
+  if (!administrativeNameCountries(countryCode) || !geocoder?.regionsById?.size) return false;
+  const { native, en, 'zh-CN': zh } = administrativeNamesOf(geocoder, countryCode)
+    .names(record.components, { en: {}, 'zh-CN': countryCode === 'JP' ? record.components : {} });
+  Object.assign(record.components, native);
+  if (native.admin1 !== undefined) record.admin1 = native.admin1;
+  if (native.admin1Code !== undefined) record.admin1Code = native.admin1Code;
+  record.englishComponentHints = { ...(record.englishComponentHints || {}), ...en };
+  record.chineseComponentHints = { ...(record.chineseComponentHints || {}), ...zh };
+  return Object.keys(native).length > 0;
+};
+
 // Fills empty admin fields via catalog reverse-geocoding, then enforces the
 // country's minimum administrative completeness. Returns false to drop the record.
 const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddress) => {
   const components = record.components;
   const streetLevel = record.matchLevel === 'street';
+  if (countryCode !== 'CN') clearInvalidLocality(record, countryCode);
   if (countryCode !== 'CN' && ['locality', 'postalLocality'].some((field) => /[,，;]/u.test(String(components[field] || '')))) {
     Object.assign(components, splitConcatenatedLocality(countryCode, components, (value) => Boolean(geocoder?.isKnownCity?.(value))));
     record.locality = components.locality || '';
@@ -152,7 +178,10 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   // Region polygons: a point outside every first-level region is not in the country; a conflicting or unknown source
   // region is replaced by the region that contains the point.
   if (record.administrativeRegion?.outside) return false;
-  const region = correctedRegion(countryCode, components, record.administrativeRegion, [...(geocoder?.regionsById?.values() || [])]);
+  const region = correctedRegion(countryCode, components, record.administrativeRegion, [...(geocoder?.regionsById?.values() || [])])
+    || (mixedLevelCountries.has(countryCode) && geocoder?.regionsById?.size ? administrativeNamesOf(geocoder, countryCode)
+      .regionInBoundary(components, record.administrativeRegion, { postcode: components.postcode, latitude: record.latitude, longitude: record.longitude })
+      : null);
   if (region) {
     components.admin1 = region.admin1;
     components.admin1Code = region.admin1Code;
@@ -235,20 +264,26 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   }
   if (requiresAdminCode(countryCode) && !String(components.admin1Code || '').trim()) {
     if (countryCode === 'US') components.admin1Code = canonicalUsSubdivisionCode(components.admin1 || '');
-    if (!components.admin1Code && streetLevel && geocoder?.regionsById) {
+    // Italian codes are province siglas below the named region, so only a street-level region name is matched there.
+    const provinceCode = countryCode === 'IT';
+    if (!components.admin1Code && components.admin1 && (!provinceCode || streetLevel) && geocoder?.regionsById) {
       const names = admin1Variants(components.admin1);
       const regions = [...geocoder.regionsById.values()].filter((region) =>
         [region.code, region.name, region.native_name].some((value) =>
           admin1Variants(value).some((key) => names.includes(key))));
       if (regions.length === 1) components.admin1Code = regions[0].code || '';
     }
-    if (!components.admin1Code && !streetLevel && geocoder?.nearestRegion) {
+    // Coordinates decide the code only when the source names no region.
+    if (!components.admin1Code && (!components.admin1 || provinceCode) && !streetLevel && geocoder?.nearestRegion) {
       const region = geocoder.nearestRegion(Number(record.latitude), Number(record.longitude), 10);
       if (region?.code) components.admin1Code = region.code;
     }
     record.admin1Code = components.admin1Code || '';
   }
   if (applyAdministrativeBoundary(record) && rebuildFormattedAddress) {
+    record.formattedAddress = rebuildFormattedAddress(components, countryCode);
+  }
+  if (applyAdministrativeNames(record, geocoder, countryCode) && rebuildFormattedAddress) {
     record.formattedAddress = rebuildFormattedAddress(components, countryCode);
   }
   const policy = requiredAdminFields[countryCode] || { region: false, city: false };

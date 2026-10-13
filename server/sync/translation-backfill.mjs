@@ -10,9 +10,11 @@ import { refreshCountryCounts } from '../database/published-pool.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
 import { administrativeAssignmentJoin, projectAdministrativeRow, refreshAdministrativeAssignments } from '../database/administrative-assignments.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from './translation-providers.mjs';
+import { administrativeNameCountries, loadAdministrativeNames } from './administrative-names.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
 
 const clean = (value) => String(value ?? '').trim();
+const placeFields = new Set(['admin1', 'locality', 'postalLocality', 'district', 'dependentLocality']);
 const integer = (value, fallback, max) => Math.min(max, Math.max(1, Number.parseInt(value, 10) || fallback));
 const fingerprint = (row) => createHash('sha256').update(JSON.stringify([
   'semantic-recovery-v1', row.component_variants_json, row.address_variants_json, row.generation,
@@ -22,7 +24,11 @@ const fingerprint = (row) => createHash('sha256').update(JSON.stringify([
   ...(row.administrative_patch_json && row.administrative_patch_json !== '{}' ? [row.administrative_patch_json] : [])
 ])).digest('hex');
 const parse = (value) => { try { return JSON.parse(value) || {}; } catch { return {}; } };
-const eligibleRetirement = (row) => row.active === 1 || String(row.retired_at || '').startsWith('publication-validation:');
+// The structure and administrative-names repairs retire rows by region polygons the publication check cannot see; only
+// their own next revision may restore those rows.
+const repairRetirement = /^publication-validation:(?:address-structure|administrative-names)-/u;
+const eligibleRetirement = (row) => row.active === 1
+  || String(row.retired_at || '').startsWith('publication-validation:') && !repairRetirement.test(String(row.retired_at));
 function* recoveryCandidates(groups, first) {
   for (let index = 0; index < Math.max(...groups.map((group) => group.length)); index++) {
     for (let lane = 0; lane < groups.length; lane++) {
@@ -45,9 +51,10 @@ export const pendingTranslationFields = (variants, nativeLanguage, row) => Objec
     const original = clean(variants.native?.[field]);
     if (!original) return false;
     const value = clean(variants[language]?.[field]);
+    // An untranslated Chinese place name stays pending; English-language streets may publish with their English name.
     return !usableTranslation(value, language, original) || !safeTranslatedField(row, field, value)
-      || language === 'zh-CN' && !String(nativeLanguage).startsWith('zh')
-        && !String(nativeLanguage).startsWith('en') && value === original && /\p{L}/u.test(original);
+      || language === 'zh-CN' && !String(nativeLanguage).startsWith('zh') && value === original && /\p{L}/u.test(original)
+        && (!String(nativeLanguage).startsWith('en') || placeFields.has(field));
   })
 ]));
 
@@ -84,37 +91,14 @@ const saveState = (database, row, revision, status, attempts, retryAt, reason, n
     next_attempt_at=excluded.next_attempt_at,reason=excluded.reason,updated_at=excluded.updated_at,diagnostics_json=excluded.diagnostics_json`)
   .bind(row.id, fingerprint(row), stateRevision(revision, status, reason), status, attempts, retryAt, reason, now.toISOString(), JSON.stringify(diagnostics)).run();
 
-const placeKey = (value) => clean(value).normalize('NFKC').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]/gu, '');
-const uniquePlace = (rows, value, code = false) => {
-  if (!clean(value)) return null;
-  const matches = rows.filter((row) => [row.name, row.native_name, row.zh_name, ...(code ? [row.code] : [])]
-    .some((name) => placeKey(name) === placeKey(value)));
-  return matches.length === 1 ? matches[0] : null;
-};
+// Catalog region and city names replace machine translations; regions resolve from the admin1 text, not the code.
 const canonicalTranslations = async (database, row, variants, catalogs) => {
-  if (!catalogs.has(row.country_code)) {
-    const regions = (await database.prepare('SELECT id,code,name,native_name,zh_name,path FROM catalog_regions WHERE country_code=?').bind(row.country_code).all()).results;
-    const cities = (await database.prepare('SELECT id,region_id,name,native_name,zh_name FROM catalog_cities WHERE country_code=?').bind(row.country_code).all()).results;
-    const citiesByName = new Map();
-    for (const city of cities) for (const name of new Set([city.name, city.native_name, city.zh_name].map(placeKey).filter(Boolean))) {
-      const matches = citiesByName.get(name) || [];
-      matches.push(city);
-      citiesByName.set(name, matches);
-    }
-    catalogs.set(row.country_code, { regions, citiesByName, regionsById: new Map(regions.map((region) => [region.id, region])) });
-  }
-  const { regions, citiesByName, regionsById } = catalogs.get(row.country_code);
-  const source = variants.native;
-  const region = uniquePlace(regions, source.admin1Code || source.admin1, true);
-  const matches = (citiesByName.get(placeKey(source.locality)) || []).filter((city) => !region
-    || city.region_id === region.id || regionsById.get(city.region_id)?.path?.startsWith(region.path));
-  const city = !region && (source.admin1 || source.admin1Code) || matches.length !== 1 ? null : matches[0];
-  for (const [field, identity] of [['admin1', region], ['locality', city],
-    ['postalLocality', placeKey(source.postalLocality) === placeKey(source.locality) ? city : null]]) {
-    if (!identity || !source[field]) continue;
-    for (const language of ['en', 'zh-CN']) {
-      const name = language === 'en' ? identity.name : identity.zh_name;
-      if (!usableTranslation(variants[language][field], language, source[field]) && usableTranslation(name, language, source[field])) variants[language][field] = name;
+  if (!administrativeNameCountries(row.country_code)) return;
+  if (!catalogs.has(row.country_code)) catalogs.set(row.country_code, await loadAdministrativeNames(database, row.country_code));
+  const corrections = catalogs.get(row.country_code).names(variants.native, variants);
+  for (const language of ['en', 'zh-CN']) {
+    for (const [field, name] of Object.entries(corrections[language])) {
+      if (clean(variants.native?.[field]) && usableTranslation(name, language, variants.native[field])) variants[language][field] = name;
     }
   }
 };

@@ -49,28 +49,83 @@ if (!registryResponse.ok) throw new Error(`/countries: ${registryPayload.error?.
 const eligibleCounts = new Map((registryPayload.data || []).filter((country) => country.generationMode === 'synchronized-pool'
   && Number(country.addressCount) > 0)
   .map((country) => [country.code, Number(country.addressCount)]));
-const fetchBatch = async (code, batch, count) => {
+const fetchBatch = async (code, batch, count, region = '') => {
   let lastError;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+  // A busy generator answers 429 while sync or a pool audit loads the database; the audit waits rather than failing.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       const response = await fetch(`${base}/generate/batch`, {
         method: 'POST', headers, signal: AbortSignal.timeout(30_000),
-        body: JSON.stringify({ count, filters: { country: code }, options: { unique: false, seed: `contract-audit-${code}-${batch}` } })
+        body: JSON.stringify({ count, filters: { country: code, ...(region ? { region } : {}) },
+          options: { unique: false, seed: `contract-audit-${code}-${region || 'all'}-${batch}` } })
       });
       const payload = await response.json();
       if (response.ok || (response.status < 500 && response.status !== 429)) return { response, payload };
       lastError = new Error(`http_${response.status}`);
       const retryAfter = Number.parseInt(response.headers.get('Retry-After') || '', 10);
       if (response.status === 429 && Number.isFinite(retryAfter)) {
-        await wait(Math.max(1, Math.min(30, retryAfter)) * 1000);
+        await wait(Math.min(60, Math.max(retryAfter, 2 ** Math.min(attempt, 5))) * 1000);
         continue;
       }
     } catch (error) {
       lastError = error;
     }
-    await wait(500 * 2 ** attempt);
+    await wait(Math.min(60_000, 500 * 2 ** attempt));
   }
   throw lastError;
+};
+
+// First-level regions with their catalog names, used to sample every region and to check region codes and names.
+const fold = (value) => String(value ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
+const regionCatalog = async (code) => {
+  const regions = [];
+  for (let cursor = ''; ;) {
+    const query = new URLSearchParams({ country: code, childType: 'region', limit: '100', ...(cursor ? { cursor } : {}) });
+    const response = await fetch(`${base}/locations/hierarchy?${query}`, { headers, signal: AbortSignal.timeout(60_000) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return regions;
+    regions.push(...(payload.data?.children || []));
+    cursor = payload.data?.nextCursor || '';
+    if (!cursor) return regions;
+  }
+};
+const regionIndex = (regions) => {
+  const byName = new Map();
+  for (const region of regions) {
+    for (const name of new Set([region.native, region.en, region.value, region.regionCode].map(fold).filter(Boolean))) {
+      byName.set(name, byName.has(name) ? null : region);
+    }
+  }
+  return (admin1) => byName.get(fold(admin1)) || null;
+};
+// Italian admin1Code is the province sigla below the named region; US territories are outside the state catalog.
+const provinceCodeCountries = new Set(['IT']);
+const usTerritoryCodes = new Set(['PR', 'VI', 'GU', 'AS', 'MP']);
+const regionIssues = (code, address, regionFor) => {
+  const issues = [];
+  const native = address.componentVariants?.native || {};
+  const zh = address.componentVariants?.['zh-CN'] || {};
+  const admin1 = String(native.admin1 || '').trim();
+  if (!admin1 || !regionFor) return issues;
+  const region = regionFor(admin1);
+  if (!region) {
+    // The API lists first-level regions only; an Italian province is checked by its sigla here and against the full
+    // catalog by the pool audit.
+    const province = provinceCodeCountries.has(code) && /^[A-Z]{2}$/u.test(String(native.admin1Code || ''));
+    if (adminCodes.has(code) && !province && !(code === 'US' && usTerritoryCodes.has(admin1.toUpperCase()))) issues.push('region_outside_catalog');
+    return issues;
+  }
+  if (adminCodes.has(code) && !provinceCodeCountries.has(code) && region.regionCode
+    && String(native.admin1Code || '').toUpperCase() !== String(region.regionCode).toUpperCase()) issues.push('region_code_conflict');
+  if (/\p{Script=Han}/u.test(region.zhCN || '') && zh.admin1 !== region.zhCN) issues.push('zh_region_mismatch');
+  return issues;
+};
+// Untranslated Chinese place names are reported but do not fail the audit while the translation queue catches up.
+const warningIssues = new Set(['zh_place_untranslated']);
+const placeWarnings = (address) => {
+  const zh = address.componentVariants?.['zh-CN'] || {};
+  return ['admin1', 'locality'].some((field) => zh[field] && /\p{L}/u.test(zh[field]) && !/\p{Script=Han}/u.test(zh[field]))
+    ? ['zh_place_untranslated'] : [];
 };
 
 const issueFor = (code, address) => {
@@ -127,51 +182,64 @@ const result = {};
 for (const code of codes) {
   const eligibleCount = eligibleCounts.get(code);
   if (!eligibleCount) { result[code] = { skipped: true, reason: 'no published pool' }; continue; }
+  const regions = (await regionCatalog(code)).filter((region) => Number(region.availableCount) > 0 && !region.disabled);
+  const regionFor = regions.length ? regionIndex(regions) : null;
+  // Every region is sampled first so small regions and territories are seen; the random part fills the rest.
+  const perRegion = Math.max(2, Math.min(10, Math.floor(samples / 2 / Math.max(1, regions.length))));
+  const tasks = [
+    ...regions.map((region, index) => ({ batch: index, count: perRegion, region: region.value, stratified: true })),
+    ...Array.from({ length: Math.ceil(samples / 50) }, (_, batch) => ({ batch, count: Math.min(50, samples - batch * 50), region: '', stratified: false }))
+  ];
   const rows = [];
-  const batches = Math.ceil(samples / 50);
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, batches) }, async () => {
-    while (cursor < batches) {
-      const batch = cursor++;
-      const count = Math.min(50, samples - batch * 50);
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+    while (cursor < tasks.length) {
+      const task = tasks[cursor++];
       await wait(750);
-      const { response, payload } = await fetchBatch(code, batch, count);
+      const { response, payload } = await fetchBatch(code, task.batch, task.count, task.region);
       const bundles = payload.data?.results || [];
-      if (!response.ok || bundles.length !== count) {
-        for (let index = 0; index < count; index += 1) rows[batch * 50 + index] = { issues: [payload.error?.code || `http_${response.status}`] };
+      if (!response.ok || !bundles.length || (!task.stratified && bundles.length !== task.count)) {
+        for (let index = 0; index < task.count; index += 1) rows.push({ stratified: task.stratified, issues: [payload.error?.code || `http_${response.status}`] });
         continue;
       }
-      bundles.forEach(({ address, profile }, index) => {
-        const issues = issueFor(code, address);
+      for (const { address, profile } of bundles) {
+        const issues = [...issueFor(code, address), ...regionIssues(code, address, regionFor), ...placeWarnings(address)];
         const phone = parsePhoneNumberFromString(String(profile?.phone || ''));
         if (!phone?.isValid() || phone.country !== code) issues.push('invalid_mobile_number');
         if (code === 'GB' && /^7700900\d{3}$/u.test(phone?.nationalNumber || '')) issues.push('reserved_mobile_number');
-        rows[batch * 50 + index] = {
+        rows.push({
+          stratified: task.stratified,
           id: createHash('sha256').update(address.matchLevel === 'street'
             ? streetAddressKey(code, address.components) : String(address.id)).digest('hex'),
           matchLevel: address.matchLevel, admin1: address.components?.admin1 || '', locality: address.components?.locality || '',
           phone: phone?.number, issues
-        };
-      });
+        });
+      }
     }
   });
   await Promise.all(workers);
   const issueCounts = {};
+  const warningCounts = {};
   const issueExamples = {};
-  for (const row of rows) for (const issue of row.issues) issueCounts[issue] = (issueCounts[issue] || 0) + 1;
   for (const row of rows) for (const issue of row.issues) {
+    const counts = warningIssues.has(issue) ? warningCounts : issueCounts;
+    counts[issue] = (counts[issue] || 0) + 1;
     const examples = issueExamples[issue] ||= [];
     if (row.id && examples.length < 3) examples.push(row.id);
   }
-  const uniqueAddresses = new Set(rows.map(({ id }) => id).filter(Boolean)).size;
+  // Uniqueness is measured on the uniform random part only; stratified draws from small regions repeat by design.
+  const random = rows.filter((row) => !row.stratified);
+  const uniqueAddresses = new Set(random.map(({ id }) => id).filter(Boolean)).size;
   const expectedUniqueAddresses = eligibleCount * (1 - ((eligibleCount - 1) / eligibleCount) ** samples);
   const minimumUniqueAddresses = Math.max(1, Math.floor(expectedUniqueAddresses * minimumUniqueRatio));
   if (uniqueAddresses < minimumUniqueAddresses) issueCounts.low_unique_ratio = minimumUniqueAddresses - uniqueAddresses;
   const uniquePhones = new Set(rows.map(({ phone }) => phone).filter(Boolean)).size;
-  if (uniquePhones < samples * 0.99) issueCounts.low_phone_unique_ratio = samples - uniquePhones;
+  if (uniquePhones < rows.length * 0.99) issueCounts.low_phone_unique_ratio = rows.length - uniquePhones;
   result[code] = {
     requested: samples,
     returned: rows.length,
+    regionsSampled: regions.length,
+    stratifiedSamples: rows.length - random.length,
     eligibleCount,
     uniqueAddresses,
     uniquePhones,
@@ -183,6 +251,7 @@ for (const code of codes) {
     admin1Covered: new Set(rows.map(({ admin1 }) => admin1).filter(Boolean)).size,
     localitiesCovered: new Set(rows.map(({ locality }) => locality).filter(Boolean)).size,
     issueCounts,
+    ...(Object.keys(warningCounts).length ? { warningCounts } : {}),
     ...(Object.keys(issueExamples).length ? { issueExamples } : {})
   };
   process.stdout.write(`${code} ${JSON.stringify(result[code])}\n`);

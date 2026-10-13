@@ -1,5 +1,5 @@
 const scriptPatterns = {
-  han: /[⺀-⻿㐀-䶿一-鿿豈-﫿]/u,
+  han: /[⺀-⻿㐀-䶿一-鿿豈-﫿𠀀-𲎯丽-𯨟]/u,
   kana: /[぀-ヿㇰ-ㇿｦ-ﾝ]/u,
   hangul: /[ᄀ-ᇿ㄰-㆏가-힯]/u,
   thai: /[฀-๿]/u,
