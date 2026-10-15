@@ -68,6 +68,33 @@ export const refreshCountryCounts = async (database, countryCode, checkedAt, { u
   await database.batch(statements);
 };
 
+// What a set of addresses contributes to its country's generation index.
+export const generationIndexContribution = async (database, countryCode, addressIds) => {
+  const contribution = { total: 0, residential: 0 };
+  for (let offset = 0; offset < addressIds.length; offset += 500) {
+    const batch = addressIds.slice(offset, offset + 500);
+    const row = await database.prepare(`SELECT COUNT(*) AS total,COALESCE(SUM(residential_ready),0) AS residential
+      FROM address_generation_index WHERE country_code=? AND active=1 AND address_id IN (${batch.map(() => '?').join(',')})`)
+      .bind(countryCode, ...batch).first();
+    contribution.total += Number(row?.total || 0);
+    contribution.residential += Number(row?.residential || 0);
+  }
+  return contribution;
+};
+
+// Applies a batch's change to the published counts instead of recounting the country; a country without count rows is
+// recounted, and reconcilePublishedPoolProjections corrects any drift.
+export const adjustCountryCounts = async (database, countryCode, delta, checkedAt) => {
+  if (!delta.total && !delta.residential) return;
+  const state = await database.prepare(`UPDATE sync_country_state SET address_count=address_count+?,
+    residential_count=residential_count+?,updated_at=? WHERE country_code=?`)
+    .bind(delta.total, delta.residential, checkedAt, countryCode).run();
+  const coverage = countryCode === 'CN' ? 1 : (await database.prepare(`UPDATE admin_coverage_stats SET total_count=total_count+?,
+    residential_count=residential_count+?,ordinary_count=ordinary_count+?,updated_at=? WHERE node_key=? AND level=0`)
+    .bind(delta.total, delta.residential, delta.total - delta.residential, checkedAt, countryCode).run()).meta.changes;
+  if (!state.meta.changes || !coverage) await refreshCountryCounts(database, countryCode, checkedAt, { useGenerationIndex: true });
+};
+
 // Each country is reconciled on its own so one large country cannot push a whole-pool scan past the statement timeout.
 export const reconcilePublishedPoolProjections = async (database, checkedAt = new Date().toISOString()) => {
   const countries = (await database.prepare(`SELECT country_code FROM sync_country_policies

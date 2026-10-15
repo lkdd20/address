@@ -2,7 +2,8 @@ import { requiresAdminCode } from '../../src/domain/address-contracts.mjs';
 import { addressCanonicalKey, junkCharacters, localityIssue, validateAddressQuality } from '../../src/domain/address-quality.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
 import { formattedAddress, localizedFormattedAddress } from './address-etl.mjs';
-import { ADMINISTRATIVE_NAMES_REVISION, administrativeNameCountries, loadAdministrativeNames, mixedLevelCountries } from './administrative-names.mjs';
+import { administrativeNameCountries, administrativeNamesRevision, loadAdministrativeNames, mixedLevelCountries, postalRegionCodeCountries,
+  singaporeRegion } from './administrative-names.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
 import { regionBoundaryCountries, regionsForPoints } from './region-boundaries.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
@@ -50,7 +51,7 @@ const repairedLocality = (countryCode, native, row, geocoder) => {
   return { next, hints };
 };
 
-const scanColumns = `id,admin1,admin1_code,locality,postal_locality,district,postcode,latitude,longitude,generation,street,house_number,building_name,
+const scanColumns = `id,admin1,admin1_code,locality,postal_locality,district,postcode,latitude,longitude,generation,street,house_number,building_name,match_level,
   component_variants_json::jsonb->'en'->>'admin1' AS en_admin1,
   component_variants_json::jsonb->'en'->>'locality' AS en_locality,
   component_variants_json::jsonb->'en'->>'postalLocality' AS en_postal_locality,
@@ -83,6 +84,12 @@ export const administrativeNamesCandidate = (countryCode, names, row, boundary) 
       .some((value) => junkCharacters.test(String(value ?? '')))
     || bdnbDepartment(countryCode, row) !== null) return true;
   if (names.regionInBoundary?.(native, boundary, { postcode: row.postcode, latitude: row.latitude, longitude: row.longitude })) return true;
+  if (names.unrecognizedRegion?.(native, boundary, row)) return true;
+  if (administrativeNameCountries(countryCode) && !clean(row.admin1)) return true;
+  // Published rows the import gate would reject are never generated; they are repaired or retired.
+  if (validateAddressQuality({ countryCode, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level || 'premise',
+    components: { ...native, houseNumber: row.house_number, street: row.street, buildingName: row.building_name, district: row.district,
+      postcode: row.postcode } }).reasons.length) return true;
   const stored = current(row);
   const corrections = names.names(native, stored);
   if (Object.keys(corrections.native).length) return true;
@@ -95,7 +102,8 @@ export const administrativeNamesCandidate = (countryCode, names, row, boundary) 
 export const repairAdministrativeNames = async ({
   database, countryCode, cacheDir, pythonBin, regionLookup = regionsForPoints, now = () => new Date(), pageSize = 500, pauseMs = 200
 }) => {
-  const key = `${ADMINISTRATIVE_NAMES_REVISION}:${countryCode}`;
+  const revision = administrativeNamesRevision(countryCode);
+  const key = `${revision}:${countryCode}`;
   const summary = { countryCode, changed: 0, codes: 0, localities: 0, postcodes: 0, retired: 0, duplicates: 0, restored: 0 };
   if (countryCode === 'CN' || await database.prepare('SELECT value_json FROM translation_backfill_progress WHERE key=?')
     .bind(key).first('value_json')) return summary;
@@ -108,7 +116,8 @@ export const repairAdministrativeNames = async ({
   // Chinese-script and city-state countries keep their own names; only the city gate applies to them.
   const names = administrativeNameCountries(countryCode)
     ? await loadAdministrativeNames(database, countryCode, { withPostcodes: mixedLevelCountries.has(countryCode) })
-    : { names: () => ({ native: {}, en: {}, 'zh-CN': {} }) };
+    : { names: () => ({ native: {}, en: {}, 'zh-CN': {} }), unrecognizedRegion: countryCode === 'SG' ? singaporeRegion((await database.prepare(
+      'SELECT name,native_name,zh_name FROM catalog_regions WHERE country_code=?').bind(countryCode).all()).results || []) : undefined };
   const geocoder = await CatalogReverseGeocoder.load(database, countryCode);
   const pause = () => delay(pauseMs);
   const scanned = await scan(database, countryCode, pause);
@@ -117,7 +126,7 @@ export const repairAdministrativeNames = async ({
   const boundaries = regionBoundaryCountries.has(countryCode) && scanned.length
     ? await regionLookup({ countryCode, points: scanned, cacheDir, pythonBin }) : new Map();
   const candidates = scanned.filter((row) => administrativeNamesCandidate(countryCode, names, row, boundaries.get(row.id))).map((row) => row.id);
-  const retiredAt = `publication-validation:${ADMINISTRATIVE_NAMES_REVISION}:${now().toISOString()}`;
+  const retiredAt = `publication-validation:${revision}:${now().toISOString()}`;
   const touched = [...restored];
   const removed = new Set();
   for (let offset = 0; offset < candidates.length; offset += pageSize) {
@@ -139,7 +148,18 @@ export const repairAdministrativeNames = async ({
         const before = variants.native || {};
         const { next, hints } = repairedLocality(countryCode, before, row, geocoder);
         const moved = names.regionInBoundary?.(next, boundaries.get(row.id), { postcode: next.postcode, latitude: row.latitude, longitude: row.longitude });
-        if (moved) Object.assign(next, { admin1: moved.admin1, admin1Code: moved.admin1Code });
+        const located = !moved && names.unrecognizedRegion?.(next, boundaries.get(row.id), row);
+        if (moved || located) Object.assign(next, { admin1: (moved || located).admin1, admin1Code: (moved || located).admin1Code });
+        // A region still missing takes the one the import fill would give: the catalog region nearest the point.
+        const filled = !moved && !located && administrativeNameCountries(countryCode) && !clean(next.admin1)
+          ? geocoder.lookup({ latitude: row.latitude, longitude: row.longitude, components: next }) : {};
+        if (filled.admin1) Object.assign(next, { admin1: postalRegionCodeCountries.has(countryCode) && filled.admin1Code || filled.admin1,
+          admin1Code: filled.admin1Code });
+        const region = located || (filled.admin1 ? { admin1En: filled.admin1En, admin1Zh: filled.admin1Zh } : null);
+        if (region) {
+          hints.en.admin1 = region.admin1En;
+          if (region.admin1Zh) hints['zh-CN'].admin1 = region.admin1Zh;
+        }
         const department = bdnbDepartment(countryCode, { generation: row.generation, postcode: next.postcode, district: next.district,
           locality: next.locality });
         if (department) next.district = department;
@@ -147,13 +167,15 @@ export const repairAdministrativeNames = async ({
         Object.assign(next, names.names(next).native);
         const active = Number(row.active) === 1;
         touched.push(row.id);
-        const quality = validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level });
-        // Only a city that cannot be refilled retires the row; other existing findings are not this repair's to judge.
-        const cleared = localities.some((field) => clean(before[field]) && !clean(next[field]));
-        // So does a region the polygon proved wrong when no province code can replace a required one (Italy).
-        if (quality.reasons.includes('invalid_locality') || quality.reasons.includes('junk_characters')
-          || cleared && quality.reasons.includes('missing_locality')
-          || moved && requiresAdminCode(countryCode) && !clean(next.admin1Code)) {
+        const gate = () => validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level });
+        // A district repeating the city (Huonville, Huonville) adds nothing and fails the import gate; it is dropped.
+        if (gate().reasons.includes('duplicate_locality_district')) {
+          if (clean(next.district)) delete next.district; else delete next.dependentLocality;
+        }
+        const quality = gate();
+        // A row the import gate still rejects (a whole address in the street field) is never generated and retires, as
+        // does a region the polygon proved wrong when no province code can replace a required one (Italy).
+        if (quality.reasons.length || moved && requiresAdminCode(countryCode) && !clean(next.admin1Code)) {
           if (!active) continue;
           await transaction.prepare('UPDATE address_pool SET active=0,retired_at=? WHERE id=?').bind(retiredAt, row.id).run();
           summary.retired += 1;

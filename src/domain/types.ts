@@ -42,6 +42,8 @@ export interface LocationShortcut {
   label: LocalizedText;
   value: string;
   type: 'region' | 'city' | 'postcode' | 'search';
+  // The dropdown option the shortcut selects, when the published addresses have one.
+  option?: { field: 'region' | 'city'; id?: string; value: string; regionId?: string; regionValue?: string };
 }
 
 export interface CountryShortcutConfig {

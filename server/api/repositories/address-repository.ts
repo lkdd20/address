@@ -32,6 +32,10 @@ export interface AddressFilters {
   postcodeId?: string;
 }
 
+// A dropdown option's exact address set: its admin1 key pairs and, for a city, the city keys (locality, or the postal
+// locality where an address has no locality).
+export interface LocationScopeClause { pairs: Array<[string, string]>; cities?: string[] }
+
 export interface CatalogTarget {
   coordinates?: { latitude: number; longitude: number };
   regionId?: number;
@@ -45,6 +49,9 @@ export interface CatalogTarget {
   cityAliases: string[];
   postcodeId?: number;
   postcode?: string;
+  scope?: LocationScopeClause[];
+  // Addresses the scope's options count, which sizes the random-key slice generation reads.
+  scopeCount?: number;
   bucket: string;
 }
 

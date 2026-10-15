@@ -12,7 +12,7 @@
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；显式来源探测发现 Catastro municipality ATOM 包或其他上游版本变化时才重建。新快照原子切换，失败保留上一 active 快照 |
 | 既有官方住宅适配器 / 排除 | Catastro AD 门牌、道路、5 位邮编、`esp` 语言、municipality admin unit 和 EPSG:25830 坐标均必填，坐标确定性转换为 WGS84；邮编前两位只作一致性检查，不能反推地址。 |
-| 策略版本 / 状态 / 更新 | 1.12 / Catastro 住宅建筑与地址稳定关联 + 解除旧区域容量截断 + 严格多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.13 / Catastro 住宅建筑与地址稳定关联 + 解除旧区域容量截断 + 严格多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - admin1 所属自治区与 Overture 一级行政区多边形不一致时（如 Jaraíz de la Vera 记为 Salamanca），按邮编前两位（INE 省份编号）改为多边形自治区内的省份，邮编给不出时改为自治区；同一自治区内邮编与最近目录城市一致指向另一省份时改为该省。目录中 Badajoz 的上级改为 Extremadura。

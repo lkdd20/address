@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { PostgresDatabase } from '../server/database/postgres.mjs';
 import { addressCanonicalKey, localityIssue, validateAddressQuality } from '../src/domain/address-quality.mjs';
-import { createAdministrativeNames } from '../server/sync/administrative-names.mjs';
+import { createAdministrativeNames, singaporeRegion } from '../server/sync/administrative-names.mjs';
 import { bdnbDepartment, repairAdministrativeNames, wrongPostalArea } from '../server/sync/administrative-names-repair.mjs';
 
 const at = '2026-10-12T00:00:00.000Z';
@@ -22,6 +22,58 @@ describe('administrative names', () => {
       native: {}, en: { admin1: 'Alberta' }, 'zh-CN': { admin1: '阿尔伯塔省', locality: '卡尔加里' }
     });
     expect(canada.names({ admin1: '', admin1Code: 'NB' })['zh-CN']).toEqual({ admin1: '新不伦瑞克省' });
+  });
+
+  it('renames merged Vietnamese provinces, recognizes official spellings and locates unrecognized regions by polygon', () => {
+    const vietnam = createAdministrativeNames('VN', [
+      { id: 1, parent_id: null, code: 'DN', name: 'Da Nang', native_name: 'Đà Nẵng', zh_name: '岘港市' },
+      { id: 2, parent_id: null, code: 'HN', name: 'Hanoi', native_name: 'Hà Nội', zh_name: '河内' }
+    ]);
+    expect(vietnam.names({ admin1: 'Tỉnh Quảng Nam' }).native).toEqual({ admin1: 'Đà Nẵng' });
+    expect(vietnam.names({ admin1: 'Thành phố Hà Nội' })).toEqual({ native: {}, en: { admin1: 'Hanoi' }, 'zh-CN': { admin1: '河内' } });
+    expect(vietnam.regionRecognized({ admin1: '05113628339' })).toBe(false);
+    expect(vietnam.unrecognizedRegion({ admin1: '05113628339' }, { code: 'VN-DN' })).toMatchObject({ admin1: 'Đà Nẵng', admin1Code: 'DN' });
+    expect(vietnam.unrecognizedRegion({ admin1: 'Hà Nội' }, { code: 'VN-DN' })).toBeNull();
+    const france = createAdministrativeNames('FR', [{ id: 1, parent_id: null, code: '971', name: 'Guadeloupe', native_name: 'Guadeloupe', zh_name: '瓜德罗普' },
+      { id: 2, parent_id: null, code: 'IDF', name: 'Île-de-France', native_name: 'Île-de-France', zh_name: '法兰西岛' }],
+    [{ region_id: 1, name: 'Pointe-à-Pitre', native_name: 'Pointe-à-Pitre', zh_name: '' }, { region_id: 1, name: 'Paris', native_name: 'Paris', zh_name: '' },
+      { region_id: 2, name: 'Paris', native_name: 'Paris', zh_name: '' }]);
+    expect(france.unrecognizedRegion({ admin1: '', locality: 'Pointe-A-Pitre' }, { code: '' })).toMatchObject({ admin1: 'Guadeloupe', admin1Code: '971' });
+    expect(france.unrecognizedRegion({ admin1: '', locality: 'Paris' }, { code: '' })).toBeNull();
+    expect(france.unrecognizedRegion({ admin1: 'Typo', locality: 'Pointe-A-Pitre' }, { code: '' })).toBeNull();
+    const islands = createAdministrativeNames('FR', [{ id: 1, parent_id: null, code: '971', name: 'Guadeloupe', native_name: 'Guadeloupe', zh_name: '' },
+      { id: 2, parent_id: null, code: '972', name: 'Martinique', native_name: 'Martinique', zh_name: '' }],
+    [{ region_id: 1, name: 'Les Abymes', native_name: 'Les Abymes', zh_name: '', latitude: 16.27, longitude: -61.5 },
+      { region_id: 2, name: 'Fort-de-France', native_name: 'Fort-de-France', zh_name: '', latitude: 14.6, longitude: -61.07 }]);
+    expect(islands.unrecognizedRegion({ admin1: '', locality: 'Pointe-A-Pitre' }, { code: '' }, { latitude: 16.25, longitude: -61.55 }))
+      .toMatchObject({ admin1: 'Guadeloupe' });
+    expect(islands.unrecognizedRegion({ admin1: '', locality: 'Nowhere' }, { code: '' }, { latitude: 15.5, longitude: -61.3 })).toBeNull();
+    const philippines = createAdministrativeNames('PH', [{ id: 1, parent_id: null, code: '00', name: 'National Capital Region (Metro Manila)',
+      native_name: 'National Capital Region (Metro Manila)', zh_name: '国家首都区' }]);
+    expect(philippines.names({ admin1: 'Metro Manila' })).toMatchObject({ native: {}, en: { admin1: 'Metro Manila' } });
+    const singapore = singaporeRegion([{ name: 'Central Singapore', native_name: 'Central Singapore', zh_name: '新加坡中部' }]);
+    expect(singapore({ admin1: '東京都' })).toMatchObject({ admin1: 'Singapore', admin1Zh: '新加坡' });
+    expect([singapore({ admin1: 'Singapore' }), singapore({ admin1: 'Central Singapore' }), singapore({ admin1: '' })]).toEqual([null, null, null]);
+    const india = createAdministrativeNames('IN', [{ id: 1, parent_id: null, code: 'KL', name: 'Kerala', native_name: 'Kerala', zh_name: '喀拉拉邦' }]);
+    expect(india.names({ admin1: 'kerala', locality: 'Pathanamthitta' }, { en: { admin1: 'Kerala', locality: 'Pattanamtitta' }, 'zh-CN': {} }))
+      .toMatchObject({ native: { admin1: 'Kerala' }, en: { admin1: 'Kerala', locality: 'Pathanamthitta' } });
+    const japanShort = createAdministrativeNames('JP', [{ id: 1, parent_id: null, code: '27', name: 'Ōsaka', native_name: '大阪', zh_name: '大阪' }]);
+    expect(japanShort.regionRecognized({ admin1: '大阪府' })).toBe(true);
+    expect(japanShort.unrecognizedRegion({ admin1: '大阪府' }, { code: 'JP-27' })).toBeNull();
+    const japan = createAdministrativeNames('JP', [{ id: 1, parent_id: null, code: '27', name: 'Ōsaka', native_name: '大阪府', zh_name: '大阪' }]);
+    expect(japan.names({ admin1: '大阪', admin1Code: '27' }).native).toEqual({ admin1: '大阪府' });
+    expect(japan.names({ admin1: '大阪府', admin1Code: '27' }).native).toEqual({});
+    const kyoto = createAdministrativeNames('JP', [{ id: 1, parent_id: null, code: '26', name: 'Kyōto', native_name: '京都府', zh_name: '京都' }]);
+    expect(kyoto.names({ admin1: '京都', admin1Code: '26' }).native).toEqual({ admin1: '京都府' });
+    const korea = createAdministrativeNames('KR', [{ id: 1, parent_id: null, code: '29', name: 'Gwangju', native_name: '광주', zh_name: '光州' }]);
+    expect(korea.unrecognizedRegion({ admin1: '전남광주통합특별시' }, { code: 'KR-29' })).toBeNull();
+    expect(korea.unrecognizedRegion({ admin1: '전남특별자치도' }, { code: '', name: '전남광주통합특별시' }))
+      .toMatchObject({ admin1: '전남광주통합특별시', admin1Zh: '全罗南道光州统一特别市' });
+    expect(korea.names({ admin1: '전남광주통합특별시' })).toEqual({ native: {}, en: { admin1: 'Jeonnam Gwangju Unified Special City' },
+      'zh-CN': { admin1: '全罗南道光州统一特别市' } });
+    const states = createAdministrativeNames('US', [{ id: 1, parent_id: null, code: 'TX', name: 'Texas', native_name: 'Texas', zh_name: '德克萨斯州' }]);
+    expect(states.unrecognizedRegion({ admin1: 'PR', admin1Code: 'PR' }, { code: 'US-TX' })).toBeNull();
+    expect(states.unrecognizedRegion({ admin1: 'Tejas' }, { code: 'US-TX' })).toMatchObject({ admin1: 'TX', admin1Code: 'TX' });
   });
 
   it('names regions written as codes outside postal-code countries and keeps Italian province codes', () => {
@@ -80,7 +132,8 @@ describe('administrative names', () => {
     expect(brazil.regionFor({ admin1: 'Brasil', admin1Code: 'MA' })).toBeNull();
     const russia = createAdministrativeNames('RU', [{ id: 1, parent_id: null, code: 'BEL', name: 'Belgorod', native_name: 'Белгород', zh_name: '别尔哥罗德' }],
       [{ region_id: 1, name: 'Stroitel', native_name: 'Строитель', zh_name: '斯特罗伊捷利' }]);
-    expect(russia.names({ admin1: 'Белгородская область', admin1Code: 'BEL', locality: 'Строитель' })).toEqual({ native: {}, en: {}, 'zh-CN': {} });
+    expect(russia.names({ admin1: 'Белгородская область', admin1Code: 'BEL', locality: 'Строитель' })).toEqual({ native: {},
+      en: { admin1: 'Belgorod', locality: 'Stroitel' }, 'zh-CN': { admin1: '别尔哥罗德', locality: '斯特罗伊捷利' } });
   });
 
   it('moves an admin1 from another first-level region into the polygon region, keeping its level', () => {
@@ -220,7 +273,7 @@ describe('administrative names repair', () => {
     expect(rows.get('dorval')).toMatchObject({ admin1_code: 'QC', admin1_code_key: 'qc', active: 1 });
     expect(JSON.parse(rows.get('dorval').component_variants_json)['zh-CN'].admin1).toBe('魁北克省');
     expect(JSON.parse(rows.get('dorval').address_variants_json)['zh-CN']).toContain('魁北克省');
-    expect(rows.get('code-city')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v9:${at}` });
+    expect(rows.get('code-city')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v18:${at}` });
     expect(rows.get('same-district')).toMatchObject({ admin1_code: 'QC', active: 1 });
     expect(rows.get('v1-retired')).toMatchObject({ active: 1, retired_at: null });
     expect(rows.get('fine')).toMatchObject({ admin1_code: 'NB', active: 1 });
@@ -245,6 +298,28 @@ describe('administrative names repair', () => {
     expect(variants.native).toMatchObject({ locality: 'Montréal', postalLocality: 'Montréal' });
     expect(variants.en).toMatchObject({ locality: 'Montreal', postalLocality: 'Montreal' });
     expect(variants['zh-CN']).toMatchObject({ locality: '蒙特利尔', postalLocality: '蒙特利尔' });
+  });
+
+  it('drops a district repeating the city and retires rows the import gate rejects', async () => {
+    await insert(database, 'twin-district', { street: 'Main Street', houseNumber: '7', locality: 'Moncton', district: 'Moncton', admin1: 'NB', admin1Code: 'NB' },
+      { latitude: 46.09, longitude: -64.78, zh: { admin1: '新不伦瑞克省' } });
+    await insert(database, 'whole-address', { street: 'Main Street, Moncton, NB E1C 1A1', houseNumber: '9', locality: 'Moncton', admin1: 'NB', admin1Code: 'NB' },
+      { latitude: 46.09, longitude: -64.78, zh: { admin1: '新不伦瑞克省' } });
+    await database.prepare("UPDATE address_pool SET district='Moncton' WHERE id='twin-district'").run();
+    await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup: noRegions, pauseMs: 0, now: () => new Date(at) });
+    const rows = new Map((await database.prepare('SELECT * FROM address_pool').all()).results.map((row) => [row.id, row]));
+    expect(rows.get('twin-district')).toMatchObject({ district: '', active: 1 });
+    expect(JSON.parse(rows.get('twin-district').component_variants_json).native.district).toBeUndefined();
+    expect(rows.get('whole-address')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v18:${at}` });
+  });
+
+  it('fills a missing region with the catalog region nearest the point', async () => {
+    await insert(database, 'no-region', { street: 'Main Street', houseNumber: '12', locality: 'Bathurst', admin1: '' }, { latitude: 47.6, longitude: -65.65 });
+    expect(await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup: noRegions, pauseMs: 0, now: () => new Date(at) }))
+      .toMatchObject({ changed: 1, retired: 0 });
+    const row = await database.prepare("SELECT * FROM address_pool WHERE id='no-region'").first();
+    expect(row).toMatchObject({ admin1: 'NB', admin1_code: 'NB', active: 1 });
+    expect(JSON.parse(row.component_variants_json)['zh-CN'].admin1).toBe('新不伦瑞克省');
   });
 
   it('moves regions by polygon and clears Cape Town postcodes matched to a suburb elsewhere', async () => {

@@ -4,7 +4,7 @@
 |---|---|
 | 主源 | HDB Property Information + HDB Existing Building；OneMap 精确补齐；Geofabrik OSM 作为补充 |
 | 既有门牌级格式 / 邮编 | `<BLK_NO> <ROAD_NAME>, Singapore <POSTAL>`；HDB 真实楼栋号、道路、来源支持的 6 位邮编和 WGS84 建筑坐标；缺邮编记录保留但不发布，不生成门牌或邮编 |
-| 行政区 | `Singapore` + HDB `bldg_contract_town` 官方城镇；未知代码拒绝发布。OneMap 同道路结果保留实际坐标/门牌，API-only 地址行政层只使用新加坡，不继承 HDB 城镇；歧义邮编留空 |
+| 行政区 | `Singapore` + HDB `bldg_contract_town` 官方城镇；未知代码拒绝发布。OneMap 同道路结果保留实际坐标/门牌，API-only 地址行政层只使用新加坡，不继承 HDB 城镇；歧义邮编留空；admin1 既非 Singapore 也非目录区名（如 OSM 误填的東京都）时改为 Singapore / 新加坡（administrative-names-v15） |
 | 住宅子集证据 | Property Information 必须同时满足 `residential=Y`、`total_dwelling_units>0`；Existing Building 或 OneMap 提供地址存在、邮编和坐标证据，OneMap 本身不证明住宅用途 |
 | 真实字段 / 生成字段 | HDB 楼栋、道路、HDB 城镇、住宅单元数及 OneMap 匹配的道路、真实门牌、已知邮编和坐标均为来源字段；生成字段：无，不生成门牌或邮编 |
 | 坐标 / 去重 | OneMap/HDB 坐标统一为 WGS84；按 HDB 楼栋 ID、规范化楼栋号+道路去重；空邮编不合并不同道路 |
@@ -12,7 +12,7 @@
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步频率 | 首次初始化自动运行；完成或来源耗尽后停止，不按日/月重复同步。只有新增来源、上游版本或适配器提取能力变化，以及管理员明确刷新时才重新执行。OneMap 只通过共享 Credential Broker 调用，按 `1 QPS` 节流；每轮最多发出 500 次实际 HTTP 请求（包括轮换和重试），逻辑查询数单独统计并保存 checkpoint，短时限速在同一任务内有限重试，真实额度、凭据或网络暂不可用时恢复后自动续跑。 |
 | 既有门牌来源验证 / 排除 | HDB 属性与建筑必须一对一匹配；OneMap 结果必须满足规范化道路名和实际坐标门禁，保留真实楼栋号，无号时为 street；无效/歧义邮编留空。 |
-| 策略版本 / 状态 / 更新 | 2.8 / HDB 双表 + OneMap 分批限速续跑 + 一次性初始化 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9（仅城市字段门禁） / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 2.9 / HDB 双表 + OneMap 分批限速续跑 + 一次性初始化 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15（仅城市字段门禁） / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 默认国家完成数量下限 12,000；既有来源层级单来源均衡采样上限 12,000/1,000/100，后台可覆盖。完成数量不是发布上限，严格记录可继续发布以满足覆盖和节点规则。

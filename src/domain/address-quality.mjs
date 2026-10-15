@@ -88,7 +88,7 @@ const addCountryReasons = (country, components, reasons) => {
   }
   if (country === 'JP') {
     if (!japanese.test(`${admin1}${locality}${district}${street}`)) reasons.push('invalid_japanese_script');
-    if (admin1 && !/[都道府県]$/u.test(admin1)) reasons.push('invalid_japanese_prefecture');
+    if (admin1 && (!/[都道府県]$/u.test(admin1) || admin1 === '京都')) reasons.push('invalid_japanese_prefecture');
     if (locality && !/[市区町村郡]$/u.test(locality)) reasons.push('invalid_japanese_locality');
   }
   if (country === 'TW') {

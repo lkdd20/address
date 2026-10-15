@@ -3,9 +3,34 @@ import { catalogCityRegions, catalogHierarchyPaths, correctRegionParents } from 
 import type { PostgresDatabase } from './postgres.mjs';
 import { implausibleChineseTranslation } from '../../src/domain/address-localization.mjs';
 import { chinaCityNames, chinaCityRegionCode } from './china-catalog-corrections.mjs';
-import { catalogNativeCorrections } from './catalog-native-names.mjs';
+import { catalogChineseCorrections, catalogNativeCorrections } from './catalog-native-names.mjs';
 
-const chineseRegionCorrections = [{ countryCode: 'TR', code: '16', zh: '布尔萨' }];
+// Upstream first-level Chinese names that are mistranslations (Batman → 蝙蝠侠, Chihuahua → 吉娃娃, Edo → 江户), outdated
+// (Seoul → 汉城) or a capital city's name for its region (Belgorod Oblast → 别尔哥罗德).
+const chineseRegionCorrections = Object.entries({
+  TR: { 16: '布尔萨', 72: '巴特曼省', 65: '凡省', 18: '昌克勒省' },
+  BR: { AC: '阿克里州', AM: '亚马孙州' },
+  MX: { CHH: '奇瓦瓦州', MIC: '米却肯州', VER: '韦拉克鲁斯州', COA: '科阿韦拉州' },
+  NG: { ED: '埃多州', KO: '科吉州', PL: '高原州', RI: '河流州', DE: '三角洲州', NI: '尼日尔州' },
+  PH: { 12: '索科斯克萨尔根', '03': '中吕宋', 10: '北棉兰老' },
+  SA: { '06': '哈伊勒省', 11: '巴哈省', '08': '北部边疆省' },
+  TH: { 55: '难府', 63: '达府', 83: '普吉府' },
+  KR: { 11: '首尔', 49: '济州特别自治道', 50: '世宗特别自治市', 45: '全北特别自治道', 42: '江原特别自治道' },
+  VN: { 33: '多乐省', DN: '岘港市', 71: '奠边省', 26: '顺化市' },
+  ZA: { NW: '西北省' },
+  RU: { AMU: '阿穆尔州', ARK: '阿尔汉格尔斯克州', AST: '阿斯特拉罕州', BEL: '别尔哥罗德州', BRY: '布良斯克州', CE: '车臣共和国',
+    CHE: '车里雅宾斯克州', CHU: '楚科奇自治区', CU: '楚瓦什共和国', DA: '达吉斯坦共和国', IRK: '伊尔库茨克州', IVA: '伊万诺沃州',
+    YEV: '犹太自治州', KB: '卡巴尔达-巴尔卡尔共和国', KGD: '加里宁格勒州', KLU: '卡卢加州', KAM: '堪察加边疆区',
+    KC: '卡拉恰伊-切尔克斯共和国', KR: '卡累利阿共和国', KEM: '克麦罗沃州', KHA: '哈巴罗夫斯克边疆区', KK: '哈卡斯共和国',
+    KHM: '汉特-曼西自治区', KIR: '基洛夫州', KO: '科米共和国', KOS: '科斯特罗马州', KDA: '克拉斯诺达尔边疆区',
+    KYA: '克拉斯诺亚尔斯克边疆区', KGN: '库尔干州', KRS: '库尔斯克州', LEN: '列宁格勒州', LIP: '利佩茨克州', MAG: '马加丹州',
+    ME: '马里埃尔共和国', MO: '莫尔多瓦共和国', MOS: '莫斯科州', MUR: '摩尔曼斯克州', NEN: '涅涅茨自治区', NIZ: '下诺夫哥罗德州',
+    NGR: '诺夫哥罗德州', NVS: '新西伯利亚州', OMS: '鄂木斯克州', ORE: '奥伦堡州', ORL: '奥廖尔州', PNZ: '奔萨州', PER: '彼尔姆边疆区',
+    PSK: '普斯科夫州', ROS: '罗斯托夫州', RYA: '梁赞州', SA: '萨哈共和国', SAK: '萨哈林州', SAM: '萨马拉州', SAR: '萨拉托夫州',
+    SMO: '斯摩棱斯克州', STA: '斯塔夫罗波尔边疆区', SVE: '斯维尔德洛夫斯克州', TAM: '坦波夫州', TA: '鞑靼斯坦共和国', TOM: '托木斯克州',
+    TUL: '图拉州', TY: '图瓦共和国', TVE: '特维尔州', TYU: '秋明州', UD: '乌德穆尔特共和国', ULY: '乌里扬诺夫斯克州',
+    VLA: '弗拉基米尔州', VLG: '沃洛格达州', VOR: '沃罗涅日州', YAN: '亚马尔-涅涅茨自治区', YAR: '雅罗斯拉夫尔州', ZAB: '外贝加尔边疆区' }
+}).flatMap(([countryCode, names]) => Object.entries(names).map(([code, zh]) => ({ countryCode, code, zh })));
 // Upstream gives Altai Krai the Altai Republic's names in every language, so neither can be selected by name.
 const regionNameCorrections = [
   { countryCode: 'RU', code: 'AL', name: 'Altai Republic', native: 'Республика Алтай', zh: '阿尔泰共和国' },
@@ -33,8 +58,17 @@ const repairChinaCatalog = async (transaction: Pick<PostgresDatabase, 'prepare'>
 
 const repairCatalogChineseNames = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
   await repairChinaCatalog(transaction);
+  // Reviewed city names that translate the name's words (Bath → 洗澡, Nice → 好的) take their transliteration.
+  for (const [countryCode, cities] of Object.entries(catalogChineseCorrections.cities)) {
+    const rows = (await transaction.prepare('SELECT id,name,zh_name FROM catalog_cities WHERE country_code=?')
+      .bind(countryCode).all<{ id: number; name: string; zh_name: string }>()).results || [];
+    for (const row of rows) {
+      const [zh, ...replaced] = cities[row.name] || [];
+      if (zh && replaced.includes(row.zh_name)) await transaction.prepare('UPDATE catalog_cities SET zh_name=? WHERE id=?').bind(zh, row.id).run();
+    }
+  }
   for (const { countryCode, code, zh } of chineseRegionCorrections) {
-    await transaction.prepare("UPDATE catalog_regions SET zh_name=? WHERE country_code=? AND code=? AND zh_name<>?")
+    await transaction.prepare("UPDATE catalog_regions SET zh_name=? WHERE country_code=? AND code=? AND parent_id IS NULL AND zh_name<>?")
       .bind(zh, countryCode, code, zh).run();
   }
   for (const { countryCode, code, name, native, zh } of regionNameCorrections) {
@@ -114,6 +148,20 @@ const canonicalHongKongCatalog = async (database: PostgresDatabase): Promise<boo
     && Number(postcodes?.total || 0) === 0;
 };
 
+// Japanese addresses name a prefecture in full (東京都, 大阪府, 愛知県); upstream lists most without the suffix.
+const japanesePrefecture = (native: string): string => ['大阪', '京都'].includes(native) ? `${native}府`
+  : native === '東京' ? '東京都' : /[都道府県]$/u.test(native) ? native : `${native}県`;
+const officialJapanesePrefectures = async (transaction: Pick<PostgresDatabase, 'prepare'>) => {
+  const rows = (await transaction.prepare(`SELECT id,native_name FROM catalog_regions WHERE country_code='JP' AND parent_id IS NULL`)
+    .all<{ id: number; native_name: string }>()).results || [];
+  for (const row of rows) {
+    const official = japanesePrefecture(row.native_name || '');
+    if (row.native_name && official !== row.native_name) {
+      await transaction.prepare('UPDATE catalog_regions SET native_name=? WHERE id=?').bind(official, row.id).run();
+    }
+  }
+};
+
 export const applyAdministrativeCatalogOverrides = async (database: PostgresDatabase): Promise<boolean> => {
   const catalogIsCanonical = await canonicalHongKongCatalog(database);
   const regionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
@@ -157,6 +205,7 @@ export const applyAdministrativeCatalogOverrides = async (database: PostgresData
     changed ||= Number(cleanup.meta?.changes || 0) > 0;
     await repairCatalogNativeNames(transaction);
     await repairCatalogChineseNames(transaction);
+    await officialJapanesePrefectures(transaction);
     if (catalogIsCanonical) return;
     changed = true;
     await transaction.prepare("DELETE FROM residential_coverage WHERE country_code='HK'").run();

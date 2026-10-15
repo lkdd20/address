@@ -20,7 +20,7 @@ import { taiwanEnglishPremise } from '../../../src/domain/address-format';
 import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
 import { componentLooksLocalized, implausibleChineseTranslation, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
-import type { AddressFilters, CatalogTarget } from './address-repository';
+import type { AddressFilters, CatalogTarget, LocationScopeClause } from './address-repository';
 
 interface AddressPoolV2Row {
   id: string;
@@ -29,6 +29,10 @@ interface AddressPoolV2Row {
   admin1_code: string;
   locality: string;
   postal_locality: string;
+  admin1_key?: string;
+  admin1_code_key?: string;
+  locality_key?: string;
+  postal_locality_key?: string;
   district: string;
   postcode: string;
   street: string;
@@ -110,7 +114,7 @@ const hasHanSemanticContent = (components: AddressComponents): boolean => [...na
 const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區', '都', '道', '府', '県'];
 const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
 
-const aliases = (values: Array<string | undefined>): string[] => [...new Set(values.flatMap((value) => {
+const valueAliases = (value: string | undefined): string[] => {
   const normalized = normalize(value);
   if (!normalized) return [];
   if (!hanScript.test(normalized)) {
@@ -129,7 +133,20 @@ const aliases = (values: Array<string | undefined>): string[] => [...new Set(val
     if (!stem) return [variant];
     return [variant, stem, ...adminSuffixes.map((suffix) => `${stem}${suffix}`)];
   }).filter(Boolean);
-}))];
+};
+// Script conversion dominates snapshot builds (every catalog city carries a Han name), so aliases are memoized.
+const aliasCache = new Map<string, string[]>();
+const cachedAliases = (value: string | undefined): string[] => {
+  const key = value ?? '';
+  let cached = aliasCache.get(key);
+  if (!cached) {
+    if (aliasCache.size >= 200_000) aliasCache.clear();
+    cached = valueAliases(key);
+    aliasCache.set(key, cached);
+  }
+  return cached;
+};
+const aliases = (values: Array<string | undefined>): string[] => [...new Set(values.flatMap(cachedAliases))];
 
 export const poolLocationAliases = aliases;
 export const completenessClause = (prefix = ''): string => addressQualitySqlClause(prefix);
@@ -152,6 +169,31 @@ export const aliasClauseValues = (columns: string[], values: string[]): { sql: s
     sql: `(${columns.map((column) => `${column} IN (${placeholders})`).join(' OR ')})`,
     values: columns.flatMap(() => values)
   };
+};
+
+interface ScopeKeys { admin1_key?: string; admin1_code_key?: string; locality_key?: string; postal_locality_key?: string }
+// A location scope matches an address's admin1 key pair and, for a city, its city key: the locality, or the postal
+// locality where the address has no locality.
+export const scopeGroupMatches = (keys: ScopeKeys, scope: LocationScopeClause[]): boolean => scope.some((clause) =>
+  clause.pairs.some(([admin1, code]) => admin1 === (keys.admin1_key || '') && code === (keys.admin1_code_key || ''))
+  && (!clause.cities?.length || clause.cities.includes(keys.locality_key || keys.postal_locality_key || '')));
+// admin1_key IN (...) lets the planner read the admin1 random-key index in order; the exact key pairs are then a filter
+// on the joined pair, which no index matches.
+const PAIR_SEPARATOR = '';
+export const scopeClauseValues = (scope: LocationScopeClause[]): { sql: string; values: string[] } => {
+  const values: string[] = [];
+  const list = (items: string[]) => { values.push(...items); return items.map(() => '?').join(','); };
+  const parts = scope.filter((clause) => clause.pairs.length).map((clause) => {
+    const admin1 = list([...new Set(clause.pairs.map(([key]) => key))]);
+    values.push(PAIR_SEPARATOR);
+    const pairs = list(clause.pairs.map(([key, code]) => `${key}${PAIR_SEPARATOR}${code}`));
+    const region = `admin1_key IN (${admin1}) AND (admin1_key || ? || admin1_code_key) IN (${pairs})`;
+    if (!clause.cities?.length) return `(${region})`;
+    const cities = list(clause.cities);
+    const postal = list(clause.cities);
+    return `(${region} AND (locality_key IN (${cities}) OR (locality_key='' AND postal_locality_key IN (${postal}))))`;
+  });
+  return { sql: parts.length ? `(${parts.join(' OR ')})` : '(1=0)', values };
 };
 
 const fallbackComponents = (row: AddressPoolV2Row): AddressComponents => normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, {
@@ -693,46 +735,45 @@ export const pickNearestAddressPoolV2Address = async (
   now = new Date()
 ): Promise<NearestAddressPoolV2Result | undefined> => {
   if (!db) return undefined;
-  const clauses = [
-    'country_code = ?',
-    'active = 1',
-    'quality_score >= 0.7',
-    completenessClause(),
-    addressLocalizationSqlClause()
-  ];
-  const baseBindings: unknown[] = [country];
-  if (residential) clauses.push(`property_type IN ('residential','apartment')`, 'residential_evidence = 1');
+  const readiness = residential ? ' AND generation.residential_ready=1' : '';
   const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
   // Every row inside the box is read and sorted, and a 25 km box in a dense city holds tens of thousands of rows,
-  // so the search widens step by step and stops at the first radius that has candidates.
+  // so the search widens step by step and stops at the first radius that has candidates. The box is searched on the
+  // pool's coordinate index and publishability comes from the generation index, which holds exactly the rows passing
+  // the publication clause; only the nearest rows are read through the runtime view.
   const radii = [...new Set([2, 8, 25, maximumDistanceKm].map((radius) => Math.min(radius, maximumDistanceKm)))].filter((radius) => radius > 0);
 
   try {
     for (const radiusKm of radii) {
       const latitudeRadius = radiusKm / 111.32;
       const longitudeRadius = Math.min(180, latitudeRadius / longitudeScale);
-      const coordinateFilter = 'latitude >= ? AND latitude <= ? AND longitude >= ? AND longitude <= ?';
-      const result = await db.prepare(`SELECT *,
-        ((latitude - ?) * (latitude - ?)) +
-        ((longitude - ?) * (longitude - ?) * ? * ?) AS distance_score
-        FROM address_pool_runtime
-        WHERE ${clauses.join(' AND ')}
-          AND ${coordinateFilter}
-        ORDER BY distance_score, random_key, id LIMIT 16`).bind(
+      const nearest = (await db.prepare(`SELECT pool.id,
+        ((pool.latitude - ?) * (pool.latitude - ?)) +
+        ((pool.longitude - ?) * (pool.longitude - ?) * ? * ?) AS distance_score
+        FROM address_pool pool
+        JOIN address_generation_index generation ON generation.address_id=pool.id AND generation.active=1${readiness}
+        WHERE pool.country_code = ? AND pool.active = 1
+          AND pool.latitude >= ? AND pool.latitude <= ? AND pool.longitude >= ? AND pool.longitude <= ?
+        ORDER BY distance_score, pool.random_key, pool.id LIMIT 16`).bind(
         coordinates.latitude,
         coordinates.latitude,
         coordinates.longitude,
         coordinates.longitude,
         longitudeScale,
         longitudeScale,
-        ...baseBindings,
+        country,
         Math.max(-90, coordinates.latitude - latitudeRadius),
         Math.min(90, coordinates.latitude + latitudeRadius),
         Math.max(-180, coordinates.longitude - longitudeRadius),
         Math.min(180, coordinates.longitude + longitudeRadius)
-      ).all<AddressPoolV2Row>();
-      const rows = result.results || [];
-      const candidates = rows.flatMap((row) => {
+      ).all<{ id: string }>()).results || [];
+      if (!nearest.length) continue;
+      const stored = new Map(((await db.prepare(`SELECT * FROM address_pool_runtime WHERE active = 1 AND id IN (${nearest.map(() => '?').join(',')})`)
+        .bind(...nearest.map(({ id }) => id)).all<AddressPoolV2Row>()).results || []).map((row) => [row.id, row]));
+      const candidates = nearest.flatMap(({ id }) => {
+        const row = stored.get(id);
+        if (!row || row.country_code !== country
+          || residential && (Number(row.residential_evidence) !== 1 || !['residential', 'apartment'].includes(row.property_type))) return [];
         const address = rowToAddress(row, now);
         return address ? [{ address, distanceKm: geographicDistanceKm(coordinates, address.coordinates) }] : [];
       }).filter((candidate) => candidate.distanceKm <= radiusKm);
@@ -787,13 +828,19 @@ export const pickAddressPoolV2Address = async (
   const currentValueMatches = (values: Array<string | undefined>, expected: string[]): boolean =>
     !expected.length || aliases(values).some((value) => expected.includes(value));
 
+  const scope = target?.scope;
+  const scopeClause = scope ? scopeClauseValues(scope) : undefined;
+  if (scopeClause) {
+    clauses.push(scopeClause.sql);
+    bindings.push(...scopeClause.values);
+  }
   const regionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'], regionNames);
-  if ((filters.region || target?.region) && regionClause) {
+  if (!scope && (filters.region || target?.region) && regionClause) {
     clauses.push(regionClause.sql);
     bindings.push(...regionClause.values);
   }
   const cityClause = aliasClauseValues(['locality_key', 'postal_locality_key'], cityNames);
-  if ((filters.city || target?.city) && cityClause) {
+  if (!scope && (filters.city || target?.city) && cityClause) {
     clauses.push(cityClause.sql);
     bindings.push(...cityClause.values);
   }
@@ -815,13 +862,17 @@ export const pickAddressPoolV2Address = async (
   const generationClauses = ['country_code = ?', 'active = 1'];
   const generationBindings: unknown[] = [country];
   if (residential) generationClauses.push('residential_ready = 1');
+  if (scopeClause) {
+    generationClauses.push(scopeClause.sql);
+    generationBindings.push(...scopeClause.values);
+  }
   const generationRegionClause = aliasClauseValues(['admin1_key', 'admin1_code_key'], regionNames);
-  if ((filters.region || target?.region) && generationRegionClause) {
+  if (!scope && (filters.region || target?.region) && generationRegionClause) {
     generationClauses.push(generationRegionClause.sql);
     generationBindings.push(...generationRegionClause.values);
   }
   const generationCityClause = aliasClauseValues(['locality_key', 'postal_locality_key'], cityNames);
-  if ((filters.city || target?.city) && generationCityClause) {
+  if (!scope && (filters.city || target?.city) && generationCityClause) {
     generationClauses.push(generationCityClause.sql);
     generationBindings.push(...generationCityClause.values);
   }
@@ -849,7 +900,17 @@ export const pickAddressPoolV2Address = async (
     const generationSelect = `SELECT address_id AS id FROM address_generation_index WHERE ${generationClauses.join(' AND ')}`;
     const loadIdentifiers = async (sql: string, values: unknown[]): Promise<Array<{ id: string }>> =>
       (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
+    // random_key is uniform over 31 bits, so a scope of known size reads a slice expected to hold four times the
+    // candidates instead of every key after the pivot; a slice that falls short reads on as before.
+    const slice = target?.scopeCount ? Math.ceil(2 ** 31 * candidateLimit * 4 / target.scopeCount) : 0;
     const loadWindow = async (select: string, values: unknown[], idColumn: string): Promise<Array<{ id: string }>> => {
+      if (slice && slice < 2 ** 31 && pivot + slice < 2 ** 31) {
+        const sliced = await loadIdentifiers(
+          `${select} AND random_key >= ? AND random_key < ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
+          [...values, pivot, pivot + slice]
+        );
+        if (sliced.length >= candidateLimit) return sliced;
+      }
       const forward = await loadIdentifiers(
         `${select} AND random_key >= ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
         [...values, pivot]
@@ -876,8 +937,9 @@ export const pickAddressPoolV2Address = async (
         if (row.country_code !== country
           || residential && (Number(row.residential_evidence) !== 1
             || !['residential', 'apartment'].includes(row.property_type))
-          || (filters.region || target?.region) && !currentValueMatches([row.admin1, row.admin1_code], regionNames)
-          || (filters.city || target?.city) && !currentValueMatches([row.locality, row.postal_locality], cityNames)
+          || scope && !scopeGroupMatches(row, scope)
+          || !scope && (filters.region || target?.region) && !currentValueMatches([row.admin1, row.admin1_code], regionNames)
+          || !scope && (filters.city || target?.city) && !currentValueMatches([row.locality, row.postal_locality], cityNames)
           || filters.district && !currentValueMatches([row.district], districtNames)
           || selectedPostcode && normalize(row.postcode).replace(/\s/gu, '') !== normalize(selectedPostcode).replace(/\s/gu, '')
           || filters.q?.trim() && !normalize([row.house_number, row.street, row.building_name, row.district,

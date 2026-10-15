@@ -6,7 +6,7 @@ import { chineseStreetFallbackAllowed, diagnoseStoredAddressPoolV2Row, storedAdd
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
-import { refreshCountryCounts } from '../database/published-pool.mjs';
+import { adjustCountryCounts, generationIndexContribution } from '../database/published-pool.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
 import { administrativeAssignmentJoin, projectAdministrativeRow, refreshAdministrativeAssignments } from '../database/administrative-assignments.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from './translation-providers.mjs';
@@ -201,10 +201,15 @@ const publish = async (database, candidates, revision, now, signal, outcome, cou
       lap('write');
       if (!updates.length) return [];
       signal.throwIfAborted();
-      await refreshAddressGenerationIndex(transaction, country, { addressIds: updates.map((row) => row.id) });
+      const addressIds = updates.map((row) => row.id);
+      const before = await generationIndexContribution(transaction, country, addressIds);
+      await refreshAddressGenerationIndex(transaction, country, { addressIds });
       lap('index');
       signal.throwIfAborted();
-      await refreshCountryCounts(transaction, country, now().toISOString(), { useGenerationIndex: true });
+      // Recounting a large country per batch took up to a minute and hit the statement timeout.
+      const after = await generationIndexContribution(transaction, country, addressIds);
+      await adjustCountryCounts(transaction, country,
+        { total: after.total - before.total, residential: after.residential - before.residential }, now().toISOString());
       lap('counts');
       // Only reactivated rows change a dataset's active count; recounting large datasets per batch is too slow.
       for (const [dataset, count] of activated) {

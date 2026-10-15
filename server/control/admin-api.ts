@@ -22,7 +22,7 @@ import {
   deleteNodeTarget, listCountryNodeTargets, listCountryPolicies, updateCountryPolicy, upsertNodeTarget
 } from '../sync/address-policy.mjs';
 import { evaluateCountryGoals } from '../sync/country-goals.mjs';
-import { queryLocationCatalog, type CatalogField } from '../api/repositories/location-catalog';
+import { queryLocationCatalog, resolveCountryShortcuts, type CatalogField } from '../api/repositories/location-catalog';
 import {
   diagnoseOpenAICompatible, fetchOpenAICompatibleModelCatalog, OPENAI_COMPATIBLE_DIAGNOSTIC_VALUES, resolveOpenAICompatibleBaseUrl, translateOpenAICompatible
 } from '../credential-broker/openai-compatible.mjs';
@@ -1054,7 +1054,8 @@ export const createAccessApi = (control: ControlStore, {
       return context.json({ error: 'FRONTEND_AUTH_REQUIRED' }, 401, { 'Cache-Control': 'no-store' });
     }
     context.header('Cache-Control', 'no-store');
-    return context.json({ data: await control.countryShortcuts() });
+    const shortcuts = await control.countryShortcuts();
+    return context.json({ data: addressDb ? resolveCountryShortcuts(addressDb, shortcuts) : shortcuts });
   });
   app.get('/web-api/v1/public-monitor', async (context) => {
     if (!await authorizeWebRequest(control, context.req.raw)) {

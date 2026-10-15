@@ -4,14 +4,14 @@
 |---|---|
 | 数据源 | Geofabrik `nigeria` 真实街道与门牌（2026-10-01 起独立批量导入，此前仅作 Google 种子）；Google Geocoding 补全 |
 | 既有门牌级格式 / 邮编 | `<house> <street>, <district>, <city>, <state> <postcode>, NG`；仅保留源记录且通过 6 位格式门禁；任一必填组件缺失即淘汰，不推算。只清洗格式，不创造或按邻近地址补齐 |
-| 行政区 | 源字段与 catalog；官方行政边界作为候选核验。行政层级必须与坐标反查一致；冲突时拒绝发布 |
+| 行政区 | 源字段与 catalog；官方行政边界作为候选核验。行政层级必须与坐标反查一致；冲突时拒绝发布；“X State”写法视为目录州，对不上目录的（如 Federal Capital Territory）按坐标多边形改为目录名称（administrative-names-v15） |
 | 住宅子集证据 | OSM 明确住宅建筑标签；Google 只补全地址字段，不单独证明住宅 |
 | 坐标 / 去重 | WGS84 经纬度并通过尼日利亚边界门禁；同一批次按规范化地址 canonical hash 去重 |
 | 街道级格式 | `<street>, <district>, <city>, <state>, NG`；`matchLevel=street`，门牌、楼栋、室号为空；可唯一确定的来源邮编保留，否则留空。 |
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 / 频率 | Geofabrik 版本检查；Google 补全使用可恢复 checkpoint、额度冷却和自动耗尽判定 |
 | 既有门牌来源验证 / 排除 | 必须具备来源 ID、真实街道、district、城市、州及合法坐标；已有真实门牌保留，未知六位邮编留空，OSM 住宅建筑证据仅用于住宅子集 |
-| 策略版本 / 状态 / 更新 | 1.14 / Geofabrik + Google 补全 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.15 / Geofabrik + Google 补全 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 默认国家完成数量下限 8,000；州、地方政府区、地区单来源均衡采样上限 1,000/200/50，后台可覆盖；国家总量不是发布上限，行政区划与邮编目录保持完整。

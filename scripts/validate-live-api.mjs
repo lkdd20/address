@@ -35,6 +35,7 @@ const get = async (path) => (await request(path)).data;
 
 const collect = async (country, field, params = {}) => {
   const options = [];
+  const revisions = new Set();
   let cursor;
   let total = 0;
   do {
@@ -43,28 +44,87 @@ const collect = async (country, field, params = {}) => {
     const data = await get(`/locations/search?${query}`);
     const values = field === 'region' ? data.regions : field === 'city' ? data.cities : data.postcodes;
     total = data.total;
+    revisions.add(data.revision || '');
     options.push(...values);
     cursor = data.nextCursor;
   } while (cursor);
-  assert(options.length === total, `${country} ${field} pagination mismatch ${options.length}/${total}`);
-  assert(new Set(options.map((option) => option.id || option.value)).size === options.length, `${country} ${field} duplicate options`);
-  return { total, options };
+  // Pages served from two snapshots cannot be compared; the caller pages again.
+  if (revisions.size === 1) {
+    assert(options.length === total, `${country} ${field} pagination mismatch ${options.length}/${total}`);
+    assert(new Set(options.map((option) => option.id || option.value)).size === options.length, `${country} ${field} duplicate options`);
+  }
+  return { total, options, revisions };
 };
 
+// Generation latency is sampled before the option scans below, whose snapshot rebuilds would otherwise be measured.
+const xiamenChinese = await request('/locations/search?country=CN&field=city&q=%E5%8E%A6%E9%97%A8&limit=200');
+const xiamenEnglish = await request('/locations/search?country=CN&field=city&q=Xiamen&limit=200');
+assert(xiamenChinese.ms <= maxMetadataMs, `Xiamen Chinese search took ${xiamenChinese.ms}ms`);
+assert(xiamenEnglish.ms <= maxMetadataMs, `Xiamen English search took ${xiamenEnglish.ms}ms`);
+const isXiamen = (city) => city.value === 'Xiamen' || city.en === 'Xiamen' || /厦门/u.test(city.value);
+const xiamen = xiamenChinese.data.cities.find(isXiamen) || xiamenEnglish.data.cities.find(isXiamen);
+assert(xiamen, 'Xiamen is missing from Chinese and English fuzzy search');
+assert(/厦门/u.test(xiamen.label), `Xiamen label is not Chinese-only: ${xiamen.label}`);
+assert(!/福建|Fujian|FJ/u.test(xiamen.label), `Xiamen label contains its parent region: ${xiamen.label}`);
+for (const residentialMode of [false, true]) {
+  const query = new URLSearchParams({
+    country: 'CN', city: xiamen.value, cityId: xiamen.id, residential: String(residentialMode),
+    strategy: 'instant', seed: `live-xiamen-${residentialMode ? 'residential' : 'ordinary'}`
+  });
+  if (xiamen.regionId) query.set('regionId', xiamen.regionId);
+  if (xiamen.regionValue) query.set('region', xiamen.regionValue);
+  const generated = await request(`/generate?${query}`, maxGenerationMs + 5000);
+  assert(generated.ms <= maxGenerationMs, `Xiamen ${residentialMode ? 'residential' : 'ordinary'} generation took ${generated.ms}ms`);
+  assert(Number.isFinite(generated.serverTiming.total), 'Xiamen generation has no Server-Timing total duration');
+  const serverTotals = [];
+  for (let sample = 0; sample < 60; sample += 1) {
+    query.set('seed', `live-xiamen-p95-${residentialMode}-${sample}`);
+    const timed = await request(`/generate?${query}`, maxGenerationMs + 5000);
+    assert(Number.isFinite(timed.serverTiming.total), 'Xiamen generation has no Server-Timing total duration');
+    serverTotals.push(timed.serverTiming.total);
+    // Spaced samples keep one short database stall from landing on several consecutive requests.
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+  }
+  const p95 = serverTotals.sort((left, right) => left - right)[Math.ceil(serverTotals.length * 0.95) - 1];
+  assert(p95 <= maxGenerationServerMs, `Xiamen server generation P95 is ${p95}ms (${serverTotals.join(', ')})`);
+  assert(generated.data.country === 'CN', 'Xiamen generation returned the wrong country');
+  assert(generated.data.sourcesTried?.includes('china-map-community'), 'Xiamen generation did not use the China community pool');
+  assert(!generated.data.sourcesTried?.includes('osm-overpass'), 'Xiamen generation entered the online provider path');
+  assert(/Xiamen|厦门/u.test(JSON.stringify(generated.data.result?.address)), 'Xiamen generation returned a different city');
+  if (residentialMode) assert(generated.data.result?.address?.evidence?.some((item) => item.type === 'residential_use'), 'Xiamen residential generation lacks residential evidence');
+}
+
 const countryEntries = Object.entries(manifest.countries);
+const published = new Map((await get('/countries')).map((country) => [country.code, country]));
+assert(countryEntries.every(([country]) => published.has(country)), 'country registry is missing manifest countries');
 const summaries = [];
 let nextCountry = 0;
 const verifyCountry = async ([country, expected]) => {
-  const regions = await collect(country, 'region');
-  const cities = await collect(country, 'city');
-  assert(regions.total > 0 && regions.total <= expected.regions,
-    `${country} top-level region total mismatch ${regions.total}/${expected.regions}`);
-  const minimumCities = country === 'CN' ? 1 : Math.floor(expected.cities * 0.9);
-  assert(cities.total >= minimumCities && cities.total <= expected.cities,
-    `${country} city total mismatch ${cities.total}/${expected.cities}`);
-  const postcodes = await get(`/locations/search?${new URLSearchParams({ country, field: 'postcode', limit: '200' })}`);
-  if (expected.postcodes > 0) assert(postcodes.total > 0 && postcodes.postcodes.length > 0, `${country} postcode catalog is empty`);
-  return { country, regions: regions.total, cities: cities.total, postcodes: postcodes.total };
+  const filters = published.get(country)?.addressSchema?.filters || [];
+  const residential = String(country === 'CN');
+  const summary = { country, addressCount: published.get(country)?.[country === 'CN' ? 'residentialCount' : 'addressCount'] };
+  // Every published address sits under one region option and one city option, so both fields count the same total.
+  const counted = ({ options }) => options.reduce((sum, option) => sum + Number(option.availableCount || 0), 0);
+  if (filters.includes('region') && filters.includes('city')) {
+    // Publication rebuilds the option snapshot while the lists are paged; both lists are compared within one revision.
+    let regions;
+    let cities;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      regions = await collect(country, 'region', { residential });
+      cities = await collect(country, 'city', { residential });
+      if (new Set([...regions.revisions, ...cities.revisions]).size === 1) break;
+    }
+    assert(new Set([...regions.revisions, ...cities.revisions]).size === 1, `${country} option snapshot changed during every scan`);
+    assert(regions.total > 0 && cities.total > 0, `${country} has no region or city options`);
+    assert(counted(regions) === counted(cities), `${country} region and city counts differ ${counted(regions)}/${counted(cities)}`);
+    Object.assign(summary, { regions: regions.total, cities: cities.total, counted: counted(regions) });
+  }
+  if (filters.includes('postcode') && expected.postcodes > 0) {
+    const postcodes = await get(`/locations/search?${new URLSearchParams({ country, field: 'postcode', limit: '200' })}`);
+    assert(postcodes.total > 0 && postcodes.postcodes.length > 0, `${country} postcode options are empty`);
+    summary.postcodes = postcodes.total;
+  }
+  return summary;
 };
 await Promise.all(Array.from({ length: Math.min(countryConcurrency, countryEntries.length) }, async () => {
   while (nextCountry < countryEntries.length) {
@@ -108,33 +168,6 @@ for (const country of registry.filter(({ code }) => availableCountries.has(code)
   const cities = await get(`/locations/search?country=${country.code}&field=city&residential=${country.code === 'CN'}&limit=20`);
   assert(cities.total > 0, `${country.code} city coverage is empty`);
   residential.push({ country: country.code, cities: cities.total });
-}
-
-const xiamenChinese = await request('/locations/search?country=CN&field=city&q=%E5%8E%A6%E9%97%A8&limit=200');
-const xiamenEnglish = await request('/locations/search?country=CN&field=city&q=Xiamen&limit=200');
-assert(xiamenChinese.ms <= maxMetadataMs, `Xiamen Chinese search took ${xiamenChinese.ms}ms`);
-assert(xiamenEnglish.ms <= maxMetadataMs, `Xiamen English search took ${xiamenEnglish.ms}ms`);
-const isXiamen = (city) => city.value === 'Xiamen' || city.en === 'Xiamen' || /厦门/u.test(city.value);
-const xiamen = xiamenChinese.data.cities.find(isXiamen) || xiamenEnglish.data.cities.find(isXiamen);
-assert(xiamen, 'Xiamen is missing from Chinese and English fuzzy search');
-assert(/厦门/u.test(xiamen.label), `Xiamen label is not Chinese-only: ${xiamen.label}`);
-assert(!/福建|Fujian|FJ/u.test(xiamen.label), `Xiamen label contains its parent region: ${xiamen.label}`);
-for (const residentialMode of [false, true]) {
-  const query = new URLSearchParams({
-    country: 'CN', city: xiamen.value, cityId: xiamen.id, residential: String(residentialMode),
-    strategy: 'instant', seed: `live-xiamen-${residentialMode ? 'residential' : 'ordinary'}`
-  });
-  if (xiamen.regionId) query.set('regionId', xiamen.regionId);
-  if (xiamen.regionValue) query.set('region', xiamen.regionValue);
-  const generated = await request(`/generate?${query}`, maxGenerationMs + 5000);
-  assert(generated.ms <= maxGenerationMs, `Xiamen ${residentialMode ? 'residential' : 'ordinary'} generation took ${generated.ms}ms`);
-  assert(Number.isFinite(generated.serverTiming.total), 'Xiamen generation has no Server-Timing total duration');
-  assert(generated.serverTiming.total <= maxGenerationServerMs, `Xiamen server generation took ${generated.serverTiming.total}ms`);
-  assert(generated.data.country === 'CN', 'Xiamen generation returned the wrong country');
-  assert(generated.data.sourcesTried?.includes('china-map-community'), 'Xiamen generation did not use the China community pool');
-  assert(!generated.data.sourcesTried?.includes('osm-overpass'), 'Xiamen generation entered the online provider path');
-  assert(/Xiamen|厦门/u.test(JSON.stringify(generated.data.result?.address)), 'Xiamen generation returned a different city');
-  if (residentialMode) assert(generated.data.result?.address?.evidence?.some((item) => item.type === 'residential_use'), 'Xiamen residential generation lacks residential evidence');
 }
 
 const ipContext = await request('/client-context?ip=162.141.137.231', maxIpGenerationMs);

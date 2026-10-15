@@ -4,7 +4,7 @@ import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
 import { correctedRegion, regionCorrectionCountries } from './region-boundaries.mjs';
-import { administrativeNameCountries, createAdministrativeNames, mixedLevelCountries } from './administrative-names.mjs';
+import { administrativeNameCountries, createAdministrativeNames, mixedLevelCountries, singaporeRegion } from './administrative-names.mjs';
 import { semanticAddressFields, usableAddressTranslation } from '../../src/domain/address-localization.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
@@ -181,7 +181,10 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   const region = correctedRegion(countryCode, components, record.administrativeRegion, [...(geocoder?.regionsById?.values() || [])])
     || (mixedLevelCountries.has(countryCode) && geocoder?.regionsById?.size ? administrativeNamesOf(geocoder, countryCode)
       .regionInBoundary(components, record.administrativeRegion, { postcode: components.postcode, latitude: record.latitude, longitude: record.longitude })
-      : null);
+      : null)
+    || (administrativeNameCountries(countryCode) && geocoder?.regionsById?.size
+      ? administrativeNamesOf(geocoder, countryCode).unrecognizedRegion(components, record.administrativeRegion, record) : null)
+    || (countryCode === 'SG' ? singaporeRegion([...(geocoder?.regionsById?.values() || [])])(components) : null);
   if (region) {
     components.admin1 = region.admin1;
     components.admin1Code = region.admin1Code;
@@ -287,6 +290,9 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
     record.formattedAddress = rebuildFormattedAddress(components, countryCode);
   }
   const policy = requiredAdminFields[countryCode] || { region: false, city: false };
+  // A region no catalog spelling, polygon or territory names is not published: its text is wrong (전남특별자치도).
+  if (administrativeNameCountries(countryCode) && geocoder?.regionsById?.size && String(components.admin1 || '').trim()
+    && !administrativeNamesOf(geocoder, countryCode).regionRecognized(components)) return false;
   if (policy.region && !hasRegion(components)) return false;
   if (policy.city && !hasCity(components)) return false;
   if (policy.district && !(components.district || '').trim()) return false;

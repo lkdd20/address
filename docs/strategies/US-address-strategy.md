@@ -4,7 +4,7 @@
 |---|---|
 | 主源 | Overture Maps addresses（全国分片 + 50 州与 DC 独立分片 `overture-usa-structures-<州>`）+ Geofabrik 美国 50 州、DC、Puerto Rico、US Virgin Islands 独立分片 |
 | 既有门牌级格式 / 邮编 | `<house> <street>, <city>, <state> <ZIP>, US`；地址行使用源记录，不拼接虚构 Apt/Unit；源记录 ZIP/ZIP+4；仅接受 `\d{5}` 或 `\d{5}-\d{4}`，不自行推算 ZIP。只清洗格式，不创造或按邻近地址补齐 |
-| 行政区 | Census TIGER/Line 与 Census Gazetteer 作为交叉核验候选；当前入库行政层级来自同步源字段与本地 catalog 反查。行政层级必须与坐标反查一致；冲突时保留源值在隔离区并拒绝发布。州代码保留在本地与英文版，中文版使用目录州名；属地 PR/VI/GU/AS/MP 使用固定名称（波多黎各、美属维尔京群岛等），城市字段只有州代码（如 `VI`）的记录不发布 |
+| 行政区 | Census TIGER/Line 与 Census Gazetteer 作为交叉核验候选；当前入库行政层级来自同步源字段与本地 catalog 反查。行政层级必须与坐标反查一致；冲突时保留源值在隔离区并拒绝发布。州代码保留在本地与英文版，中文版使用目录州名；属地 PR/VI/GU/AS/MP 使用固定名称（波多黎各、美属维尔京群岛等），城市字段只有州代码（如 `VI`）的记录不发布；PR、VI 等领地不在州目录中，下拉以领地名（如 Puerto Rico（PR）波多黎各）自成选项，不按同名城镇并入其他州 |
 | 住宅子集证据 | OSM `building=house/apartments/...`、Overture buildings 明确住宅类别，或 FEMA/ORNL USA Structures 最近建筑（≤约 30 m）为 `OCC_CLS=Residential` 且 `PRIM_OCC` 为独栋、多户或活动房屋；没有证据只进隔离区，不进入住宅发布池。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
 | 真实字段 / 生成字段 | 门牌、道路、城市、州代码、ZIP、可选单元和坐标均来自来源；生成字段：无，不拼接 Apt/Unit |
 | 坐标 / 去重 | 来源坐标统一为 WGS84 并按美国本土及属地边界门禁；按来源 ID 和规范化地址 canonical hash 去重 |
@@ -12,7 +12,7 @@
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；各州/地区来源独立保存状态。显式来源探测发现 Overture 或 Geofabrik 版本变化时才构建新快照 |
 | 既有门牌来源验证 / 排除 | 行政区冲突、缺真实道路或坐标越界的记录淘汰；未知 ZIP 留空，地址节点名称不作为住宅楼名，普通真实门牌不强制住宅用途。 |
-| 策略版本 / 状态 / 更新 | 1.11 / 分州 Overture + USA Structures 住宅佐证 + 容量扩展 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.12 / 分州 Overture + USA Structures 住宅佐证 + 容量扩展 + address-structure-v1 + administrative-names-v18 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 默认国家完成数量下限 50,000；州、县市、地区单来源均衡采样上限 2,000/300/80，后台可覆盖；国家总量不是发布上限，行政区划与邮编目录保持完整。

@@ -154,6 +154,8 @@ curl -fsS "https://address.example.com/api/v1/locations/search?country=CN&field=
 
 選項列表來自每個國家的快照，快照在背景重建，因此數量可能比剛發布的地址晚幾分鐘。
 
+中國以外國家的州省和城市選項由已發布地址直接生成：每條地址恰好屬於一個州省選項和一個城市選項，各選項數量之和等於該國地址總數，按選項生成的地址與選項計數一致。目錄未收錄的州省或城市（如美國波多黎各、目錄中沒有的城鎮）返回以 `loc-region-`、`loc-city-` 開頭的穩定 ID，同樣原樣傳入 `regionId`、`cityId`。城市選項的 `regionId`、`regionValue` 指向它所屬的州省選項。
+
 `GET /locations/hierarchy` 使用 `country`、`parentType`、`parentId`、`childType` 逐級瀏覽行政區。
 
 ## 地址翻譯

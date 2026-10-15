@@ -2,7 +2,7 @@ import type { AdminLocale } from './types';
 
 const en = {
   ui: {
-    operationDone: 'Operation completed', busy: 'The previous action is still in progress.', confirmTitle: 'Confirm action', confirm: 'Confirm',
+    operationDone: 'Operation completed', busy: 'The previous action is still in progress.', testing: 'Testing…', confirmTitle: 'Confirm action', confirm: 'Confirm',
     mapError: 'The map could not load. You can still use the data list.', expandMap: 'Expand map',
     levelFirst: 'Level 1', levelSecond: 'Level 2', levelThird: 'Level 3',
     defaultPasswordWarning: 'The default administrator password is active. Change it before continuing.',
@@ -76,7 +76,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   en,
   'zh-CN': {
     ui: {
-      operationDone: '操作已完成', busy: '上一个操作仍在处理中。', confirmTitle: '请确认', confirm: '确认',
+      operationDone: '操作已完成', busy: '上一个操作仍在处理中。', testing: '正在测试…', confirmTitle: '请确认', confirm: '确认',
       mapError: '地图加载失败，仍可使用数据列表。', expandMap: '展开地图',
       levelFirst: '第一级', levelSecond: '第二级', levelThird: '第三级',
       defaultPasswordWarning: '当前使用默认管理员密码。请先修改管理员密码。',
@@ -144,7 +144,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   'zh-TW': {
     ui: {
-      operationDone: '操作已完成', busy: '上一個操作仍在處理中。', confirmTitle: '請確認', confirm: '確認',
+      operationDone: '操作已完成', busy: '上一個操作仍在處理中。', testing: '正在測試…', confirmTitle: '請確認', confirm: '確認',
       mapError: '地圖載入失敗，仍可使用資料列表。', expandMap: '展開地圖',
       levelFirst: '第一級', levelSecond: '第二級', levelThird: '第三級',
       defaultPasswordWarning: '目前使用預設管理員密碼。請先修改管理員密碼。',
@@ -212,7 +212,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   ja: {
     ui: {
-      operationDone: '操作が完了しました', busy: '前の操作をまだ処理しています。', confirmTitle: '確認', confirm: '実行',
+      operationDone: '操作が完了しました', busy: '前の操作をまだ処理しています。', testing: 'テスト中…', confirmTitle: '確認', confirm: '実行',
       mapError: '地図を読み込めませんでした。データ一覧は引き続き利用できます。', expandMap: '地図を拡大',
       levelFirst: '第1階層', levelSecond: '第2階層', levelThird: '第3階層',
       defaultPasswordWarning: '既定の管理者パスワードが使われています。先に変更してください。',
@@ -280,7 +280,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   ko: {
     ui: {
-      operationDone: '작업을 완료했습니다', busy: '이전 작업을 아직 처리하고 있습니다.', confirmTitle: '작업 확인', confirm: '확인',
+      operationDone: '작업을 완료했습니다', busy: '이전 작업을 아직 처리하고 있습니다.', testing: '테스트 중…', confirmTitle: '작업 확인', confirm: '확인',
       mapError: '지도를 불러오지 못했습니다. 데이터 목록은 계속 사용할 수 있습니다.', expandMap: '지도 확대',
       levelFirst: '1단계', levelSecond: '2단계', levelThird: '3단계',
       defaultPasswordWarning: '기본 관리자 비밀번호를 사용 중입니다. 먼저 변경하세요.',
@@ -348,7 +348,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   de: {
     ui: {
-      operationDone: 'Vorgang abgeschlossen', busy: 'Die vorherige Aktion läuft noch.', confirmTitle: 'Aktion bestätigen', confirm: 'Bestätigen',
+      operationDone: 'Vorgang abgeschlossen', busy: 'Die vorherige Aktion läuft noch.', testing: 'Test läuft…', confirmTitle: 'Aktion bestätigen', confirm: 'Bestätigen',
       mapError: 'Die Karte konnte nicht geladen werden. Die Datenliste bleibt verfügbar.', expandMap: 'Karte vergrößern',
       levelFirst: 'Ebene 1', levelSecond: 'Ebene 2', levelThird: 'Ebene 3',
       defaultPasswordWarning: 'Das Standard-Administratorpasswort ist aktiv. Ändern Sie es, bevor Sie fortfahren.',
@@ -416,7 +416,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   fr: {
     ui: {
-      operationDone: 'Opération terminée', busy: 'L’action précédente est encore en cours.', confirmTitle: 'Confirmer l’action', confirm: 'Confirmer',
+      operationDone: 'Opération terminée', busy: 'L’action précédente est encore en cours.', testing: 'Test en cours…', confirmTitle: 'Confirmer l’action', confirm: 'Confirmer',
       mapError: 'La carte n’a pas pu être chargée. La liste des données reste disponible.', expandMap: 'Agrandir la carte',
       levelFirst: 'Niveau 1', levelSecond: 'Niveau 2', levelThird: 'Niveau 3',
       defaultPasswordWarning: 'Le mot de passe administrateur par défaut est actif. Modifiez-le avant de continuer.',
@@ -484,7 +484,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   es: {
     ui: {
-      operationDone: 'Operación completada', busy: 'La acción anterior sigue en curso.', confirmTitle: 'Confirmar acción', confirm: 'Confirmar',
+      operationDone: 'Operación completada', busy: 'La acción anterior sigue en curso.', testing: 'Probando…', confirmTitle: 'Confirmar acción', confirm: 'Confirmar',
       mapError: 'No se pudo cargar el mapa. La lista de datos sigue disponible.', expandMap: 'Ampliar mapa',
       levelFirst: 'Nivel 1', levelSecond: 'Nivel 2', levelThird: 'Nivel 3',
       defaultPasswordWarning: 'La contraseña de administrador predeterminada está activa. Cámbiela antes de continuar.',
@@ -552,7 +552,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
   },
   pt: {
     ui: {
-      operationDone: 'Operação concluída', busy: 'A ação anterior ainda está em andamento.', confirmTitle: 'Confirmar ação', confirm: 'Confirmar',
+      operationDone: 'Operação concluída', busy: 'A ação anterior ainda está em andamento.', testing: 'Testando…', confirmTitle: 'Confirmar ação', confirm: 'Confirmar',
       mapError: 'Não foi possível carregar o mapa. A lista de dados continua disponível.', expandMap: 'Ampliar mapa',
       levelFirst: 'Nível 1', levelSecond: 'Nível 2', levelThird: 'Nível 3',
       defaultPasswordWarning: 'A senha de administrador padrão está ativa. Altere-a antes de continuar.',

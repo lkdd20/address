@@ -17,12 +17,36 @@ describe('PostgreSQL database adapter', () => {
   });
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 33, control_version: 28 }], fields: [], rowCount: 1
+      rows: [{ address_version: 36, control_version: 28 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
     expect(query).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('adds China location statistics when upgrading address version 33', async () => {
+    const query = vi.fn(async () => ({ rows: [{ address_version: 33, control_version: 28 }], fields: [], rowCount: 1 }));
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements.some((sql) => sql.includes('CREATE STATISTICS IF NOT EXISTS address.cn_communities_location_stats'))).toBe(true);
+    expect(statements).toContain('ANALYZE address.cn_communities_v2');
+    expect(statements.some((sql) => sql.includes('VALUES (34,CURRENT_TIMESTAMP::text)'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('CREATE STATISTICS IF NOT EXISTS address.cn_communities_city_stats'))).toBe(true);
+    expect(statements).toContain('ALTER STATISTICS address.cn_communities_city_stats SET STATISTICS 1000');
+    expect(statements.some((sql) => sql.includes('VALUES (35,CURRENT_TIMESTAMP::text)'))).toBe(true);
+  });
+
+  it('rebuilds generation selection indexes without predicate columns when upgrading address version 35', async () => {
+    const query = vi.fn(async () => ({ rows: [{ address_version: 35, control_version: 28 }], fields: [], rowCount: 1 }));
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    const statements = query.mock.calls.map(([sql]) => String(sql));
+    expect(statements).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_country_rank_next ON address.address_generation_index (country_code,country_rank,address_id) WHERE active=1');
+    expect(statements).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_admin1_code_random_next ON address.address_generation_index (country_code,admin1_code_key,random_key,address_id) WHERE active=1');
+    expect(statements).toContain('DROP INDEX CONCURRENTLY IF EXISTS address.idx_generation_country_residential_random');
+    expect(statements).toContain('ALTER INDEX address.idx_generation_postcode_random_next RENAME TO idx_generation_postcode_random');
+    expect(statements.filter((sql) => sql.startsWith('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_'))).toHaveLength(10);
+    expect(statements.some((sql) => sql.includes('VALUES (36,CURRENT_TIMESTAMP::text)'))).toBe(true);
   });
 
   it('allows the Index-Translate route when upgrading control version 27', async () => {
@@ -154,14 +178,15 @@ describe('PostgreSQL database adapter', () => {
     expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '9999' }).max).toBe(16);
   });
 
-  it('bounds parallel query shared memory while keeping an explicit override', () => {
+  it('bounds parallel query shared memory and disables JIT while keeping explicit overrides', () => {
     expect(postgresPoolOptions({}).options).toBe(
-      '-c search_path=address,control,public -c max_parallel_workers_per_gather=0'
+      '-c search_path=address,control,public -c max_parallel_workers_per_gather=0 -c jit=off'
     );
     expect(postgresPoolOptions({
       POSTGRES_OPTIONS: '-c search_path=address',
-      POSTGRES_MAX_PARALLEL_WORKERS_PER_GATHER: '2'
-    }).options).toBe('-c search_path=address -c max_parallel_workers_per_gather=2');
+      POSTGRES_MAX_PARALLEL_WORKERS_PER_GATHER: '2',
+      POSTGRES_JIT: 'on'
+    }).options).toBe('-c search_path=address -c max_parallel_workers_per_gather=2 -c jit=on');
   });
 
   it('upgrades coverage identity from version 26 without rebuilding the address pool or reopening sources', async () => {
@@ -245,7 +270,7 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 33)");
+    expect(addressSchema).toContain("generate_series(1, 36)");
     expect(addressSchema).toContain('idx_address_pool_active_country_id ON address_pool(country_code, id) WHERE active=1');
     expect(addressSchema).toContain("match_level TEXT NOT NULL DEFAULT 'premise'");
     expect(addressSchema).toContain('DROP CONSTRAINT IF EXISTS address_pool_house_number_check');

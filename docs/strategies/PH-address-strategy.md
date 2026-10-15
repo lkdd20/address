@@ -4,13 +4,13 @@
 |---|---|
 | 主源 | Geofabrik `philippines`；PHLPost Zip Code Locator |
 | 既有门牌级格式 / 邮编 | `<house> <street>, <barangay>, <city/municipality>, <province> <postcode>, PH`；格式门禁 4 位数字。源记录缺邮编时，仅允许按 PHLPost 的省份 + 城市/市镇唯一匹配补全；无法唯一匹配的邮编留空，不按邻近地址补齐；来源行政冲突仍拒绝。 |
-| 行政区 | 保留 OSM `addr:barangay` 并映射为最低行政层；PSA PSGC 只做省、市镇、Barangay 名称核验，不生成住宅门牌 |
+| 行政区 | 保留 OSM `addr:barangay` 并映射为最低行政层；PSA PSGC 只做省、市镇、Barangay 名称核验，不生成住宅门牌；对不上目录的 admin1（Eastern Manila District、Region XII、North Cotabato 等）按坐标改为一级大区目录名称（administrative-names-v18） |
 | 住宅子集证据 | OSM 住宅建筑标签；barangay 名称不能证明住宅。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
 | 街道级格式 | `<street>, <barangay>, <city/municipality>, <province>, PH`；`matchLevel=street`，门牌、楼栋、室号为空；可唯一确定的来源邮编保留，否则留空。 |
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；显式启用来源探测后，以 HEAD 检查 OSM PBF，并从 PHLPost sitemap 读取 `lastmod`。元数据不变时不下载正文；每个来源版本只构建一次，无增长时标记来源耗尽 |
 | 既有门牌来源验证 / 排除 | PHLPost 只核验四位邮编；城市或省级字段缺失时不按邮编反推行政区。PSA PSGC 只提供行政目录，不用于补造门牌。 |
-| 策略版本 / 状态 / 更新 | 1.15 / 邮编元数据轻量探测 + 单版本单次构建 + 有限失败暂停 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.16 / 邮编元数据轻量探测 + 单版本单次构建 + 有限失败暂停 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v18 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 上游目录约 74% 的城市挂错省份（如宿务城镇挂在 Bataan 下），按 COD-AB 省界逐一核定后写入 `server/database/catalog-city-regions.json`。admin1 所属大区与 Overture 一级行政区多边形不一致时，按目录邮编改为多边形大区内的省份，给不出时改为大区；同一大区内邮编与最近目录城市一致指向另一省时改为该省。

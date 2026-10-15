@@ -158,13 +158,17 @@ describe('NL admin1 catalog anchoring', () => {
     database.close();
   });
 
-  it('does not rewrite admin1 for countries outside the catalog-anchored set', async () => {
+  it('does not rewrite admin1 for countries outside the catalog-anchored set and drops regions no catalog names', async () => {
     const database = openTestDatabase(':memory:');
-    await seedRegions(database, 'GB', [['ENG', 'England', 'England', 52.3555, -1.1743]]);
+    await seedRegions(database, 'GB', [['ENG', 'England', 'England', 52.3555, -1.1743], ['SMS', 'Someshire', 'Someshire', 51.6, -0.2]]);
     const file = await writeFixture([{
       id: 'gb-1', country: 'GB', admin1: 'Someshire', locality: 'London', postal_city: 'London',
       postcode: 'NW1 6XE', street: 'Baker Street', number: '221', longitude: -0.1586, latitude: 51.5238,
       property_type: 'residential', residential_building_id: 'building-gb-1', residential_building_class: 'house'
+    }, {
+      id: 'gb-2', country: 'GB', admin1: 'Atlantis', locality: 'London', postal_city: 'London',
+      postcode: 'NW1 6XF', street: 'Baker Street', number: '223', longitude: -0.1587, latitude: 51.5239,
+      property_type: 'residential', residential_building_id: 'building-gb-2', residential_building_class: 'house'
     }]);
     await createImporter(database).importShard({
       shard: { id: 'fixture-gb', countryCode: 'GB', source },
@@ -172,7 +176,7 @@ describe('NL admin1 catalog anchoring', () => {
       materialized: { file, format: 'overture-jsonl', checksum: 'e'.repeat(64) },
       maxRecords: 10, perLocality: 5
     });
-    expect(await database.prepare("SELECT admin1 FROM address_pool WHERE country_code='GB'").first('admin1')).toBe('Someshire');
+    expect((await database.prepare("SELECT admin1 FROM address_pool WHERE country_code='GB'").all()).results).toEqual([{ admin1: 'Someshire' }]);
     database.close();
   });
 

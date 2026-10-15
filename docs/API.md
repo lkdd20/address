@@ -154,6 +154,8 @@ Pass returned `id` values unchanged to the `*Id` parameters of `/generate`. Post
 
 Option lists are served from a per-country snapshot that is rebuilt in the background, so counts can trail newly published addresses by a few minutes.
 
+Outside China, region and city options are built from the published addresses: every address belongs to exactly one region option and one city option, each field's counts add up to the country total, and generating for an option draws from exactly the addresses it counts. Regions and cities missing from the catalog (Puerto Rico, towns the catalog lacks) carry stable IDs starting with `loc-region-` and `loc-city-`; pass them unchanged as `regionId` and `cityId`. A city option's `regionId` and `regionValue` name the region option it belongs to.
+
 `GET /locations/hierarchy` takes `country`, `parentType`, `parentId`, and `childType` to browse areas level by level.
 
 ## Address translation

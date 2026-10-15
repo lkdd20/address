@@ -12,7 +12,7 @@
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；显式来源探测发现 eThekwini、Cape Town、SAPO 或 Geofabrik 版本变化时才构建新快照 |
 | 既有官方住宅适配器 / 排除 | 仅保留完整门牌字段与纯住宅 zoning，重复门牌按规范化键去重；数值道路、非标准门牌、多个邮编、混合/非住宅 zoning 和缺坐标记录全部拒绝。 |
-| 策略版本 / 状态 / 更新 | 1.16 / 官方双源 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.17 / 官方双源 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 开普敦地块邮编只接受 City of Cape Town 范围（7000–8099）内唯一的 SAPO 匹配；此前按全国同名 suburb 匹配到外地邮编（如 Sandown→Sandton 2196、Windermere→Durban 4001）的地址，清空邮编和城市后按坐标从目录补全城市。导出修订 `official-parcel-zoning-postcode-v2`。

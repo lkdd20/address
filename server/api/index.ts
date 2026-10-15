@@ -19,7 +19,7 @@ import {
   type AddressFilters
 } from './repositories/address-repository';
 import { loadAddressPoolV2AddressById, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
-import { CN_SYNTHETIC_CITY_PREFIX, decodeSyntheticCityId, decodeSyntheticDistrict, queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
+import { CN_SYNTHETIC_CITY_PREFIX, decodeSyntheticCityId, decodeSyntheticDistrict, queryLocationCatalog, resolveLocationScope, type CatalogField } from './repositories/location-catalog';
 import { countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
 import { isTranslatableLocale, translateAddressComponents } from './services/address-translation';
 import { clientContextFromRequest } from './services/client-context';
@@ -634,7 +634,18 @@ app.get('/api/v1/generate', async (context) => {
     const nearestCatalog = ipRegionMode && ipCoordinates && context.env.LOCATION_DB
       ? await resolveNearestCatalogTarget(context.env.LOCATION_DB, country.code, ipCoordinates)
       : undefined;
-    target = ipRegionMode
+    // Region and city filters resolve to the dropdown option they name, so generation draws from exactly the addresses
+    // the option counts; an unknown option id matches nothing.
+    const scoped = !ipRegionMode && context.env.LOCATION_DB
+      ? await resolveLocationScope(context.env.LOCATION_DB, country.code, filters) : undefined;
+    if (scoped !== undefined) {
+      target = scoped || { regionAliases: [], cityAliases: [], scope: [], bucket: `scope-${countryCode}-none` };
+      if (target.scope?.length && filters.postcodeId) {
+        const postcodeTarget = await resolveCatalogTarget(context.env.LOCATION_DB!, country.code, { postcodeId: filters.postcodeId }, seed);
+        if (postcodeTarget?.postcode) target.postcode = postcodeTarget.postcode;
+        else target.scope = [];
+      }
+    } else target = ipRegionMode
       ? nearestCatalog?.target || (context.env.LOCATION_DB
         ? await resolveCatalogTarget(context.env.LOCATION_DB, country.code, ipLocationFilters, seed)
         : undefined)
@@ -748,7 +759,7 @@ app.get('/api/v1/generate', async (context) => {
     // The location catalog can carry a coarser or differently named parent
     // region than the published pool. Keep the city request usable when the
     // exact city itself is published, and report the relaxed scope.
-    if (filters.city && (filters.region || filters.regionId)) {
+    if (filters.city && (filters.region || filters.regionId) && !target?.scope) {
       const cityFilters: AddressFilters = { ...filters, region: undefined, regionId: undefined };
       const cityTarget: CatalogTarget | undefined = target ? { ...target, region: undefined, regionId: undefined, regionAliases: [] } : undefined;
       const cityAddress = await toleratePoolFailure(() =>

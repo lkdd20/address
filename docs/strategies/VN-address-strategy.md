@@ -4,14 +4,14 @@
 |---|---|
 | 数据源 | Geofabrik `vietnam`；Google Geocoding 补全 |
 | 既有门牌级格式 / 邮编 | `<house> <street>, <ward/commune>, <province/city> <postcode>, VN`；越南语原文优先；按 2025 官方目录仅接受五位邮编，不创造或按邻近地址补齐 |
-| 行政区 | 采用 2025 年两级体系：34 个省级单位 + 3,321 个坊/社级单位；旧 district 不再作为发布必填项，`addr:ward / addr:commune / addr:subdistrict` 映射到 locality |
+| 行政区 | 采用 2025 年两级体系：34 个省级单位 + 3,321 个坊/社级单位；旧 district 不再作为发布必填项，`addr:ward / addr:commune / addr:subdistrict` 映射到 locality；admin1 为被合并旧省名（如 Quảng Nam、Bình Dương）的按第 202/2025/QH15 号决议改为现行省名，乱填的省（电话号码、国名、坊名等）按坐标多边形改正（administrative-names-v15） |
 | 住宅子集证据 | OSM 明确住宅建筑标签；机构黑名单剔除。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
 | 坐标 / 去重 | WGS84 经纬度并通过越南边界门禁；同一批次按规范化地址 canonical hash 去重 |
 | 街道级格式 | `<street>, <ward/commune>, <province/city>, VN`；`matchLevel=street`，门牌、楼栋、室号为空；可唯一确定的来源邮编保留，否则留空。 |
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 / 频率 | Geofabrik PBF 与官方邮编 PDF 执行版本检查，元数据不变时不下载正文；Google 补全使用可恢复 checkpoint。新快照通过门禁后原子切换，失败保留上一 active 快照 |
 | 既有门牌来源验证 / 排除 | 2025 官方 PDF 解析出 34 个省级单位、3,319 条有效记录；只有省级单位 + 坊/社唯一匹配时补邮编。普通搜索 API 不用于全国枚举 |
-| 策略版本 / 状态 / 更新 | 2.7 / Geofabrik + 官方邮编 + Google 补全 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 2.8 / Geofabrik + 官方邮编 + Google 补全 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 默认国家完成数量下限 10,000；省/直辖市、郡县、坊社单来源均衡采样上限 1,200/250/60，后台可覆盖；国家总量不是发布上限，行政区划与邮编目录保持完整。

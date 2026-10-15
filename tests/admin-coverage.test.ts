@@ -48,6 +48,22 @@ describe('admin address coverage', () => {
     expect(await applyAdministrativeCatalogOverrides(database)).toBe(false);
   });
 
+  it('replaces reviewed word-for-word Chinese names, names Japanese prefectures in full and leaves other names alone', async () => {
+    await database.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (1,'TR','72','Batman','Batman','蝙蝠侠','province',NULL,'/1/'),(2,'GB','ENG','England','England','英格兰','country',NULL,'/2/'),
+          (3,'JP','27','Ōsaka','大阪','大阪','prefecture',NULL,'/3/'),(4,'JP','13','Tokyo','東京','东京','prefecture',NULL,'/4/'),
+          (5,'JP','23','Aichi','愛知','爱知县','prefecture',NULL,'/5/'),(6,'JP','01','Hokkaidō','北海道','北海道','prefecture',NULL,'/6/'),
+          (7,'JP','26','Kyōto','京都','京都','prefecture',NULL,'/7/');
+      INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name)
+        VALUES (10,'GB',2,'Bath','Bath','洗澡'),(11,'GB',2,'Bath','Bath','巴斯镇'),(12,'GB',2,'Reading','Reading','阅读'),(13,'GB',2,'London','London','伦敦');`);
+    await applyAdministrativeCatalogOverrides(database);
+    expect(await database.prepare('SELECT zh_name FROM catalog_regions WHERE id=1').first('zh_name')).toBe('巴特曼省');
+    expect((await database.prepare("SELECT native_name FROM catalog_regions WHERE country_code='JP' ORDER BY id").all()).results
+      .map((row) => row.native_name)).toEqual(['大阪府', '東京都', '愛知県', '北海道', '京都府']);
+    expect((await database.prepare("SELECT id,zh_name FROM catalog_cities WHERE country_code='GB' ORDER BY id").all()).results).toEqual([
+      { id: 10, zh_name: '巴斯' }, { id: 11, zh_name: '巴斯镇' }, { id: 12, zh_name: '雷丁' }, { id: 13, zh_name: '伦敦' }]);
+  });
+
   it('joins unique residential evidence instead of rescanning it for every address', async () => {
     const prepare = vi.spyOn(database, 'prepare');
     await refreshAddressCoverage(database);

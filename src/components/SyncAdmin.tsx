@@ -43,6 +43,12 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const loginPending = useRef(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // A floating result clears itself; an action still running keeps its notice until it finishes.
+  useEffect(() => {
+    if (!notice || mutating) return;
+    const timer = window.setTimeout(() => setNotice(''), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice, mutating]);
   const [coverageTrail, setCoverageTrail] = useState<CoverageNode[]>([]);
   const loadIds = useRef<Record<View, number>>({ dashboard: 0, blacklist: 0, access: 0, providers: 0, addressData: 0, syncHistory: 0, shortcuts: 0, tokens: 0 });
   const loadControllers = useRef<Partial<Record<View, AbortController>>>({});
@@ -218,7 +224,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     loadIds.current[selected] += 1;
     loadControllers.current[selected]?.abort();
     setLoadingView(null);
-    setMutating(true); setError(''); setNotice('');
+    setMutating(true); setError(''); setNotice(/\/test$/u.test(path) ? localeText[locale].ui.testing : '');
     try {
       const result = await request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (path === '/settings/access' && result && typeof result === 'object' && 'passwordChangeRequired' in result) {
@@ -331,8 +337,11 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
       </header>
       <div className="admin-page">
         {view === 'dashboard' && <p className="page-intro">{t.dashboardDescription}</p>}
-        {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span><button disabled={mutating || loadingView === view} onClick={() => void load(view)}>{t.retry}</button></div>}
-        {notice && <div className="admin-notice" role="status">{notice}</div>}
+        {/* Results float in view: an action far down the page (a provider test) still shows its outcome. */}
+        {(error || notice) && <div className="admin-toasts">
+          {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span><button disabled={mutating || loadingView === view} onClick={() => void load(view)}>{t.retry}</button></div>}
+          {notice && <div className="admin-notice" role="status">{notice}</div>}
+        </div>}
         {data === undefined ? (view === 'dashboard' ? <DashboardLoading label={t.loading} /> : <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div>) : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
           coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
       </div>

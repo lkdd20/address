@@ -18,6 +18,7 @@ const javascriptRegex = (pattern) => String(pattern)
 const testSchema = (source) => String(source)
   .replace(/\(\(hashtextextended\(id,\s*0\)\s*&\s*2147483647\)\)/giu, 'hashtextextended(id,0)')
   .replace(/\s+CHECK\s*\([a-z_]+\s+IS\s+JSON\)/giu, '')
+  .replace(/(?:CREATE|ALTER) STATISTICS [^;]*;/giu, '')
   .replace(/UPDATE address_pool SET\s+admin1='Fryslân',[\s\S]*?WHERE country_code='NL' AND admin1='Frieland';/u, '')
   .replace(/DROP VIEW IF EXISTS address_pool_runtime;/u, administrativeAssignmentSchema)
   .replace(/CREATE VIEW address_pool_runtime AS[\s\S]*?WHERE address_pool\.active = 1;/u, `CREATE VIEW address_pool_runtime AS

@@ -1,4 +1,5 @@
 import corrections from './catalog-native-corrections.json' with { type: 'json' };
+import chineseCorrections from './catalog-chinese-corrections.json' with { type: 'json' };
 
 // Countries whose addresses are written in English; their catalog native names are the English names, apart from
 // accented local spellings such as Montréal.
@@ -19,4 +20,5 @@ export const nativeNameMatches = (left, right, { exact = false } = {}) => {
 };
 
 export const catalogNativeCorrections = corrections;
+export const catalogChineseCorrections = chineseCorrections;
 export const correctedNativeName = (kind, id, native) => corrections[kind]?.[String(id)] ?? native;

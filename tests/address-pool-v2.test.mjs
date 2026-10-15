@@ -668,4 +668,30 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(selected?.address.id).toBe('pool-v2-suburb');
     expect(boxes.map(([south, north]) => Math.round((north - south) * 111.32 / 2))).toEqual([2, 8]);
   });
+
+  it('searches the IP box through the generation index and reads only the nearest rows', async () => {
+    const statements = [];
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind(...values) { statements.push({ sql, values }); return statement; },
+          async all() {
+            return sql.includes('distance_score')
+              ? { results: [{ id: 'closest' }, { id: 'farther' }] }
+              : { results: [{ ...row, id: 'farther', latitude: 35.68, longitude: 139.642 }, { ...row, id: 'closest', latitude: 35.6761, longitude: 139.6421 }] };
+          }
+        };
+        return statement;
+      }
+    };
+    const selected = await pickNearestAddressPoolV2Address(
+      database, 'JP', true, { latitude: 35.676, longitude: 139.642 }, 'index', 25, new Date('2026-07-20T00:00:00Z')
+    );
+    expect(statements[0].sql).toContain('JOIN address_generation_index generation');
+    expect(statements[0].sql).toContain('generation.residential_ready=1');
+    expect(statements[0].sql).not.toContain('address_pool_runtime');
+    expect(statements[1].sql).toContain('address_pool_runtime WHERE active = 1 AND id IN (?,?)');
+    expect(statements[1].values).toEqual(['closest', 'farther']);
+    expect(['pool-v2-closest', 'pool-v2-farther']).toContain(selected?.address.id);
+  });
 });

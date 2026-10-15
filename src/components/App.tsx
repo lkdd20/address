@@ -982,15 +982,25 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     cancelGeneration(); cancelLocationFields(['region', 'city', 'district', 'postcode']);
     setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setLocationLoadState(emptyLocationLoadState); setLocationErrors({});
     const overrides: GenerationOptions = {};
-    if (shortcut.type === 'region') {
-      setRegion(shortcut.value); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
-      Object.assign(overrides, { region: shortcut.value, regionId: '', city: '', cityId: '', district: '', postcode: '', postcodeId: '' });
-      void loadOptions('city', '', { region: shortcut.value, regionId: '' });
+    // A shortcut selects the dropdown option it names, exactly as choosing that option would.
+    const option = shortcut.option;
+    if (option?.field === 'region' || !option && shortcut.type === 'region') {
+      const value = option?.value || shortcut.value;
+      const id = option?.id || '';
+      setRegion(value); setRegionId(id); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+      Object.assign(overrides, { region: value, regionId: id, city: '', cityId: '', district: '', postcode: '', postcodeId: '' });
+      void loadOptions('city', '', { region: value, regionId: id });
     }
-    if (shortcut.type === 'city') {
-      setRegion(''); setRegionId(''); setCity(shortcut.value); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
-      Object.assign(overrides, { region: '', regionId: '', city: shortcut.value, cityId: '', district: '', postcode: '', postcodeId: '' });
+    if (option?.field === 'city' || !option && shortcut.type === 'city') {
+      const value = option?.value || shortcut.value;
+      const regionValue = option?.regionValue || '';
+      const parentId = option?.regionId || '';
+      setRegion(regionValue); setRegionId(parentId); setCity(value); setCityId(option?.id || ''); setDistrict(''); setPostcode(''); setPostcodeId('');
+      Object.assign(overrides, { region: regionValue, regionId: parentId, city: value, cityId: option?.id || '', district: '', postcode: '', postcodeId: '' });
+      if (option) void loadOptions('city', '', { region: regionValue, regionId: parentId });
     }
+    // The selected options show their labels once their lists are loaded again.
+    if (option) void loadOptions('region', '', { region: '', regionId: '' });
     if (shortcut.type === 'postcode') {
       setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(shortcut.value); setPostcodeId('');
       Object.assign(overrides, { region: '', regionId: '', city: '', cityId: '', district: '', postcode: shortcut.value, postcodeId: '' });
@@ -1164,7 +1174,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
                 setLocationErrors((current) => ({ ...current, city: '', district: '', postcode: '' }));
                 void loadOptions('city', '', { region: value, regionId: option.id || '' });
               }}/>}
-              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city, locationRetries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
+              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city, locationRetries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} showContext={!region} onChange={(value, option) => {
                 cancelGeneration(); cancelLocationFields(['district', 'postcode']);
                 setCity(value); setCityId(option.id || ''); setDistrict(''); setPostcode(''); setPostcodeId('');
                 setLocations((current) => ({ ...current, districts: [], postcodes: [] }));

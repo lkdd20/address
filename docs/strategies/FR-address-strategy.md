@@ -12,7 +12,7 @@
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；显式来源探测发现 BDNB millésime 或地图来源版本变化时才重建。各 département 独立保存状态，新快照失败不影响已有 active 数据 |
 | 既有官方住宅适配器 / 排除 | 既有 BDNB 住宅适配器要求门牌、道路、5 位邮编、INSEE commune、合法坐标与住宅证据，只接受 BAN 地址并将 EPSG:2154 转为 WGS84；海外区域使用离散坐标范围，禁止跨洋矩形误收 |
-| 策略版本 / 状态 / 更新 | 1.13 / BDNB 多 département 严格住宅关联 + 解除旧区域容量截断 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v9 / 2026-10-13 |
+| 策略版本 / 状态 / 更新 | 1.14 / BDNB 多 département 严格住宅关联 + 解除旧区域容量截断 + 多规则完成下限 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - admin1 所属大区与 Overture 一级行政区多边形不一致时（如 Barbentane 记为 Gard），按目录邮编改为多边形大区内的省（département），邮编给不出时改为大区；同一大区内邮编与最近目录城市一致指向另一省时改为该省（如 Montrouge 92120 记为 Paris）。目录中 Haute-Saône 的上级改为 Bourgogne-Franche-Comté。Paris（75C）、Métropole de Lyon（69M）和 Alsace（6AE）在目录中改为所属大区下的省级单位。没有目录城市的跨省集合体（Alsace）内的邮编不视为矛盾。省份按邮编前两位确定（Corse 200–201 为 2A、202–206 为 2B，69 交给目录区分 Rhône 与 Métropole de Lyon）。

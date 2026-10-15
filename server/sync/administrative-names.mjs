@@ -1,7 +1,12 @@
 import { requiresAdminCode } from '../../src/domain/address-contracts.mjs';
 import { englishNativeCountries } from '../database/catalog-native-names.mjs';
+import { nameVariants, variantRegionIndex } from '../../src/domain/region-names.mjs';
 
-export const ADMINISTRATIVE_NAMES_REVISION = 'administrative-names-v9';
+export const ADMINISTRATIVE_NAMES_REVISION = 'administrative-names-v15';
+// A country whose published rows need another pass without rescanning every country takes its own revision.
+const countryRevisions = { KR: 'administrative-names-v17', PH: 'administrative-names-v18', IN: 'administrative-names-v18',
+  AU: 'administrative-names-v18', US: 'administrative-names-v18', CA: 'administrative-names-v18' };
+export const administrativeNamesRevision = (countryCode) => countryRevisions[countryCode] || ADMINISTRATIVE_NAMES_REVISION;
 // USPS, Canada Post, Australia Post and Correios write first-level regions as codes, so the native and English
 // address keep the code; the Chinese address always names the region.
 export const postalRegionCodeCountries = new Set(['US', 'CA', 'AU', 'BR']);
@@ -41,6 +46,24 @@ export const usTerritories = Object.freeze({
   PR: { name: 'Puerto Rico', zh: '波多黎各' }, VI: { name: 'U.S. Virgin Islands', zh: '美属维尔京群岛' },
   GU: { name: 'Guam', zh: '关岛' }, AS: { name: 'American Samoa', zh: '美属萨摩亚' }, MP: { name: 'Northern Mariana Islands', zh: '北马里亚纳群岛' }
 });
+
+// Provinces merged into another by Vietnam's Resolution 202/2025/QH15 (in force 1 July 2025), by the province that now
+// holds them; the catalog lists the 34 current provinces.
+const vietnamMergedProvinces = {
+  'Tuyên Quang': ['Hà Giang'], 'Lào Cai': ['Yên Bái'], 'Thái Nguyên': ['Bắc Kạn'], 'Phú Thọ': ['Vĩnh Phúc', 'Hòa Bình'],
+  'Bắc Ninh': ['Bắc Giang'], 'Hưng Yên': ['Thái Bình'], 'Hải Phòng': ['Hải Dương'], 'Ninh Bình': ['Hà Nam', 'Nam Định'],
+  'Quảng Trị': ['Quảng Bình'], 'Đà Nẵng': ['Quảng Nam'], 'Quảng Ngãi': ['Kon Tum'], 'Gia Lai': ['Bình Định'],
+  'Khánh Hòa': ['Ninh Thuận'], 'Lâm Đồng': ['Đắk Nông', 'Bình Thuận'], 'Đắk Lắk': ['Phú Yên'],
+  'Hồ Chí Minh': ['Bà Rịa - Vũng Tàu', 'Bà Rịa Vũng Tàu', 'Vũng Tàu - Bà Rịa', 'Bình Dương'], 'Đồng Nai': ['Bình Phước'],
+  'Tây Ninh': ['Long An'], 'Cần Thơ': ['Sóc Trăng', 'Hậu Giang'], 'Vĩnh Long': ['Bến Tre', 'Trà Vinh'], 'Đồng Tháp': ['Tiền Giang'],
+  'Cà Mau': ['Bạc Liêu'], 'An Giang': ['Kiên Giang'], 'Thừa Thiên-Huế': ['Huế', 'Thành phố Huế']
+};
+const regionSuccessors = { VN: Object.entries(vietnamMergedProvinces).flatMap(([current, merged]) => merged.map((name) => [name, current])) };
+// Current first-level units the catalog does not list yet keep their names: the Jeonnam-Gwangju Unified Special City
+// replaced Gwangju and South Jeolla on 1 July 2026.
+const regionsMissingFromCatalog = {
+  KR: { 전남광주통합특별시: { en: 'Jeonnam Gwangju Unified Special City', zh: '全罗南道光州统一特别市' } }
+};
 
 const clean = (value) => String(value ?? '').trim();
 const fold = (value) => clean(value).normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
@@ -85,10 +108,24 @@ export const createAdministrativeNames = (countryCode, regions = [], cities = []
     if (!citiesByRoot.has(root?.id ?? null)) citiesByRoot.set(root?.id ?? null, new Map());
     for (const name of new Set([city.name, city.native_name, city.zh_name].map(fold))) add(citiesByRoot.get(root?.id ?? null), name, city);
   }
+  const cityRoots = new Map();
+  for (const city of cities) {
+    const root = rootOf(byId.get(city.region_id));
+    if (root) for (const name of new Set([city.name, city.native_name].map(fold))) add(cityRoots, name, root);
+  }
+  const successors = new Map((regionSuccessors[countryCode] || []).flatMap(([name, current]) =>
+    [...nameVariants(name)].map((variant) => [variant, current])));
+  const missingNames = new Map(Object.entries(regionsMissingFromCatalog[countryCode] || {}).map(([name, names]) => [fold(name), { name, ...names }]));
+  const missing = new Set(missingNames.keys());
+  const byVariant = variantRegionIndex(roots, (region) => region);
   const regionFor = ({ admin1, admin1Code, locality, postalLocality }) => {
     const text = clean(admin1);
     const named = unique(byText.get(fold(text)));
     if (named) return { region: named, byCode: false };
+    // A merged region's former name takes the name of the region that holds it now.
+    const successor = text && [...nameVariants(text)].map((variant) => successors.get(variant)).find(Boolean);
+    const current = successor && unique(byText.get(fold(successor)));
+    if (current) return { region: current, byCode: false, renamed: true };
     const coded = unique(byCode.get(codeKey(text)));
     if (coded) return { region: coded, byCode: true };
     const lower = !byText.has(fold(text)) && unique(lowerByText.get(fold(text)));
@@ -109,7 +146,34 @@ export const createAdministrativeNames = (countryCode, regions = [], cities = []
     if (fromField && (!text || postalRegionCodeCountries.has(countryCode) && (inRegion(locality) || inRegion(postalLocality)))) {
       return { region: fromField, byCode: true };
     }
+    // Official and colloquial spellings (서울특별시, منطقة الرياض, Белгородская область) name the region and keep their text.
+    const spelled = text && byVariant(text);
+    if (spelled) return { region: spelled, byCode: false, spelled: true };
     return null;
+  };
+  // Text naming no region in any spelling (typos, a city, a phone number) takes the first-level region of the polygon
+  // containing the point. US territories and current units missing from the catalog keep their names.
+  const regionRecognized = (components) => Boolean(regionFor(components) || missing.has(fold(components.admin1))
+    || countryCode === 'US' && usTerritories[clean(components.admin1Code || components.admin1).toUpperCase()]);
+  const unrecognizedRegion = (components, boundary, { latitude, longitude } = {}) => {
+    if (regionRecognized(components)) return null;
+    const code = clean(boundary?.code).toUpperCase();
+    // Without an admin1 and a coded polygon (overseas territories), a city the whole catalog places in one region names
+    // it, or else the one region every catalog city near the point belongs to.
+    const empty = !clean(components.admin1);
+    const named = empty && [components.locality, components.postalLocality]
+      .map((value) => clean(value) && unique(cityRoots.get(fold(value)))).find(Boolean);
+    const nearby = empty && !named && Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
+      ? unique(new Set(located.filter((city) => (Number(city.latitude) - Number(latitude)) ** 2 + (Number(city.longitude) - Number(longitude)) ** 2
+        < NEAREST_CITY_DEGREES ** 2).map((city) => rootOf(byId.get(city.region_id))))) : null;
+    const root = code.startsWith(`${countryCode}-`) ? rootsByCode.get(codeKey(code.slice(3))) : named || nearby || null;
+    // A polygon naming a current unit the catalog does not list yet gives that unit.
+    const current = !root && missingNames.get(fold(boundary?.name));
+    if (current) return { admin1: current.name, admin1Code: '', admin1En: current.en, admin1Zh: current.zh };
+    if (!root) return null;
+    const admin1 = postalRegionCodeCountries.has(countryCode) ? clean(root.code) : clean(root.native_name) || clean(root.name);
+    return admin1 ? { admin1, admin1Code: lowerLevelCodeCountries.has(countryCode) ? '' : clean(root.code),
+      admin1En: clean(root.name) || admin1, admin1Zh: han.test(clean(root.zh_name)) ? clean(root.zh_name) : '' } : null;
   };
   const cityFor = (region, value) => unique(citiesByRoot.get(region?.id ?? null)?.get(fold(value)));
   const postcodeRoots = new Map();
@@ -161,6 +225,8 @@ export const createAdministrativeNames = (countryCode, regions = [], cities = []
   const chineseFill = countryCode === 'JP';
   return {
     regionFor,
+    regionRecognized,
+    unrecognizedRegion,
     postcodeRegionFor,
     // Mixed-level countries: the first-level polygon containing the point overrules an admin1 from another region,
     // which is replaced by the province of its postcode inside the polygon region, or by the region itself. Inside the
@@ -204,16 +270,28 @@ export const createAdministrativeNames = (countryCode, regions = [], cities = []
         const text = clean(components.admin1);
         const keepsCode = match.byCode && postalRegionCodeCountries.has(countryCode);
         const nativeName = keepsCode ? text && clean(region.code) || text : clean(region.native_name) || clean(region.name);
-        if ((match.byCode || match.renamed) && nativeName && nativeName !== text) result.native.admin1 = nativeName;
+        // Japanese addresses name the prefecture in full (大阪府, not 大阪).
+        const shortPrefecture = countryCode === 'JP' && /[都道府県]$/u.test(nativeName) && text !== nativeName && nativeName.startsWith(text);
+        // English-language addresses write the catalog's casing (kerala, TAMIL NADU → Kerala, Tamil Nadu).
+        const recased = englishNative && countryCode !== 'MY' && !keepsCode && text.toLocaleLowerCase() === nativeName.toLocaleLowerCase();
+        if ((match.byCode || match.renamed || shortPrefecture || recased) && nativeName && nativeName !== text) result.native.admin1 = nativeName;
         // English-language countries write the same region in both variants; Malaysia keeps Malay state names natively.
-        const english = keepsCode || englishNative && countryCode !== 'MY' ? nativeName
+        // A region recognized by another spelling keeps it, so English-language countries write that spelling twice.
+        const english = keepsCode || englishNative && countryCode !== 'MY' ? (match.spelled ? text : nativeName)
           : !sharedEnglish(region.name) && clean(region.name) || '';
         if (english) result.en.admin1 = english;
         if (han.test(clean(region.zh_name)) && !sharedChinese(region.zh_name) && !keepChinese('admin1')) result['zh-CN'].admin1 = clean(region.zh_name);
       } else if (territory) {
         result['zh-CN'].admin1 = territory.zh;
+      } else if (missingNames.has(fold(components.admin1))) {
+        const current = missingNames.get(fold(components.admin1));
+        if (!englishNative) result.en.admin1 = current.en;
+        result['zh-CN'].admin1 = current.zh;
       }
       for (const field of ['locality', 'postalLocality']) {
+        // English-language countries write the same city in both variants; accented local spellings (Montréal) stay.
+        if (englishNative && countryCode !== 'MY' && clean(components[field]) && clean(current?.en?.[field])
+          && fold(current.en[field]) !== fold(components[field])) result.en[field] = clean(components[field]);
         const city = clean(components[field]) && cityFor(match?.root || match?.region, components[field]);
         if (!city) continue;
         if (!englishNative && /\p{Script=Latin}/u.test(clean(city.name)) && !/\p{Script=Latin}/u.test(clean(current?.en?.[field]))) {
@@ -224,6 +302,13 @@ export const createAdministrativeNames = (countryCode, regions = [], cities = []
       return result;
     }
   };
+};
+
+// Singapore is one city: an admin1 naming neither it nor a catalog district (an OSM 東京都) becomes Singapore.
+export const singaporeRegion = (regions = []) => {
+  const known = new Set(['singapore', '新加坡', ...regions.flatMap((region) => [region.name, region.native_name, region.zh_name])].map(fold).filter(Boolean));
+  return (components) => clean(components.admin1) && !known.has(fold(components.admin1))
+    ? { admin1: 'Singapore', admin1Code: '', admin1En: 'Singapore', admin1Zh: '新加坡' } : null;
 };
 
 export const loadAdministrativeNames = async (database, countryCode, { withPostcodes = false } = {}) => {

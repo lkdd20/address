@@ -716,6 +716,7 @@ describe('source-backed translation recovery', () => {
     expireAfterFirstPublication();
     expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl, now })).updated).toBe(1);
     expect(await database.prepare("SELECT active FROM address_pool WHERE id='z-canada'").first('active')).toBe(1);
+    expect(await database.prepare("SELECT address_count FROM sync_country_state WHERE country_code='CA'").first('address_count')).toBe(1);
     expect(await database.prepare("SELECT reason FROM translation_recovery WHERE address_id='street-fixture'").first('reason'))
       .toBe('publication_deferred');
   });

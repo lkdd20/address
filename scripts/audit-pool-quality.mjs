@@ -4,16 +4,16 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { requiresAdminCode } from '../src/domain/address-contracts.mjs';
-import { junkCharacters, localityIssue } from '../src/domain/address-quality.mjs';
+import { junkCharacters, localityIssue, validateAddressQuality } from '../src/domain/address-quality.mjs';
 import { createPostgresPool, PostgresDatabase } from '../server/database/postgres.mjs';
-import { administrativeNameCountries, loadAdministrativeNames, mixedLevelCountries, usTerritories } from '../server/sync/administrative-names.mjs';
+import { administrativeNameCountries, loadAdministrativeNames, mixedLevelCountries, singaporeRegion, usTerritories } from '../server/sync/administrative-names.mjs';
 import { wrongPostalArea } from '../server/sync/administrative-names-repair.mjs';
 import { runProcess } from '../server/sync/process.mjs';
 import { regionBoundaryCountries, regionsForPoints } from '../server/sync/region-boundaries.mjs';
 
 const clean = (value) => String(value ?? '').trim();
 const han = /\p{Script=Han}/u;
-const blocking = ['outside_country', 'junk_characters', 'region_code_conflict', 'region_name_is_code', 'region_outside_catalog', 'region_boundary', 'postal_area',
+const blocking = ['quality_invalid', 'outside_country', 'junk_characters', 'region_code_conflict', 'region_name_is_code', 'region_outside_catalog', 'region_unrecognized', 'region_boundary', 'postal_area',
   'zh_region', 'en_region', 'zh_city', 'en_city', 'locality_invalid'];
 // The catalog postcode table assigns some postcodes to the wrong region (e.g. NL 4542 Hoek to Friesland), so a
 // postcode conflict is reported for review but cannot block or drive repairs.
@@ -30,6 +30,8 @@ const field = (row, language, name) => clean(row[`${language === 'en' ? 'en' : '
 const report = {};
 for (const countryCode of countries) {
   const names = administrativeNameCountries(countryCode) ? await loadAdministrativeNames(database, countryCode, { withPostcodes: true }) : null;
+  const singapore = countryCode === 'SG' ? singaporeRegion((await database.prepare(
+    'SELECT name,native_name,zh_name FROM catalog_regions WHERE country_code=?').bind(countryCode).all()).results) : null;
   const counts = Object.fromEntries([...blocking, ...warnings].map((rule) => [rule, 0]));
   const examples = {};
   const flag = (rule, row, detail) => {
@@ -38,7 +40,7 @@ for (const countryCode of countries) {
   };
   let total = 0;
   for (let cursor = ''; ;) {
-    const page = (await database.prepare(`SELECT id,native_language,admin1,admin1_code,locality,postal_locality,postcode,latitude,longitude,generation,street,house_number,building_name,district,
+    const page = (await database.prepare(`SELECT id,native_language,admin1,admin1_code,locality,postal_locality,postcode,latitude,longitude,generation,street,house_number,building_name,district,match_level,
         component_variants_json::jsonb->'en'->>'admin1' AS en_admin1,
         component_variants_json::jsonb->'en'->>'locality' AS en_locality,
         component_variants_json::jsonb->'en'->>'postalLocality' AS en_postal_locality,
@@ -54,6 +56,10 @@ for (const countryCode of countries) {
       cacheDir: process.env.ADDRESS_SYNC_CACHE_DIR || '.data-cache', pythonBin: process.env.PYTHON_BIN || 'python3', execute: quiet }) : new Map();
     for (const row of page) {
       const native = { admin1: row.admin1, admin1Code: row.admin1_code, locality: row.locality, postalLocality: row.postal_locality };
+      // The import gate's own rules (Japanese prefectures end in 都道府県, required fields, postcode formats) still hold.
+      const quality = validateAddressQuality({ countryCode, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level || 'premise',
+        components: { ...native, houseNumber: row.house_number, street: row.street, buildingName: row.building_name, district: row.district, postcode: row.postcode } });
+      if (quality.reasons.length) flag('quality_invalid', row, { reasons: quality.reasons, admin1: row.admin1, locality: row.locality });
       const issue = countryCode === 'CN' ? '' : localityIssue(countryCode, native);
       if (issue) flag('locality_invalid', row, { issue, locality: row.locality, postalLocality: row.postal_locality });
       const junk = [row.street, row.house_number, row.building_name, row.district, row.admin1, row.locality, row.postal_locality]
@@ -61,6 +67,7 @@ for (const countryCode of countries) {
       if (junk) flag('junk_characters', row, { value: junk });
       if (boundaries.get(row.id)?.outside) flag('outside_country', row, { admin1: row.admin1, locality: row.locality, latitude: row.latitude, longitude: row.longitude });
       if (wrongPostalArea(countryCode, row)) flag('postal_area', row, { postcode: row.postcode, locality: row.locality });
+      if (singapore?.(native)) flag('region_unrecognized', row, { admin1: row.admin1 });
       if (!names) continue;
       const moved = names.regionInBoundary(native, boundaries.get(row.id), { postcode: row.postcode, latitude: row.latitude, longitude: row.longitude });
       if (moved) flag('region_boundary', row, { admin1: row.admin1, postcode: row.postcode, region: boundaries.get(row.id)?.code, expected: moved.admin1 });
@@ -76,6 +83,9 @@ for (const countryCode of countries) {
       if (named && posted && named.id !== posted.id && clean(named.code) !== clean(posted.code)) {
         flag('region_postcode_conflict', row, { admin1: row.admin1, postcode: row.postcode, postcodeRegion: posted.code || posted.name });
       }
+      // Every region must be one the dropdowns can name: a catalog region in any spelling, a US territory, or a current
+      // unit the catalog does not list yet.
+      if (!names.regionRecognized(native)) flag('region_unrecognized', row, { admin1: row.admin1, admin1Code: row.admin1_code });
       if (requiresAdminCode(countryCode) && clean(row.admin1) && !names.regionFor(native)
         && !(countryCode === 'US' && usTerritories[clean(row.admin1_code || row.admin1).toUpperCase()])) {
         flag('region_outside_catalog', row, { admin1: row.admin1, admin1Code: row.admin1_code });

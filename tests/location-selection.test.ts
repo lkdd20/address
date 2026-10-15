@@ -43,10 +43,28 @@ const chinaDb = (fixture: ChinaFixture): CatalogDb => ({
   }
 } as unknown as CatalogDb);
 
-const generationGroups = (rows: Array<{ name: string; region_name: string | null; region_code: string | null }>) => rows.map((row) => ({
-  admin1_key: (row.region_name || '').toLowerCase(), admin1_code_key: (row.region_code || '').toLowerCase(),
-  locality_key: row.name.toLowerCase(), postal_locality_key: row.name.toLowerCase(), address_count: 1
-}));
+interface AdminFixture {
+  regions: Array<{ id: number; parent_id?: number | null; code: string; name: string; native_name: string; zh_name: string }>;
+  cities: Array<{ id: number; region_id: number; name: string; native_name: string; zh_name: string; population?: number | null }>;
+  groups: Array<{ admin1_key: string; admin1_code_key: string; locality_key: string; postal_locality_key: string; address_count: number }>;
+  statements?: string[];
+}
+const adminDb = (fixture: AdminFixture): CatalogDb => ({
+  prepare(sql: string) {
+    fixture.statements?.push(sql);
+    const statement = {
+      bind() { return statement; },
+      async first<T>() { return null as T; },
+      async all<T>() {
+        if (sql.includes('FROM catalog_regions')) return { results: fixture.regions.map((region) => ({ parent_id: null, path: `/${region.id}/`, ...region })) } as T;
+        if (sql.includes('FROM catalog_cities c')) return { results: fixture.cities } as T;
+        if (sql.includes('FROM address_generation_index')) return { results: fixture.groups } as T;
+        return { results: [] } as T;
+      }
+    };
+    return statement;
+  }
+} as unknown as CatalogDb);
 
 const beijingRegion = { id: 2257, code: 'BJ', name: 'Beijing', native_name: '北京市', zh_name: '北京市' };
 const hebeiRegion = { id: 2280, code: 'HE', name: 'Hebei', native_name: '河北省', zh_name: '河北省' };
@@ -152,25 +170,15 @@ describe('stable location selection', () => {
     expect(statements.join('\n')).not.toContain('address_pool_evidence');
   });
 
-  it('counts only generator-compatible city names instead of coverage estimates', async () => {
-    const statements: string[] = [];
-    const row = {
-      id: 124126, region_id: 1422, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城',
-      region_name: 'Pennsylvania', region_native_name: 'Pennsylvania', region_zh_name: '宾夕法尼亚州', region_code: 'PA'
-    };
+  it('writes a postcode the catalog does not list in the form addresses store it', async () => {
     const db = {
       prepare(sql: string) {
-        statements.push(sql);
         const statement = {
           bind() { return statement; },
-          async first<T>() { return (sql.includes('SELECT r.id') ? { id: 1422 } : { total: 1 }) as T; },
+          async first<T>() { return null as T; },
           async all<T>() {
-            if (sql.includes('SELECT c.id, c.region_id')) return { results: [row] } as T;
-            if (sql.includes('address_generation_index')) return { results: [
-              { ...generationGroups([row])[0], address_count: 8 },
-              { ...generationGroups([row])[0], locality_key: 'Philadelphia City', postal_locality_key: '', address_count: 2 }
-            ] } as T;
-            if (sql.includes('city_id IS NULL')) return { results: [{ city_name: 'Philadelphia City', address_count: 2 }] } as T;
+            if (sql.includes('GROUP BY postcode_key')) return { results: [{ postcode_key: 'da158dz', admin1_key: 'bexley',
+              admin1_code_key: 'bex', locality_key: 'sidcup', postal_locality_key: 'sidcup', address_count: 2 }] } as T;
             return { results: [] } as T;
           }
         };
@@ -178,34 +186,41 @@ describe('stable location selection', () => {
       }
     } as unknown as CatalogDb;
 
+    const result = await queryLocationCatalog(db, { country: 'GB', field: 'postcode', limit: 200 });
+
+    expect(result.options).toEqual([expect.objectContaining({ value: 'DA15 8DZ', label: 'DA15 8DZ', availableCount: 2 })]);
+  });
+
+  it('counts every published spelling of a catalog city under that city', async () => {
+    const statements: string[] = [];
+    const db = adminDb({
+      statements,
+      regions: [{ id: 1422, code: 'PA', name: 'Pennsylvania', native_name: 'Pennsylvania', zh_name: '宾夕法尼亚州' }],
+      cities: [{ id: 124126, region_id: 1422, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城', population: 1600000 }],
+      groups: [
+        { admin1_key: 'pennsylvania', admin1_code_key: 'pa', locality_key: 'philadelphia', postal_locality_key: 'philadelphia', address_count: 8 },
+        { admin1_key: 'pennsylvania', admin1_code_key: 'pa', locality_key: 'philadelphia city', postal_locality_key: '', address_count: 2 }
+      ]
+    });
+
     const result = await queryLocationCatalog(db, { country: 'US', field: 'city', regionId: '1422', residential: true });
 
-    expect(result.options[0]).toMatchObject({ id: '124126', availableCount: 8, disabled: false });
+    expect(result.options).toEqual([expect.objectContaining({ id: '124126', availableCount: 10, disabled: false })]);
     expect(statements).toContainEqual(expect.stringContaining('FROM address_generation_index'));
     expect(statements.join('\n')).not.toContain('residential_coverage');
   });
 
   it('keeps parent metadata without adding the parent region to city labels', async () => {
-    const rows = [
-      {
-        id: 124126, region_id: 1422, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城',
-        region_name: 'Pennsylvania', region_native_name: 'Pennsylvania', region_zh_name: '宾夕法尼亚州', region_code: 'PA'
-      },
-      {
-        id: 124127, region_id: 1452, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城',
-        region_name: 'New York', region_native_name: 'New York', region_zh_name: '纽约州', region_code: 'NY'
-      }
-    ];
-    const db = {
-      prepare(sql: string) {
-        const statement = {
-          bind() { return statement; },
-          async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
-        };
-        return statement;
-      }
-    } as unknown as CatalogDb;
+    const db = adminDb({
+      regions: [{ id: 1422, code: 'PA', name: 'Pennsylvania', native_name: 'Pennsylvania', zh_name: '宾夕法尼亚州' },
+        { id: 1452, code: 'NY', name: 'New York', native_name: 'New York', zh_name: '纽约州' }],
+      cities: [{ id: 124126, region_id: 1422, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城' },
+        { id: 124127, region_id: 1452, name: 'Philadelphia', native_name: 'Philadelphia', zh_name: '费城' }],
+      groups: [
+        { admin1_key: 'pennsylvania', admin1_code_key: 'pa', locality_key: 'philadelphia', postal_locality_key: 'philadelphia', address_count: 2 },
+        { admin1_key: 'new york', admin1_code_key: 'ny', locality_key: 'philadelphia', postal_locality_key: 'philadelphia', address_count: 1 }
+      ]
+    });
 
     const result = await queryLocationCatalog(db, { country: 'US', field: 'city', query: 'Philadelphia' });
 
@@ -247,20 +262,11 @@ describe('stable location selection', () => {
     ['HK', '九龍', 'Kowloon', '九龙'],
     ['TW', '臺北市', 'Taipei', '台北市']
   ] as const)('shows only the native Chinese city name for %s', async (country, nativeName, englishName, chineseName) => {
-    const rows = [{
-      id: 201, region_id: 20, name: englishName, native_name: nativeName, zh_name: chineseName,
-      region_name: 'Region', region_native_name: '地区', region_zh_name: '地区', region_code: 'R'
-    }];
-    const db = {
-      prepare(sql: string) {
-        const statement = {
-          bind() { return statement; },
-          async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
-        };
-        return statement;
-      }
-    } as unknown as CatalogDb;
+    const db = adminDb({
+      regions: [{ id: 20, code: 'R', name: 'Region', native_name: '地区', zh_name: '地区' }],
+      cities: [{ id: 201, region_id: 20, name: englishName, native_name: nativeName, zh_name: chineseName }],
+      groups: [{ admin1_key: 'region', admin1_code_key: 'r', locality_key: englishName.toLowerCase(), postal_locality_key: '', address_count: 1 }]
+    });
 
     const result = await queryLocationCatalog(db, { country, field: 'city', limit: 20_000 });
 
@@ -269,20 +275,11 @@ describe('stable location selection', () => {
   });
 
   it('shows native, English and Chinese names without the parent region for non-Chinese cities', async () => {
-    const rows = [{
-      id: 201, region_id: 20, name: 'Mexico City', native_name: 'Ciudad de México', zh_name: '墨西哥城',
-      region_name: 'Ciudad de México', region_native_name: 'Ciudad de México', region_zh_name: '墨西哥城', region_code: 'CMX'
-    }];
-    const db = {
-      prepare(sql: string) {
-        const statement = {
-          bind() { return statement; },
-          async first<T>() { return { total: rows.length } as T; },
-          async all<T>() { return { results: sql.includes('SELECT c.id') ? rows : sql.includes('address_generation_index') ? generationGroups(rows) : [] } as T; }
-        };
-        return statement;
-      }
-    } as unknown as CatalogDb;
+    const db = adminDb({
+      regions: [{ id: 20, code: 'CMX', name: 'Ciudad de México', native_name: 'Ciudad de México', zh_name: '墨西哥城' }],
+      cities: [{ id: 201, region_id: 20, name: 'Mexico City', native_name: 'Ciudad de México', zh_name: '墨西哥城' }],
+      groups: [{ admin1_key: 'ciudad de méxico', admin1_code_key: 'cmx', locality_key: 'ciudad de méxico', postal_locality_key: '', address_count: 1 }]
+    });
 
     const result = await queryLocationCatalog(db, { country: 'MX', field: 'city', limit: 20_000 });
 
@@ -321,7 +318,7 @@ describe('stable location selection', () => {
 
     await queryLocationCatalog(db, { country: 'AU', field: 'city' });
 
-    expect(statements.find((sql) => sql.includes('SELECT c.id, c.region_id')))
+    expect(statements.find((sql) => sql.includes('FROM catalog_cities c')))
       .toContain('ORDER BY COALESCE(c.population,0) DESC,c.name,c.id');
   });
 

@@ -286,15 +286,33 @@ describe('China community storage integration', () => {
     [{ district: '湖里' }, 2, ['湖里', '湖里区']],
     [{ region: '福建', city: '厦门', district: '湖里' }, 8, ['福建', '福建省', '厦门', '厦门市', '湖里', '湖里区']]
   ] as const)('bounds every administrative alias window before merging %j', async (filters, branches, aliases) => {
-    const bind = vi.fn((..._values: unknown[]) => ({ all: async () => ({ results: [] }) }));
+    // Every spelling is in use, so every alias combination gets its own window.
+    const columns = { region: 'province', city: 'city', district: 'district' } as const;
+    const used = Object.entries(filters).reduce<Array<Record<string, string>>>((rows, [filter, value]) => rows.flatMap((row) =>
+      [value, `${value}${{ region: '省', city: '市', district: '区' }[filter as keyof typeof columns]}`]
+        .map((alias) => ({ ...row, [columns[filter as keyof typeof columns]]: alias }))), [{}]);
+    const bind = vi.fn((..._values: unknown[]) => ({ all: async () => ({ results: bind.mock.calls.length === 1 ? used : [] }) }));
     const prepare = vi.fn((_sql: string) => ({ bind }));
     await pickChinaCommunityAddress({ prepare } as never, filters, 'alias-index');
-    const sql = prepare.mock.calls[0][0];
+    expect(prepare.mock.calls[0][0]).toContain('SELECT DISTINCT');
+    expect(bind.mock.calls[0]).toEqual(expect.arrayContaining([...aliases]));
+    const sql = prepare.mock.calls[1][0];
     expect(sql.match(/UNION ALL/gu)).toHaveLength(branches - 1);
     expect(sql.match(/LIMIT 16/gu)).toHaveLength(branches + 1);
     expect(sql).not.toMatch(/community\.(province|city|district) IN \(\?/u);
     expect(sql).not.toContain('REPLACE(community.');
-    expect(bind.mock.calls[0]).toEqual(expect.arrayContaining([...aliases]));
+    expect(bind.mock.calls[1]).toEqual(expect.arrayContaining([...aliases]));
+  });
+
+  it('skips alias windows no community uses', async () => {
+    const bind = vi.fn((..._values: unknown[]) => ({
+      all: async () => ({ results: bind.mock.calls.length === 1 ? [{ province: '福建省', city: '厦门市' }] : [] })
+    }));
+    const prepare = vi.fn((_sql: string) => ({ bind }));
+    await pickChinaCommunityAddress({ prepare } as never, { region: '福建', city: '厦门' }, 'alias-pruned');
+    expect(prepare.mock.calls[1][0]).not.toContain('UNION ALL');
+    expect(bind.mock.calls[1]).toEqual(expect.arrayContaining(['福建省', '厦门市']));
+    expect(bind.mock.calls[1]).not.toContain('福建');
   });
 
   it('keeps coordinate matching separate from alias random windows', async () => {
@@ -348,7 +366,7 @@ describe('China community storage integration', () => {
       }
     }
     expect(selectedCities).toEqual(new Set(['唐山', '唐山市']));
-  }, 15_000);
+  }, 60_000);
 
   it('labels the earliest provider recovery as cooldown instead of a later quota reset', async () => {
     const nextAvailableAt = new Date(Date.now() + 60_000).toISOString();

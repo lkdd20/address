@@ -172,6 +172,7 @@ export const pickChinaCommunityAddress = async (
   const clauses = [chinaCommunityPublicationClause('community')];
   const bindings: unknown[] = [];
   let scopes: Array<{ clauses: string[]; bindings: unknown[] }> = [{ clauses: [], bindings: [] }];
+  const aliasFilters: Array<[column: string, values: string[]]> = [];
   for (const [filter, column, suffix] of [
     ['region', 'province', '省'], ['city', 'city', '市'], ['district', 'district', '区']
   ] as const) {
@@ -182,11 +183,17 @@ export const pickChinaCommunityAddress = async (
     if (coordinates) {
       clauses.push(`community.${column} IN (${values.map(() => '?').join(',')})`);
       bindings.push(...values);
-    } else {
-      scopes = scopes.flatMap((scope) => values.map((alias) => ({
-        clauses: [...scope.clauses, `published.${column}=?`], bindings: [...scope.bindings, alias]
-      })));
-    }
+    } else aliasFilters.push([column, values]);
+  }
+  // Only alias combinations some community uses get a window: each window inlines the publication clause, and
+  // planning the unused ones cost more than executing the query.
+  if (aliasFilters.length) {
+    const columns = aliasFilters.map(([column]) => column);
+    const used = (await database.prepare(`SELECT DISTINCT ${columns.join(',')} FROM cn_communities_v2
+      WHERE active=1 AND ${aliasFilters.map(([column, values]) => `${column} IN (${values.map(() => '?').join(',')})`).join(' AND ')}`)
+      .bind(...aliasFilters.flatMap(([, values]) => values)).all<Record<string, string>>()).results;
+    if (!used.length) return undefined;
+    scopes = used.map((row) => ({ clauses: columns.map((column) => `published.${column}=?`), bindings: columns.map((column) => row[column]) }));
   }
   if (filters.postcode) { clauses.push('community.postcode=?'); bindings.push(filters.postcode.replace(/\s/gu, '')); }
   if (filters.q) { clauses.push('(community.canonical_name LIKE ? OR community.provider_address LIKE ?)'); bindings.push(`%${filters.q}%`, `%${filters.q}%`); }
@@ -204,18 +211,16 @@ export const pickChinaCommunityAddress = async (
     const randomKey = communityRandomKey('published');
       const order = `ORDER BY ${randomKey},published.id LIMIT ${COMMUNITY_CANDIDATE_LIMIT}`;
       const loadWindow = async (operator: '>=' | '<'): Promise<CommunityCandidateRow[]> => {
-        const windows = scopes.map((scope) => `SELECT published.* FROM published_communities published
+        const windows = scopes.map((scope) => `SELECT published.* FROM (
+          SELECT community.* FROM cn_communities_v2 community WHERE ${clauses.join(' AND ')}
+        ) published
           WHERE ${scope.clauses.join(' AND ') || 'TRUE'} AND ${randomKey} ${operator} ? ${order}`);
         const windowSource = windows.length === 1
           ? `(${windows[0]})`
           : `(${windows.map((window) => `(${window})`).join(' UNION ALL ')})`;
-        const sql = `WITH published_communities AS (
-          SELECT community.* FROM cn_communities_v2 community
-          WHERE ${clauses.join(' AND ')}
-        )
-        SELECT published.* FROM ${windowSource} published ${order}`;
-      return (await database.prepare(sql).bind(...bindings,
-        ...scopes.flatMap((scope) => [...scope.bindings, pivot]))
+        const sql = `SELECT published.* FROM ${windowSource} published ${order}`;
+      return (await database.prepare(sql).bind(
+        ...scopes.flatMap((scope) => [...bindings, ...scope.bindings, pivot]))
         .all<CommunityCandidateRow>()).results;
     };
     const forward = await loadWindow('>=');

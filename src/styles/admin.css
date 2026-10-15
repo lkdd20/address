@@ -177,6 +177,8 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
 .admin-notice { border-color: rgba(18, 122, 87, .2); color: #0e6246; background: rgba(226, 244, 236, .92); overflow-wrap: anywhere; animation: pop-in .2s var(--ease-out); }
 .security-note, .dialog-hint { border-color: rgba(45, 108, 236, .18); color: var(--ink-2); background: rgba(236, 243, 255, .85); }
 .admin-error-action { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.admin-toasts { position: fixed; right: 24px; bottom: 24px; z-index: 60; width: min(420px, calc(100vw - 32px)); display: grid; gap: 8px; }
+.admin-toasts > * { box-shadow: 0 12px 32px rgba(15, 23, 42, .14); }
 .admin-error-action button { min-height: 30px; border-color: rgba(191, 58, 46, .3); color: #8f241b; }
 .table-error { margin: 14px 22px 0; }
 .admin-loading { min-height: 200px; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--ink-3); font-size: 13.5px; }
@@ -797,6 +799,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .map-display-grid { grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr)); }
   .map-display-grid > * { min-width: 0; padding: 0 10px; overflow-wrap: anywhere; }
   .map-prerequisite, .password-action-row, .admin-error-action, .amap-browser-empty { display: flex; flex-wrap: wrap; }
+  .admin-toasts { right: 16px; bottom: 16px; }
   .shortcut-settings-heading label { min-width: 0; width: 100%; }
   .shortcut-editor-toolbar { align-items: flex-start; }
   .shortcut-editor-actions { width: 100%; justify-content: flex-start; }
