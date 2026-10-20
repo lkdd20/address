@@ -30,6 +30,8 @@ x-app: &app
     TRUST_PROXY: ${TRUST_PROXY:-false}
     SYNC_SCHEDULER_ENABLED: "true"
     TRANSLATION_BACKFILL_ENABLED: ${TRANSLATION_BACKFILL_ENABLED:-true}
+    ADDRESS_STORAGE_SOFT_LIMIT_BYTES: ${ADDRESS_STORAGE_SOFT_LIMIT_BYTES:-}
+    ADDRESS_STORAGE_HARD_LIMIT_BYTES: ${ADDRESS_STORAGE_HARD_LIMIT_BYTES:-}
   volumes: &app-volumes
     - ./data/address:/srv/address/data
     - ./runtime:/srv/address/runtime

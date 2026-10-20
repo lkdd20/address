@@ -3,7 +3,7 @@ import { countries } from '../../src/domain/countries';
 import { refreshResidentialCoverage } from './residential-coverage.mjs';
 import { activePoolCountries, addressPublicationSqlClause, refreshAddressGenerationIndex } from './generation-index.mjs';
 
-const PUBLICATION_VALIDATION_REVISION = 'address-reader-v5-implausible-chinese';
+const PUBLICATION_VALIDATION_REVISION = 'address-reader-v7-implausible-phrases';
 
 const requestedCountries = (countryCodes) => [...new Set((countryCodes || [])
   .map((value) => String(value || '').toUpperCase()).filter((value) => /^[A-Z]{2}$/u.test(value)))];

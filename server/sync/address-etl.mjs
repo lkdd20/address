@@ -30,6 +30,7 @@ import {
   trimStreetAdministration
 } from '../../src/domain/address-quality.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
+import { buildLocalityWeights } from './popular-places.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const defaultCacheDir = resolve(syncRoot, '../../.data-cache/address-sync');
@@ -838,6 +839,16 @@ export const runAddressEtl = async ({
     const used = files + (Number.isSafeInteger(databaseBytes) ? databaseBytes : 0);
     return Number.isFinite(free) && free < minFreeDiskBytes ? Math.max(used, hardLimitBytes) : used;
   };
+  const localityWeightsByCountry = new Map();
+  const countryLocalityWeights = (countryCode) => {
+    if (!localityWeightsByCountry.has(countryCode)) {
+      localityWeightsByCountry.set(countryCode, buildLocalityWeights(database, countryCode).catch((error) => {
+        console.error(`[address-sync] ${countryCode} locality weights unavailable`, error?.message || error);
+        return undefined;
+      }));
+    }
+    return localityWeightsByCountry.get(countryCode);
+  };
   const enabledCountries = database && activeRun
     ? Number(await database.prepare('SELECT COUNT(*) AS total FROM sync_country_policies WHERE enabled=1').first('total')
       .catch(() => 0)) || Object.keys(ADDRESS_POLICY_DEFAULTS).length
@@ -1038,7 +1049,9 @@ export const runAddressEtl = async ({
       // headroom, and never shrinks below what the source already published.
       const previousCount = Math.max(0, Number(task.previous?.acceptedCount) || 0);
       const shareRecords = Math.floor(Math.max(0, softLimitBytes - plannedStorageBytes) / (bytesPerRecord * enabledCountries));
-      const sourceTarget = Math.min(integer(task.shard.maxRecords, maxRecords), Math.max(1, previousCount + Math.min(shareRecords, maxGrowthPerRun)));
+      // Popular regions (shards with a priority) grow faster so their cities fill first.
+      const growth = task.shard.priority ? maxGrowthPerRun * 3 : maxGrowthPerRun;
+      const sourceTarget = Math.min(integer(task.shard.maxRecords, maxRecords), Math.max(1, previousCount + Math.min(shareRecords, growth)));
       const estimatedOutputBytes = sourceTarget * 2048;
       const estimatedDatabaseBytes = Math.max(0, sourceTarget - previousCount) * bytesPerRecord;
       const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.rawVersion || task.discovery.version || ''}`;
@@ -1184,10 +1197,12 @@ export const runAddressEtl = async ({
           const candidateLimit = Math.min(300_000, Math.max(shardTarget + 1_000, shardTarget * 3));
           const candidatePerLocality = task.policy.levelLimits[1] === 0
             ? candidateLimit : Math.max(perLocality, ...task.policy.levelLimits);
+          const localityWeights = database && activeRun && task.shard.source?.adapter === 'overture'
+            ? await countryLocalityWeights(task.shard.countryCode) : undefined;
           const materialized = await adapters.materialize(task.shard, task.discovery, {
             cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
             maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1,
-            signal
+            localityWeights, signal
           });
           checkpoint();
           return { ...task, materialized };

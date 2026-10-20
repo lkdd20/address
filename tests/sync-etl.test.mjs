@@ -251,7 +251,7 @@ describe('address source shard catalog', () => {
       countryCode: 'AU', extractId: 'australia'
     });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-ca-ontario')).toMatchObject({
-      countryCode: 'CA', extractId: 'ontario', maxRecords: 200000, source: { id: 'geofabrik-osm-ca-ontario' }
+      countryCode: 'CA', extractId: 'ontario', priority: 1, maxRecords: 150000, source: { id: 'geofabrik-osm-ca-ontario' }
     });
     expect(catalog.shards.filter((shard) => shard.source.id.startsWith('geofabrik-osm-ca-'))).toHaveLength(13);
     expect(catalog.shards.filter((shard) => shard.source.id.startsWith('geofabrik-osm-ru-'))).toHaveLength(9);
@@ -601,7 +601,7 @@ describe('address source shard catalog', () => {
   });
 
   it('enables Overture residential classification by default and allows an explicit opt-out', async () => {
-    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v6+capacity-20261003');
+    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v7-popular-cities+capacity-20261003');
     const fetchImpl = async (input) => {
       const url = String(input);
       if (url.endsWith('/catalog.json')) return Response.json({ latest: '2026-06-17.0' });
@@ -639,7 +639,7 @@ describe('address source shard catalog', () => {
     };
     const catalog = await loadSourceCatalog(undefined, {});
     const shard = catalog.shards.find((value) => value.id === 'overture-usa-structures-ms');
-    expect(shard).toMatchObject({ countryCode: 'US', admin1: 'MS', maxRecords: 200000, source: { id: 'overture-usa-structures-ms' } });
+    expect(shard).toMatchObject({ countryCode: 'US', admin1: 'MS', maxRecords: 20000, source: { id: 'overture-usa-structures-ms' } });
     const discovery = await createSourceAdapters({ fetchImpl, environment: {} }).discover(shard);
     expect(discovery).toMatchObject({
       version: '2026-09-23.1+usa-structures-20260913',
@@ -2450,7 +2450,7 @@ describe('built-in ETL planning and publishing', () => {
     expect(overture).toContain("coalesce(address_levels[-1].value, '') AS district");
     expect(overture).toContain('FROM address_candidates\n    LEFT JOIN classified');
     expect(overture.indexOf('JOIN classified ON classified.address_id')).toBeLessThan(
-      overture.indexOf('residential_locality_rank <= {args.per_locality}')
+      overture.indexOf('residential_locality_rank <= {rank_limit}')
     );
     expect(overture).toContain('LIMIT {args.max_records}');
     expect(overture).toContain('Residential building classification failed; exporting address-only fallback');

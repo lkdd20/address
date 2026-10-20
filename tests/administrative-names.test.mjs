@@ -273,7 +273,7 @@ describe('administrative names repair', () => {
     expect(rows.get('dorval')).toMatchObject({ admin1_code: 'QC', admin1_code_key: 'qc', active: 1 });
     expect(JSON.parse(rows.get('dorval').component_variants_json)['zh-CN'].admin1).toBe('魁北克省');
     expect(JSON.parse(rows.get('dorval').address_variants_json)['zh-CN']).toContain('魁北克省');
-    expect(rows.get('code-city')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v18:${at}` });
+    expect(rows.get('code-city')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v19:${at}` });
     expect(rows.get('same-district')).toMatchObject({ admin1_code: 'QC', active: 1 });
     expect(rows.get('v1-retired')).toMatchObject({ active: 1, retired_at: null });
     expect(rows.get('fine')).toMatchObject({ admin1_code: 'NB', active: 1 });
@@ -310,7 +310,7 @@ describe('administrative names repair', () => {
     const rows = new Map((await database.prepare('SELECT * FROM address_pool').all()).results.map((row) => [row.id, row]));
     expect(rows.get('twin-district')).toMatchObject({ district: '', active: 1 });
     expect(JSON.parse(rows.get('twin-district').component_variants_json).native.district).toBeUndefined();
-    expect(rows.get('whole-address')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v18:${at}` });
+    expect(rows.get('whole-address')).toMatchObject({ active: 0, retired_at: `publication-validation:administrative-names-v19:${at}` });
   });
 
   it('fills a missing region with the catalog region nearest the point', async () => {
@@ -366,5 +366,15 @@ describe('administrative names repair', () => {
       .toMatchObject({ retired: 1 });
     const rows = new Map((await database.prepare('SELECT id,active FROM address_pool').all()).results.map((row) => [row.id, row.active]));
     expect(Object.fromEntries(rows)).toEqual({ 'san-marino': 0, inside: 1 });
+  });
+
+  it('gives retired points outside the country the repair retirement so translation recovery cannot republish them', async () => {
+    await insert(database, 'crimea', { street: 'Avenue Dorval', houseNumber: '14', locality: 'Dorval', admin1: 'QC', admin1Code: 'QC' });
+    await database.prepare("UPDATE address_pool SET active=0,retired_at='publication-validation:translation:2026-10-11T00:00:00.000Z' WHERE id='crimea'").run();
+    const regionLookup = vi.fn(async ({ points }) => new Map(points.map((point) => [point.id, { outside: true }])));
+    expect(await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup, pauseMs: 0, now: () => new Date(at) }))
+      .toMatchObject({ retired: 1 });
+    expect(await database.prepare("SELECT active,retired_at FROM address_pool WHERE id='crimea'").first())
+      .toEqual({ active: 0, retired_at: `publication-validation:administrative-names-v19:${at}` });
   });
 });

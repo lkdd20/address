@@ -18,7 +18,7 @@ import {
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
 import { taiwanEnglishPremise } from '../../../src/domain/address-format';
 import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
-import { componentLooksLocalized, implausibleChineseTranslation, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
+import { componentLooksLocalized, implausibleChineseTranslation, implausibleEnglishTranslation, preservesAddressIdentifiers, preservesAddressNumbers, semanticAddressFields } from '../../../src/domain/address-localization.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget, LocationScopeClause } from './address-repository';
 
@@ -354,6 +354,9 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
       for (const field of semanticAddressFields as Array<keyof AddressComponents>) {
         const value = String(translated[field] || '');
         if (!componentLooksLocalized(value, language)) return reject('translation', 'invalid_target_script', { language, field });
+        if (language === 'en' && implausibleEnglishTranslation(componentVariants.native[field], value, field)) {
+          return reject('translation', 'implausible_target_translation', { language, field });
+        }
       }
       if (language === 'zh-CN') {
         for (const field of translatedSemanticFields(row.country_code) as Array<keyof AddressComponents>) {

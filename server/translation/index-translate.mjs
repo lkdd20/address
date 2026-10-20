@@ -26,7 +26,7 @@ export const normalizeIndexTranslateSettings = (input = {}, current = INDEX_TRAN
     value.enabled = input.enabled;
   }
   if (input.concurrency !== undefined) {
-    if (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 50) throw new Error('INVALID_INDEX_TRANSLATE_SETTINGS');
+    if (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 100) throw new Error('INVALID_INDEX_TRANSLATE_SETTINGS');
     value.concurrency = input.concurrency;
   }
   if (input.baseUrl !== undefined) {

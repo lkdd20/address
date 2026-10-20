@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { implausibleChineseTranslation, usableAddressTranslation } from '../src/domain/address-localization.mjs';
+import { implausibleChineseTranslation, implausibleEnglishTranslation, usableAddressTranslation } from '../src/domain/address-localization.mjs';
 
 describe('implausible Chinese translations', () => {
   it.each([
@@ -11,7 +11,22 @@ describe('implausible Chinese translations', () => {
     ['Badger', '獾'],
     ['Harrow', '耙'],
     ['وزير بن المهاجر', '暂无说明，留下第一条！'],
-    ['Bursa', '囊']
+    ['Bursa', '囊'],
+    ['내원로', '是时候该走了。'],
+    ['대덕로', '我爱你'],
+    ['학동', '首页'],
+    ['شارع الصلاة', '祈祷的意义'],
+    ['ซอยปราโมทย์ 4', '第 4 章'],
+    ['봉락노라포1길', '1年前'],
+    ['Boa Viagem', '祝你旅途愉快'],
+    ['Casa', '首页'],
+    ['MOYLAN WAY', '我的方式'],
+    ['Rua I', '我街'],
+    ['MYALL CLOSE', '我的全部关闭'],
+    ['Im Wiesengrund', '我是维森格伦德'],
+    ['Rue du Moulin', '我的磨坊路'],
+    ['227 ST', '第227章'],
+    ['Okosun Close', '您的持仓将被平仓。']
   ])('rejects %s → %s', (original, translated) => {
     expect(implausibleChineseTranslation(original, translated)).toBe(true);
     expect(usableAddressTranslation(translated, 'zh-CN', original)).toBe(false);
@@ -28,9 +43,87 @@ describe('implausible Chinese translations', () => {
     ['Block', '栋'],
     ['Москва', '莫斯科'],
     ['Bokku! Mart', '博库！玛特'],
-    ['Tower', '塔']
+    ['Tower', '塔'],
+    ['我孫子', '我孙子'],
+    ['마라로', '马罗路'],
+    ['Nia Road', '妮娅路'],
+    ['Big C Mini', '大C迷你'],
+    ['우리저축은행', '我们储蓄银行'],
+    ['Darkside Lab.', '暗面实验室。'],
+    ['Saint Gregory', '圣额我略'],
+    ['You & I Apartments', '你和我公寓'],
+    ['Rue des myosotis', '勿忘我街'],
+    ['St. Dominic Catholic Church', '圣多明我天主教堂'],
+    ['Mon Brico', '我的家装'],
+    ['Mis Niñas', '我的女孩们'],
+    ['rumah ku', '我的房子'],
+    ['myNEWS.com', '我的新闻网'],
+    ['I Can Learning Centre', '我能学习中心'],
+    ['Le Bar et Vous', '酒吧与您'],
+    ["Un jour une fleur m'a dit", '有一天一朵花对我说'],
+    ['Église protestante Notre Seigneur Jésus', '我主耶稣新教教堂']
   ])('accepts %s → %s', (original, translated) => {
     expect(implausibleChineseTranslation(original, translated)).toBe(false);
     expect(usableAddressTranslation(translated, 'zh-CN', original)).toBe(true);
+  });
+});
+
+describe('implausible English translations', () => {
+  it.each([
+    ['Заржавенская улица', 'What is it?'],
+    ['Новый', 'What is it?'],
+    ['마라로', "I'm in love."],
+    ['대덕로', 'I love you'],
+    ['학동', 'Home'],
+    ['월포길', 'trumpet'],
+    ['마동', 'Sorry'],
+    ['봉락노라포1길', '1 year ago'],
+    ['삼성래미안', 'Sorry to bother you'],
+    ['琴似三条五丁目', 'What is the meaning of the story?'],
+    ['北郷七条九丁目', "It's a beautiful scenery."],
+    ['شارع الصلاة', 'The meaning of prayer'],
+    ['หมู่บ้านสุขใจ', '1'],
+    ['Калининградский проспект', 'Kaliningrad'],
+    ['홍성군 홍성읍', 'Home page'],
+    ['จะนะ', 'I will.']
+  ])('rejects %s → %s', (original, translated) => {
+    expect(implausibleEnglishTranslation(original, translated, 'street')).toBe(true);
+    expect(usableAddressTranslation(translated, 'en', original, 'street')).toBe(false);
+  });
+
+  it.each([
+    ['마라로', 'Mara-ro'],
+    ['종로', 'Jongno'],
+    ['마라로101번길', 'Mara-ro 101beon-gil'],
+    ['학동', 'Hak-dong'],
+    ['역삼1동', 'Yeoksam 1(il)-dong'],
+    ['신포동1가', 'Sinpo-dong 1-ga'],
+    ['송리', 'Song-ri'],
+    ['서울특별시', 'Seoul'],
+    ['남산동', 'Namsan-dong'],
+    ['Заржавенская улица', 'Zarzhavenskaya Street'],
+    ['Калининградский проспект', 'Kaliningradsky Prospekt'],
+    ['площадь Ленина', 'Lenin Square'],
+    ['Зелёный тупик', 'Green Cul-de-sac'],
+    ['Магистральный проезд', 'Magistralny Proyezd'],
+    ['Новый', 'Novy'],
+    ['琴似三条五丁目', 'Kotoni 3-jo 5-chome'],
+    ['阿児町', 'Ago-cho'],
+    ['طريق الملك فهد', 'King Fahd Road'],
+    ['Main Street', 'Main St.'],
+    ['Rue de la Paix', 'Peace Street?'],
+    ['حي محاسن الأول', 'Mahasen I Neighborhood'],
+    ['Дальневосточная МИС', 'Far Eastern M.I.S.'],
+    ['อิสาณ', 'I San']
+  ])('accepts %s → %s', (original, translated) => {
+    expect(implausibleEnglishTranslation(original, translated, 'street')).toBe(false);
+  });
+
+  it('checks the Korean place type only for streets and neighbourhoods', () => {
+    expect(implausibleEnglishTranslation('원앤온리', 'One and Only', 'buildingName')).toBe(false);
+    expect(implausibleEnglishTranslation('원앤온리', 'One and Only', 'street')).toBe(true);
+    expect(implausibleEnglishTranslation('학동', 'Home', 'district')).toBe(true);
+    expect(implausibleEnglishTranslation('학동', 'Home')).toBe(false);
+    expect(usableAddressTranslation('Home', 'en', '학동', 'dependentLocality')).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ export type AdminLocale = Locale;
 export interface Credential {
   id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
   fieldMasks?: { appKey: string; appSecret: string };
-  openAICompatible?: { apiKeyMask: string; baseUrl: string; model: string; reasoningEffort: string; maxTokens: number };
+  openAICompatible?: { apiKeyMask: string; baseUrl: string; model: string; reasoningEffort: string; maxTokens: number; requestFormat?: string };
   maxConcurrency?: number; translationRouteId?: string; translationPriority?: number; translationRouteEnabled?: boolean; translationPrompt?: string;
   quotaService: string; quotaPeriod: 'day' | 'month'; quotaUsed: number; quotaLimit: number; quotaRemaining: number;
   officialQuotaLimit?: number; quotaBaseline?: number;

@@ -31,6 +31,33 @@ describe('location option reachability', () => {
     expect(regionSpellingKey('Bình Định')).not.toBe(regionSpellingKey('Bình Dương'));
   });
 
+  it('finds New York City boroughs when searching for the city', async () => {
+    const database = openTestDatabase(':memory:');
+    try {
+      await database.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (36,'US','NY','New York','New York','纽约州','state',NULL,'/36/'),(20,'US','KS','Kansas','Kansas','堪萨斯州','state',NULL,'/20/');
+        INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (360,'US',36,'Brooklyn','Brooklyn','布鲁克林','section',2736074),(200,'US',20,'Manhattan','Manhattan','曼哈顿','city',54100);`);
+      // Manhattan, Kansas shares a borough name but is not part of New York City.
+      for (const [id, admin1, code, locality, street] of [['brooklyn', 'new york', 'ny', 'Brooklyn', 'Atlantic Avenue'],
+        ['manhattan-ks', 'kansas', 'ks', 'Manhattan', 'Poyntz Avenue']]) {
+        await database.prepare(`INSERT INTO address_pool(id,country_code,street,latitude,longitude,native_language,component_variants_json,
+          address_variants_json,quality_score,generation,coverage,random_key,first_seen_at,last_seen_at)
+          VALUES (?,'US',?,40.68,-73.97,'en','{}','{}',.95,'fixture','fixture',1,'2026-01-01','2026-01-01')`).bind(id, street).run();
+        await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,admin1_key,admin1_code_key,locality_key,
+          postal_locality_key,locality,residential_ready,random_key,updated_at) VALUES (?,'US',?,?,?,?,?,1,1,'2026-01-01')`)
+          .bind(id, admin1, code, locality.toLowerCase(), locality.toLowerCase(), locality).run();
+      }
+      for (const query of ['纽约', 'New York']) {
+        const page = await queryLocationCatalog(database, { country: 'US', field: 'city', query, limit: 20 });
+        expect(page.options.map((option) => option.value)).toEqual(['Brooklyn']);
+      }
+      expect((await queryLocationCatalog(database, { country: 'US', field: 'city', query: 'Chicago', limit: 20 })).options).toEqual([]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it('lists every address under one region and one city option and generates exactly what an option counts', async () => {
     const database = openTestDatabase(':memory:');
     try {
@@ -40,13 +67,15 @@ describe('location option reachability', () => {
           region.parent_id, region.parent_id ? `/1/${region.id}/` : `/${region.id}/`).run();
       }
       await database.exec(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
-        VALUES (10,'GB',2,'London','London','伦敦','city',9000000);`);
+        VALUES (10,'GB',2,'London','London','伦敦','city',9000000),(11,'GB',4,'London','London','伦敦','city',300);`);
       const rows = [
         ['westminster', 'westminster', 'wsm', 'london', 'london', 'London', 'Strand'],
         ['camden', 'camden', 'cmd', 'london', 'london', 'London', 'Camden Road'],
         ['hamlet', 'camden', 'cmd', 'kentish town', 'london', 'Kentish Town', 'Leighton Road'],
         ['glasgow', 'glasgow city', '', 'glasgow', '', 'Glasgow', 'Argyle Street'],
-        ['island', 'isle of nowhere', '', 'port nowhere', '', 'Port Nowhere', 'Harbour Road']
+        ['island', 'isle of nowhere', '', 'port nowhere', '', 'Port Nowhere', 'Harbour Road'],
+        // A village named London with more addresses than the capital must not take the London shortcut.
+        ...['north', 'south', 'east'].map((id) => [`village-${id}`, 'scotland', 'sct', 'london', '', 'London', `${id} Lane`])
       ];
       for (const [index, [id, admin1, code, locality, postal, localityName, street]] of rows.entries()) {
         const variants = JSON.stringify({ native: { admin1: admin1.replace(/\b\w/gu, (letter) => letter.toUpperCase()), locality: localityName },

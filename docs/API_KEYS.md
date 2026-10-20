@@ -107,7 +107,8 @@ bilibili's translation model at `https://index-translate.bilibili.com/v1` needs 
 
 - Requests follow bilibili's `inference/llm/call_api.py`: one user message with the instTrans JSON constraint prompt, `temperature: 0` and `chat_template_kwargs.enable_thinking=false`; no reasoning setting and no authorization header are sent.
 - A self-hosted deployment can replace the endpoint (HTTPS, or HTTP on localhost) and model.
-- Address components are sent to bilibili. Limits are not published: start with concurrency 1; HTTP 429 cools the route down, and three failures stop it until its settings change.
+- Address components are sent to bilibili. Limits are not published; a 2026-10-19 production test of 20-value requests had no errors from concurrency 1 to 32 (about 5 to 137 values per second, median 4 s), and concurrency goes up to 100. HTTP 429 cools the route down, and three failures stop it until its settings change.
+- A proxy of an Index model that needs a key (for example `http://proxy.example:8080/v1`; short keys are accepted) is added as an OpenAI-compatible provider with request format “Index-Translate”: it sends the same single user message with the key as a Bearer token, so it gets its own priority, concurrency and cooldown.
 
 ### OpenAI-compatible API
 
@@ -129,7 +130,9 @@ Quota defaults to “Unlimited”; uncheck it and enter a daily request limit if
 | `https://api.example.com/v1/chat/completions` | Used as-is |
 | `https://api.example.com` (no version) | Detected on save, usually `…/v1/chat/completions` |
 
-Remote URLs must use HTTPS; HTTP is allowed only for `localhost`.
+Remote URLs should use HTTPS. Plain HTTP is accepted for self-hosted proxies, and the console warns that the key and address text then travel unencrypted. URLs with a user name, password, query or fragment are rejected.
+
+**Request format**: “OpenAI Chat Completions” (default) sends the system prompt and expects `{"translations": [...]}`; “Index-Translate” sends bilibili Index-Translate's single user message with thinking off and accepts its keyed JSON reply. Index-Translate supports English and Simplified Chinese targets only.
 
 **Prompt**: new providers are prefilled with the built-in default prompt; leaving it empty also uses the default, and edits can be reset in one click. The prompt only adjusts translation style; the rules for JSON-only output, matching item count, and preserved numbers are always appended and cannot be overridden.
 

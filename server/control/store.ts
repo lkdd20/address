@@ -37,7 +37,7 @@ export interface CredentialInput {
   maxConcurrency?: number; enabled?: boolean;
   quotaService?: string; quotaPeriod?: QuotaPeriod; quotaLimit?: number; quotaTimezoneOffset?: number;
   quotaScopeId?: string; quotaUsedBaseline?: number; dailyLimit?: number;
-  apiKey?: string; baseUrl?: string; model?: string; reasoningEffort?: string; maxTokens?: number;
+  apiKey?: string; baseUrl?: string; model?: string; reasoningEffort?: string; maxTokens?: number; requestFormat?: string;
   translationPriority?: number; translationPrompt?: string;
 }
 export type TranslationRouteProvider = 'openai-compatible' | 'deepl' | 'youdao' | 'index-translate' | 'google';
@@ -107,8 +107,9 @@ const openAICompatibleSecretFromInput = (input: {
   model?: unknown;
   reasoningEffort?: unknown;
   maxTokens?: unknown;
+  requestFormat?: unknown;
 }, current?: string): string | undefined => {
-  if (['secret', 'apiKey', 'baseUrl', 'model', 'reasoningEffort'].some((field) =>
+  if (['secret', 'apiKey', 'baseUrl', 'model', 'reasoningEffort', 'requestFormat'].some((field) =>
     Object.hasOwn(input, field) && input[field as keyof typeof input] !== undefined
     && typeof input[field as keyof typeof input] !== 'string')) throw new Error('INVALID_OPENAI_COMPATIBLE_CREDENTIAL');
   if (Object.hasOwn(input, 'maxTokens') && input.maxTokens !== undefined
@@ -118,7 +119,8 @@ const openAICompatibleSecretFromInput = (input: {
   const secret = typeof input.secret === 'string' ? input.secret.trim() : '';
   if (input.provider !== 'openai-compatible') return secret || current;
   const existing = current ? parseOpenAICompatibleSecret(current) : null;
-  const hasFields = [input.apiKey, input.baseUrl, input.model, input.reasoningEffort, input.maxTokens].some((value) => value !== undefined);
+  const hasFields = [input.apiKey, input.baseUrl, input.model, input.reasoningEffort, input.maxTokens, input.requestFormat]
+    .some((value) => value !== undefined);
   if (!hasFields && secret) return serializeOpenAICompatibleSecret(secret);
   const field = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
   const model = field(input.model) || existing?.model;
@@ -129,7 +131,8 @@ const openAICompatibleSecretFromInput = (input: {
     baseUrl: field(input.baseUrl) || existing?.baseUrl,
     model,
     reasoningEffort,
-    maxTokens: input.maxTokens === undefined ? existing?.maxTokens : Number(input.maxTokens)
+    maxTokens: input.maxTokens === undefined ? existing?.maxTokens : Number(input.maxTokens),
+    requestFormat: input.requestFormat === undefined ? existing?.requestFormat : input.requestFormat
   });
 };
 
@@ -325,7 +328,8 @@ const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
   const resetAt = primary?.resetAt || nextQuotaReset(row.quota_period, row.quota_timezone_offset).toISOString();
   const exhausted = quotaWindows.some((window) => window.exhausted) || quotaUsed >= quotaLimit;
   let fieldMasks: { appKey: string; appSecret: string } | undefined;
-  let openAICompatible: { apiKeyMask: string; baseUrl: string; model: string; reasoningEffort: string; maxTokens: number } | undefined;
+  let openAICompatible: { apiKeyMask: string; baseUrl: string; model: string; reasoningEffort: string; maxTokens: number;
+    requestFormat: string } | undefined;
   if (row.provider === 'youdao') {
     try {
       const parts = parseYoudaoSecret(decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, masterKey));
@@ -339,9 +343,11 @@ const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
     try {
       const config = parseOpenAICompatibleSecret(decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, masterKey));
       if (config) {
-        const visible = config.apiKey.length <= 12 ? config.apiKey.slice(0, 3) : `${config.apiKey.slice(0, 4)}••••${config.apiKey.slice(-4)}`;
+        // Short keys (a proxy's `index`) show at most a third of their characters.
+        const visible = config.apiKey.length <= 12 ? `${config.apiKey.slice(0, Math.min(3, Math.floor(config.apiKey.length / 3)))}••••`
+          : `${config.apiKey.slice(0, 4)}••••${config.apiKey.slice(-4)}`;
         openAICompatible = { apiKeyMask: visible, baseUrl: config.baseUrl, model: config.model,
-          reasoningEffort: config.reasoningEffort, maxTokens: config.maxTokens };
+          reasoningEffort: config.reasoningEffort, maxTokens: config.maxTokens, requestFormat: config.requestFormat || 'openai' };
       }
     } catch { /* unreadable credentials remain masked and require administrator review */ }
   }
@@ -998,7 +1004,7 @@ export class ControlStore {
     const weight = boundedInteger(input.weight, 100, 1, 10000, 'INVALID_CREDENTIAL_WEIGHT');
     const defaults = credentialProviderDefaults[input.provider];
     const qpsLimit = boundedInteger(input.qpsLimit, defaults.qps, 1, 10000, 'INVALID_CREDENTIAL_QPS');
-    const maxConcurrency = boundedInteger(input.maxConcurrency, defaults.concurrency || 1, 1, 50, 'INVALID_CREDENTIAL_CONCURRENCY');
+    const maxConcurrency = boundedInteger(input.maxConcurrency, defaults.concurrency || 1, 1, 100, 'INVALID_CREDENTIAL_CONCURRENCY');
     const quotaPeriod = input.quotaPeriod || defaults.period;
     if (!['day', 'month'].includes(quotaPeriod)) throw new Error('INVALID_CREDENTIAL_QUOTA_PERIOD');
     const quotaLimit = boundedInteger(input.quotaLimit ?? input.dailyLimit, defaults.limit, 1, 100000000, 'INVALID_CREDENTIAL_QUOTA_LIMIT');
@@ -1194,7 +1200,7 @@ export class ControlStore {
     if (!label || !quotaScopeId) throw new Error('INVALID_PROVIDER_CREDENTIAL');
     const weight = boundedInteger(input.weight, current.weight, 1, 10000, 'INVALID_CREDENTIAL_WEIGHT');
     const qpsLimit = boundedInteger(input.qpsLimit, current.qps_limit, 1, 10000, 'INVALID_CREDENTIAL_QPS');
-    const maxConcurrency = boundedInteger(input.maxConcurrency, Number(current.max_concurrency || 1), 1, 50, 'INVALID_CREDENTIAL_CONCURRENCY');
+    const maxConcurrency = boundedInteger(input.maxConcurrency, Number(current.max_concurrency || 1), 1, 100, 'INVALID_CREDENTIAL_CONCURRENCY');
     const quotaPeriod = String(input.quotaPeriod ?? current.quota_period) as QuotaPeriod;
     if (!['day', 'month'].includes(quotaPeriod)) throw new Error('INVALID_CREDENTIAL_QUOTA_PERIOD');
     const quotaLimit = boundedInteger(input.quotaLimit ?? input.dailyLimit, current.quota_limit, 1, 100000000, 'INVALID_CREDENTIAL_QUOTA_LIMIT');
@@ -1209,7 +1215,7 @@ export class ControlStore {
     };
     let secretChanged = false;
     const openAIFieldsChanged = current.provider === 'openai-compatible'
-      && ['apiKey', 'baseUrl', 'model', 'reasoningEffort', 'maxTokens'].some((field) => Object.hasOwn(input, field));
+      && ['apiKey', 'baseUrl', 'model', 'reasoningEffort', 'maxTokens', 'requestFormat'].some((field) => Object.hasOwn(input, field));
     if ((typeof input.secret === 'string' && input.secret.trim()) || openAIFieldsChanged) {
       let existingSecret = '';
       try {

@@ -44,11 +44,15 @@ const call = (broker, requestId, parameters = { values: ['Main Street 18', '1000
 
 describe('OpenAI-compatible translation provider', () => {
   it('requires an explicit model, defaults to low reasoning, and rejects unsafe URLs', () => {
+    // Plain HTTP is allowed for self-hosted proxies (the console warns); credentials in the URL are not.
+    expect(parseOpenAICompatibleSecret(JSON.stringify({ ...config, baseUrl: 'http://203.0.113.8:8080/v1/chat/completions' })))
+      .toMatchObject({ baseUrl: 'http://203.0.113.8:8080/v1' });
+    expect(parseOpenAICompatibleSecret(JSON.stringify({ ...config, baseUrl: 'http://user:pass@provider.example/v1' }))).toBeNull();
     expect(parseOpenAICompatibleSecret(JSON.stringify({ apiKey: config.apiKey, baseUrl: config.baseUrl })))
       .toBeNull();
-    expect(parseOpenAICompatibleSecret(JSON.stringify({ ...config, baseUrl: 'http://provider.example/v1' }))).toBeNull();
     expect(parseOpenAICompatibleSecret(JSON.stringify({ ...config, baseUrl: 'https://provider.example/v1?key=bad' }))).toBeNull();
-    expect(() => serializeOpenAICompatibleSecret({ ...config, apiKey: 'short' })).toThrow('INVALID_OPENAI_COMPATIBLE_CREDENTIAL');
+    expect(() => serializeOpenAICompatibleSecret({ ...config, apiKey: '' })).toThrow('INVALID_OPENAI_COMPATIBLE_CREDENTIAL');
+    expect(() => serializeOpenAICompatibleSecret({ ...config, requestFormat: 'anthropic' })).toThrow('INVALID_OPENAI_COMPATIBLE_CREDENTIAL');
     const fromEnvironment = credentialsFromEnvironment({
       OPENAI_COMPATIBLE_API_KEY: config.apiKey,
       OPENAI_COMPATIBLE_BASE_URL: config.baseUrl,
@@ -65,6 +69,29 @@ describe('OpenAI-compatible translation provider', () => {
     expect(parseOpenAICompatibleSecret(deepseekEnvironment[0].secret)).toMatchObject({
       model: 'discovered-fixture-model', reasoningEffort: 'low', maxTokens: 4_096
     });
+  });
+
+  it('sends the Index-Translate request format to proxies of Index models and reads its keyed JSON', async () => {
+    const indexSecret = serializeOpenAICompatibleSecret({ ...config, apiKey: 'proxy', baseUrl: 'http://203.0.113.8:8080/v1',
+      model: 'Index-Translate-35B-A3B', requestFormat: 'index-translate' });
+    expect(parseOpenAICompatibleSecret(indexSecret)).toMatchObject({ apiKey: 'proxy', requestFormat: 'index-translate' });
+    expect(parseOpenAICompatibleSecret(secret).requestFormat).toBeUndefined();
+    const request = openAICompatibleRequest(indexSecret, ['Main Street 18', 'Springfield'], 'zh-CN');
+    expect(request.url).toBe('http://203.0.113.8:8080/v1/chat/completions');
+    expect(request.headers.get('Authorization')).toBe('Bearer proxy');
+    const body = await request.json();
+    expect(body).toMatchObject({ model: 'Index-Translate-35B-A3B', temperature: 0, stream: false,
+      chat_template_kwargs: { enable_thinking: false }, max_tokens: 1_024 });
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]).toMatchObject({ role: 'user' });
+    expect(body.messages[0].content).toContain('{"0":"Main Street 18","1":"Springfield"}');
+    expect(() => openAICompatibleRequest(indexSecret, ['Main Street'], 'ja')).toThrow('INVALID_OPENAI_COMPATIBLE_REQUEST');
+    const reply = (content) => ({ choices: [{ finish_reason: 'stop', message: { content } }] });
+    expect(parseOpenAICompatibleResponse(reply('{"0":"主街18号","1":"斯普林菲尔德"}'), 2)).toEqual(['主街18号', '斯普林菲尔德']);
+    expect(parseOpenAICompatibleResponse(reply('<think>x</think>{"0":"主街18号","1":"斯普林菲尔德"}'), 2)).toEqual(['主街18号', '斯普林菲尔德']);
+    expect(parseOpenAICompatibleResponse(reply('{"translations":["主街18号","斯普林菲尔德"]}'), 2)).toEqual(['主街18号', '斯普林菲尔德']);
+    expect(parseOpenAICompatibleResponse(reply('{"0":"主街18号"}'), 2)).toBeNull();
   });
 
   it('sends low for missing or legacy default reasoning and preserves explicit provider values and capabilities', async () => {

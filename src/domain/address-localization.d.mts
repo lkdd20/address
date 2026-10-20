@@ -7,4 +7,5 @@ export function storedVariantLooksLocalized(components: AddressComponents, local
 export function preservesAddressNumbers(original: string, translated: string): boolean;
 export function preservesAddressIdentifiers(original: string, translated: string): boolean;
 export function implausibleChineseTranslation(original: unknown, translated: unknown): boolean;
+export function implausibleEnglishTranslation(original: unknown, translated: unknown, field?: string): boolean;
 export function normalizeAddressDigits(value: string): string;

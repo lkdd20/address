@@ -10,7 +10,7 @@ import { adjustCountryCounts, generationIndexContribution } from '../database/pu
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
 import { administrativeAssignmentJoin, projectAdministrativeRow, refreshAdministrativeAssignments } from '../database/administrative-assignments.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from './translation-providers.mjs';
-import { administrativeNameCountries, loadAdministrativeNames } from './administrative-names.mjs';
+import { administrativeNameCountries, loadAdministrativeNames, repairRetirement } from './administrative-names.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
 
 const clean = (value) => String(value ?? '').trim();
@@ -24,9 +24,6 @@ const fingerprint = (row) => createHash('sha256').update(JSON.stringify([
   ...(row.administrative_patch_json && row.administrative_patch_json !== '{}' ? [row.administrative_patch_json] : [])
 ])).digest('hex');
 const parse = (value) => { try { return JSON.parse(value) || {}; } catch { return {}; } };
-// The structure and administrative-names repairs retire rows by region polygons the publication check cannot see; only
-// their own next revision may restore those rows.
-const repairRetirement = /^publication-validation:(?:address-structure|administrative-names)-/u;
 const eligibleRetirement = (row) => row.active === 1
   || String(row.retired_at || '').startsWith('publication-validation:') && !repairRetirement.test(String(row.retired_at));
 function* recoveryCandidates(groups, first) {
@@ -52,7 +49,7 @@ export const pendingTranslationFields = (variants, nativeLanguage, row) => Objec
     if (!original) return false;
     const value = clean(variants[language]?.[field]);
     // An untranslated Chinese place name stays pending; English-language streets may publish with their English name.
-    return !usableTranslation(value, language, original) || !safeTranslatedField(row, field, value)
+    return !usableTranslation(value, language, original, field) || !safeTranslatedField(row, field, value)
       || language === 'zh-CN' && !String(nativeLanguage).startsWith('zh') && value === original && /\p{L}/u.test(original)
         && (!String(nativeLanguage).startsWith('en') || placeFields.has(field));
   })
@@ -393,7 +390,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
           for (const field of fields[language]) {
             const original = clean(variants.native[field]);
             const value = cached.get(original);
-            if (usableTranslation(value, language, original) && safeTranslatedField(row, field, value)) variants[language][field] = value;
+            if (usableTranslation(value, language, original, field) && safeTranslatedField(row, field, value)) variants[language][field] = value;
           }
         }
         if (row.active === 1 && chineseStreetPending(row, variants) && storedAddressPoolV2RowIsPublishable(row, now())) continue;
@@ -407,7 +404,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
         && fields['zh-CN'].includes('street')) {
         const original = clean(variants.native.street);
         const cachedStreet = (await cache.get([original], 'zh-CN', signal)).get(original);
-        if (usableTranslation(cachedStreet, 'zh-CN', original) && safeTranslatedField(row, 'street', cachedStreet)) {
+        if (usableTranslation(cachedStreet, 'zh-CN', original, 'street') && safeTranslatedField(row, 'street', cachedStreet)) {
           variants['zh-CN'].street = cachedStreet;
         }
         fields = { ...fields, 'zh-CN': fields['zh-CN'].filter((field) => field !== 'street') };
@@ -423,7 +420,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
       const values = [...new Set(pending.flatMap(({ variants, fields }) => fields[language].map((field) => clean(variants.native[field]))))];
       const accepts = (value, target, original) => usableTranslation(value, target, original)
           && pending.every(({ row, variants, fields }) => fields[target].every((field) => clean(variants.native[field]) !== original
-            || safeTranslatedField(row, field, value)));
+            || usableTranslation(value, target, original, field) && safeTranslatedField(row, field, value)));
       const providerEnvironment = { ...environment, GOOGLE_TRANSLATION_ENABLED: String(services.googleEnabled) };
       let translations;
       try {
@@ -439,7 +436,7 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
         for (const field of fields[language]) {
           const original = clean(variants.native[field]);
           const value = translations.get(original);
-          if (usableTranslation(value, language, original) && safeTranslatedField(row, field, value)) variants[language][field] = value;
+          if (usableTranslation(value, language, original, field) && safeTranslatedField(row, field, value)) variants[language][field] = value;
         }
       }
     }

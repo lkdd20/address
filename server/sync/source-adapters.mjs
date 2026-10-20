@@ -42,7 +42,7 @@ const franceBdnbExporter = resolve(syncRoot, 'france-bdnb-export.py');
 const spainCatastroExporter = resolve(syncRoot, 'spain-catastro-export.py');
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
-const overtureResidentialRevision = 'addresses-streets-residential-subset-v6';
+const overtureResidentialRevision = 'addresses-streets-residential-subset-v7-popular-cities';
 const geofabrikExportRevision = 'g70-streets';
 const googleResidentialRevision = 'osm-address-street-google-geocoding-v10-city-level';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v14';
@@ -93,7 +93,10 @@ export const adminBoundaryRevision = (countryCode) => {
 export const sourceCapabilityRevision = (shard) => {
   const adapter = String(shard?.source?.adapter || '');
   const boundary = adminBoundaryAdapters.has(adapter) ? adminBoundaryRevision(shard?.countryCode) : '';
-  const base = `${sourceAdapterRevisions[adapter] || ''}${boundary ? `:${boundary}` : ''}`;
+  const base = `${sourceAdapterRevisions[adapter] || ''}${boundary ? `:${boundary}` : ''}${shard?.priority
+    // A popular region's raised cap is new extractable capacity for that shard alone.
+    ? `:popular-${createHash('sha256').update(JSON.stringify({ maxRecords: shard.maxRecords ?? null, priority: shard.priority }))
+      .digest('hex').slice(0, 12)}` : ''}`;
   const inputs = shard?.source?.capabilityInputs;
   if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) return base;
   return `${base}:cap-${createHash('sha256').update(JSON.stringify({
@@ -561,6 +564,7 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         admin1: partition.admin1,
         partitionName: partition.name,
         bounds: partition.bounds,
+        priority: partition.priority,
         maxRecords: partition.maxRecords ?? source.partitionDefaults?.maxRecords,
         qualityGate: partition.qualityGate ?? source.partitionDefaults?.qualityGate,
         intervalDays,
@@ -582,6 +586,7 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         postcodeMetadataFormat: extract.postcodeMetadataFormat,
         postcodeMetadataMatchUrl: extract.postcodeMetadataMatchUrl,
         postcodeDataFormat: extract.postcodeDataFormat,
+        priority: extract.priority,
         maxRecords: extract.maxRecords ?? source.extractDefaults?.maxRecords,
         qualityGate: extract.qualityGate ?? source.extractDefaults?.qualityGate,
         intervalDays,
@@ -1898,15 +1903,19 @@ export const createSourceAdapters = ({
 
   const materializeOverture = async (shard, discovery, options) => {
     const residentialRevision = `-${overtureResidentialRevision}`;
+    const weightsJson = options.localityWeights ? JSON.stringify(options.localityWeights) : '';
+    const weightsIdentity = weightsJson ? `-w${createHash('sha256').update(weightsJson).digest('hex').slice(0, 12)}` : '';
     const policyIdentity = normalizedCachePolicyIdentity(options.maxRecords, options.perLocality);
     const output = resolve(options.cacheDir, 'normalized',
-      `${shard.id}-${safeVersion(discovery.version)}${residentialRevision}-${policyIdentity}.jsonl`);
+      `${shard.id}-${safeVersion(discovery.version)}${residentialRevision}-${policyIdentity}${weightsIdentity}.jsonl`);
     const cachedSize = await existingFileSize(output);
     if (cachedSize > 0) return { file: output, format: 'overture-jsonl', cacheBytes: cachedSize, checksum: await sha256File(output), cacheHit: true };
     await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
     const temporary = `${output}.${process.pid}.tmp`;
     const assetsFile = `${temporary}.assets.json`;
     const buildingAssetsFile = `${temporary}.building-assets.json`;
+    const weightsFile = weightsJson ? `${temporary}.locality-weights.json` : null;
+    if (weightsFile) await writeFile(weightsFile, weightsJson, 'utf8');
     await writeFile(assetsFile, JSON.stringify(discovery.assets), 'utf8');
     await writeFile(buildingAssetsFile, JSON.stringify(discovery.buildingAssetEntries || discovery.buildingAssets || []), 'utf8');
     const structuresZip = discovery.structuresUrl
@@ -1921,6 +1930,7 @@ export const createSourceAdapters = ({
           '--building-assets-file', buildingAssetsFile,
           ...(shard.admin1 ? ['--admin1', shard.admin1] : []),
           ...(structuresZip ? ['--structures-zip', structuresZip] : []),
+          ...(weightsFile ? ['--locality-weights', weightsFile] : []),
           ...overtureBoundsArgs(countryBoundBoxes(shard))],
         phase: `materialize:${shard.id}`
       });
@@ -1928,6 +1938,7 @@ export const createSourceAdapters = ({
     } finally {
       await rm(assetsFile, { force: true });
       await rm(buildingAssetsFile, { force: true });
+      if (weightsFile) await rm(weightsFile, { force: true });
       await rm(temporary, { force: true });
       if (structuresZip && !options.retainRaw) await rm(structuresZip, { force: true });
     }

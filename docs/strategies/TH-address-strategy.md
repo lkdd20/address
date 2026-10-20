@@ -4,13 +4,13 @@
 |---|---|
 | 主源 | DPT 官方建筑图层 `dptc_bldg/MapServer/2` + Geofabrik `thailand`；两个来源独立保存版本、耗尽和失败状态 |
 | 既有门牌级格式 / 邮编 | `<house> <road>, <tambon>, <amphoe>, <province> <postcode>, TH`；原生字段必须为泰文，邮编严格为 5 位数字。只清洗格式，不创造或按邻近地址补齐 |
-| 行政区 | DPT `BL_TAMBOL → district`、`BL_AMPHOE → locality/postal_city`、`BL_CHANGWAT → admin1`；OSM `addr:subdistrict / addr:district / addr:province` 使用同一层级。DOPA 官方目录只做行政名称与坐标核验，不生成住宅门牌；admin1 错别字或带编号（如 จังหหวัด ชลบุรี、36 เชียงใหม่）按坐标多边形改为目录省名（administrative-names-v15） |
+| 行政区 | DPT `BL_TAMBOL → district`、`BL_AMPHOE → locality/postal_city`、`BL_CHANGWAT → admin1`；OSM `addr:subdistrict / addr:district / addr:province` 使用同一层级。DOPA 官方目录只做行政名称与坐标核验，不生成住宅门牌；admin1 错别字或带编号（如 จังหหวัด ชลบุรี、36 เชียงใหม่）按坐标多边形改为目录省名（administrative-names-v19） |
 | 住宅子集证据 | DPT 仅接受明确住宅分类：`BL_CLASS17` 住宅、`BL_CLASS18/20/54` 集合住宅或公寓、`BL_CLASS22` 宿舍；OSM 仅接受明确住宅建筑标签。地址存在本身不构成住宅证据 |
 | 街道级格式 | `<road>, <tambon>, <amphoe>, <province>, TH`；`matchLevel=street`，门牌、楼栋、室号为空；可唯一确定的来源邮编保留，否则留空。 |
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 | 自动初始化一次；DPT 自动分页并保存 checkpoint。完整扫描或来源耗尽后停止；显式来源探测发现 DPT 编辑版本或 Geofabrik 版本变化时才构建新快照 |
 | 既有官方住宅适配器 / 排除 | DPT 必须同时具有稳定 `BL_ID`、数字门牌、道路、Tambon、Amphoe、Province、5 位邮编、泰文行政与道路字段及泰国境内坐标；polygon 转 WGS84 点后仍须通过边界检查。任一缺失、冲突、重复或非住宅分类均拒绝。DOPA 公开数据不生成住宅门牌；Bangkok CSV 仍须独立完成字段和容量验证 |
-| 策略版本 / 状态 / 更新 | 1.15 / DPT 严格住宅建筑自动同步 + Geofabrik 补充 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v15 / 2026-10-14 |
+| 策略版本 / 状态 / 更新 | 1.16 / DPT 严格住宅建筑自动同步 + Geofabrik 补充 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v19 / 2026-10-20 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
 - 默认国家完成数量下限 10,000；府、县、区单来源均衡采样上限 1,200/250/60，后台可覆盖；国家总量不是发布上限，行政区划与邮编目录保持完整。

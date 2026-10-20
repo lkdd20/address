@@ -4,6 +4,7 @@ export interface OpenAICompatibleSecret {
   model: string;
   reasoningEffort: string;
   maxTokens: number;
+  requestFormat?: 'index-translate';
 }
 
 export declare const OPENAI_COMPATIBLE_PROVIDER: 'openai-compatible';
@@ -11,6 +12,7 @@ export declare const OPENAI_COMPATIBLE_DEFAULT_REASONING_EFFORT: 'low';
 export declare const OPENAI_COMPATIBLE_DEFAULT_MAX_TOKENS: number;
 export declare const OPENAI_COMPATIBLE_MAX_TOKENS: number;
 export declare const OPENAI_COMPATIBLE_TARGETS: readonly string[];
+export declare const OPENAI_COMPATIBLE_REQUEST_FORMATS: readonly ('openai' | 'index-translate')[];
 export declare const normalizeOpenAICompatibleBaseUrl: (value: unknown) => string | null;
 export declare const parseOpenAICompatibleSecret: (value: unknown) => OpenAICompatibleSecret | null;
 export declare const serializeOpenAICompatibleSecret: (value: unknown) => string;

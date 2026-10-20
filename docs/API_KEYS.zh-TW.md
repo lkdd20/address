@@ -107,7 +107,8 @@ bilibili 的翻譯模型，公共介面 `https://index-translate.bilibili.com/v1
 
 - 請求格式與 bilibili 的 `inference/llm/call_api.py` 一致：只發一則 user 訊息（instTrans JSON 約束提示詞），`temperature: 0`、`chat_template_kwargs.enable_thinking=false`，不傳思考強度，也不帶驗證標頭；
 - 自建部署可改介面位址（HTTPS，或 localhost 的 HTTP）和模型；
-- 地址元件會傳送給 bilibili。官方未公布限額，建議並行數從 1 開始；HTTP 429 時冷卻，連續 3 次失敗後停用，直到設定變化。
+- 地址元件會傳送給 bilibili。官方未公布限額；2026-10-19 正式環境實測（每次 20 個值）並行數 1 到 32 皆無錯誤（約每秒 5 到 137 個值，中位延遲約 4 秒），並行數上限為 100。HTTP 429 時冷卻，連續 3 次失敗後停用，直到設定變化。
+- 需要金鑰的 Index 模型反向代理（例如 `http://proxy.example:8080/v1`，可使用短金鑰）以 OpenAI 相容服務新增，請求格式選「Index-Translate」：傳送同樣的單則 user 訊息並以 Bearer 攜帶金鑰，擁有獨立的優先級、並行數與冷卻。
 
 ### OpenAI 相容介面
 
@@ -129,7 +130,9 @@ bilibili 的翻譯模型，公共介面 `https://index-translate.bilibili.com/v1
 | `https://api.example.com/v1/chat/completions` | 原樣使用 |
 | `https://api.example.com`（無版本號） | 儲存時自動探測，通常為 `…/v1/chat/completions` |
 
-遠端地址必須使用 HTTPS；HTTP 只允許 `localhost`。
+遠端地址應使用 HTTPS。自建反向代理可使用 HTTP 明文，控制台會提示金鑰與地址文字將不加密傳輸；含使用者名稱、密碼、查詢參數或片段的位址會被拒絕。
+
+**請求格式**：「OpenAI Chat Completions」（預設）傳送系統提示詞並要求回傳 `{"translations": [...]}`；「Index-Translate」傳送 bilibili Index-Translate 的單則 user 訊息並關閉思考，接受其依序號鍵回傳的 JSON。Index-Translate 只支援英文與簡體中文目標。
 
 **提示詞**：新建時會預填內建的預設提示詞，留空同樣使用預設值，修改後可一鍵恢復。它只用來調整翻譯風格；「只輸出 JSON、條數一致、保留數字」等規則由系統固定附加，無法被覆蓋。
 

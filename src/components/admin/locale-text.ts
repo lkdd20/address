@@ -19,6 +19,7 @@ const en = {
     seconds: '{s}s', minutes: '{m}m {s}s', hours: '{h}h {m}m', quotaWaitFor: 'Waiting for the {provider} quota reset'
   },
   model: {
+    format: 'Request format', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate sends one user message with the Index prompt and turns thinking off; use it for bilibili Index-Translate models or proxies of them. Only English and Simplified Chinese targets.', httpWarning: 'This endpoint uses plain HTTP: the API key and address text travel unencrypted.',
     all: 'Show all models', empty: 'No matches. You can enter a model ID directly.', unavailable: 'Chat Completions unsupported', count: 'models', blocked: 'incompatible',
     hint: 'Choose from the list or enter a model ID.',
     reasoningUnknown: 'The endpoint did not advertise reasoning levels. This project sends low initially; adjust it using the provider documentation. This is not the provider default.',
@@ -93,6 +94,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} 秒', minutes: '{m} 分 {s} 秒', hours: '{h} 小时 {m} 分', quotaWaitFor: '等待 {provider} 额度重置'
     },
     model: {
+      format: '请求格式', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate 按 Index 提示词只发送一条 user 消息并关闭思考，适用于 bilibili Index-Translate 模型及其反代；仅支持英文和简体中文目标。', httpWarning: '此接口使用 HTTP 明文：API Key 和地址文本未经加密传输。',
       all: '查看全部模型', empty: '没有匹配项，可直接输入模型名称', unavailable: '不支持 Chat Completions', count: '个模型', blocked: '个不兼容',
       hint: '从列表选择，或直接输入模型名称。',
       reasoningUnknown: '接口未提供思考强度列表。项目默认发送 low，可按供应商文档修改；这不代表供应商的默认值。',
@@ -161,6 +163,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} 秒', minutes: '{m} 分 {s} 秒', hours: '{h} 小時 {m} 分', quotaWaitFor: '等待 {provider} 額度重設'
     },
     model: {
+      format: '請求格式', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate 依 Index 提示詞只傳送一則 user 訊息並關閉思考，適用於 bilibili Index-Translate 模型及其反向代理；僅支援英文與簡體中文目標。', httpWarning: '此介面使用 HTTP 明文：API Key 與地址文字未經加密傳輸。',
       all: '查看全部模型', empty: '沒有符合項目，可直接輸入模型名稱', unavailable: '不支援 Chat Completions', count: '個模型', blocked: '個不相容',
       hint: '從清單選取，或直接輸入模型名稱。',
       reasoningUnknown: '介面未提供思考強度清單。專案預設傳送 low，可依供應商文件修改；這不代表供應商的預設值。',
@@ -229,6 +232,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} 秒', minutes: '{m} 分 {s} 秒', hours: '{h} 時間 {m} 分', quotaWaitFor: '{provider} のクォータのリセット待ち'
     },
     model: {
+      format: 'リクエスト形式', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate は Index プロンプトで user メッセージを 1 件だけ送り、思考を無効にします。bilibili Index-Translate モデルとそのプロキシ向けで、英語と簡体字中国語のみ対応します。', httpWarning: 'このエンドポイントは平文 HTTP です。API キーと住所テキストは暗号化されずに送信されます。',
       all: 'すべてのモデルを表示', empty: '一致する項目がありません。モデル ID を直接入力できます。', unavailable: 'Chat Completions 非対応', count: 'モデル', blocked: '件が非対応',
       hint: '一覧から選ぶか、モデル ID を直接入力してください。',
       reasoningUnknown: 'エンドポイントが推論レベルを提示していません。このプロジェクトは初期値として low を送信します。プロバイダーのドキュメントに沿って調整してください。これはプロバイダーの既定値ではありません。',
@@ -297,6 +301,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s}초', minutes: '{m}분 {s}초', hours: '{h}시간 {m}분', quotaWaitFor: '{provider} 할당량 초기화 대기'
     },
     model: {
+      format: '요청 형식', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate는 Index 프롬프트로 user 메시지 하나만 보내고 사고 모드를 끕니다. bilibili Index-Translate 모델과 그 프록시용이며 영어와 간체 중국어만 지원합니다.', httpWarning: '이 엔드포인트는 평문 HTTP입니다. API 키와 주소 텍스트가 암호화되지 않은 채 전송됩니다.',
       all: '모든 모델 보기', empty: '일치하는 항목이 없습니다. 모델 ID를 직접 입력할 수 있습니다.', unavailable: 'Chat Completions 미지원', count: '개 모델', blocked: '개 호환되지 않음',
       hint: '목록에서 선택하거나 모델 ID를 직접 입력하세요.',
       reasoningUnknown: '엔드포인트가 추론 수준을 제공하지 않습니다. 이 프로젝트는 처음에 low를 보내며, 공급자 문서에 따라 조정할 수 있습니다. 이는 공급자 기본값이 아닙니다.',
@@ -365,6 +370,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} s', minutes: '{m} min {s} s', hours: '{h} h {m} min', quotaWaitFor: 'Warten auf Kontingent-Reset von {provider}'
     },
     model: {
+      format: 'Anfrageformat', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate sendet eine einzige user-Nachricht mit dem Index-Prompt und schaltet das Denken ab – für bilibili-Index-Translate-Modelle und deren Proxys. Nur Englisch und vereinfachtes Chinesisch als Ziel.', httpWarning: 'Dieser Endpunkt nutzt unverschlüsseltes HTTP: API-Schlüssel und Adresstexte werden unverschlüsselt übertragen.',
       all: 'Alle Modelle anzeigen', empty: 'Keine Treffer. Sie können eine Modell-ID direkt eingeben.', unavailable: 'Chat Completions nicht unterstützt', count: 'Modelle', blocked: 'inkompatibel',
       hint: 'Aus der Liste wählen oder eine Modell-ID eingeben.',
       reasoningUnknown: 'Der Endpunkt nennt keine Reasoning-Stufen. Dieses Projekt sendet zunächst low; passen Sie den Wert gemäß Anbieterdokumentation an. Das ist nicht der Standardwert des Anbieters.',
@@ -433,6 +439,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} s', minutes: '{m} min {s} s', hours: '{h} h {m} min', quotaWaitFor: 'En attente de la réinitialisation du quota {provider}'
     },
     model: {
+      format: 'Format de requête', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate envoie un seul message user avec l’invite Index et désactive la réflexion ; pour les modèles bilibili Index-Translate et leurs proxys. Cibles anglais et chinois simplifié uniquement.', httpWarning: 'Ce point d’accès utilise HTTP en clair : la clé API et les adresses circulent sans chiffrement.',
       all: 'Afficher tous les modèles', empty: 'Aucun résultat. Vous pouvez saisir directement un identifiant de modèle.', unavailable: 'Chat Completions non pris en charge', count: 'modèles', blocked: 'incompatibles',
       hint: 'Choisissez dans la liste ou saisissez un identifiant de modèle.',
       reasoningUnknown: 'Le point de terminaison n’indique pas de niveaux de raisonnement. Ce projet envoie low par défaut ; ajustez selon la documentation du fournisseur. Il ne s’agit pas de la valeur par défaut du fournisseur.',
@@ -501,6 +508,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} s', minutes: '{m} min {s} s', hours: '{h} h {m} min', quotaWaitFor: 'Esperando el restablecimiento de la cuota de {provider}'
     },
     model: {
+      format: 'Formato de solicitud', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'Index-Translate envía un único mensaje user con el prompt de Index y desactiva el razonamiento; para modelos bilibili Index-Translate y sus proxies. Solo destinos inglés y chino simplificado.', httpWarning: 'Este endpoint usa HTTP sin cifrar: la clave API y las direcciones viajan sin cifrado.',
       all: 'Ver todos los modelos', empty: 'Sin coincidencias. Puede escribir directamente un ID de modelo.', unavailable: 'Chat Completions no compatible', count: 'modelos', blocked: 'incompatibles',
       hint: 'Elija de la lista o escriba un ID de modelo.',
       reasoningUnknown: 'El endpoint no indica niveles de razonamiento. Este proyecto envía low al principio; ajústelo según la documentación del proveedor. No es el valor predeterminado del proveedor.',
@@ -569,6 +577,7 @@ export const localeText: Record<AdminLocale, LocaleText> = {
       seconds: '{s} s', minutes: '{m} min {s} s', hours: '{h} h {m} min', quotaWaitFor: 'Aguardando a redefinição da cota de {provider}'
     },
     model: {
+      format: 'Formato da solicitação', formatOpenAI: 'OpenAI Chat Completions', formatIndex: 'Index-Translate', formatHint: 'O Index-Translate envia uma única mensagem user com o prompt do Index e desativa o raciocínio; para modelos bilibili Index-Translate e seus proxies. Apenas inglês e chinês simplificado como destino.', httpWarning: 'Este endpoint usa HTTP sem criptografia: a chave de API e os endereços trafegam sem criptografia.',
       all: 'Mostrar todos os modelos', empty: 'Nenhuma correspondência. Você pode digitar um ID de modelo diretamente.', unavailable: 'Chat Completions não suportado', count: 'modelos', blocked: 'incompatíveis',
       hint: 'Escolha na lista ou digite um ID de modelo.',
       reasoningUnknown: 'O endpoint não informa níveis de raciocínio. Este projeto envia low inicialmente; ajuste conforme a documentação do provedor. Este não é o padrão do provedor.',

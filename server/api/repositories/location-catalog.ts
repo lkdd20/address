@@ -75,6 +75,11 @@ const normalizeLimit = (value = PAGE_SIZE, maximum = 200): number => {
 };
 const normalizeOffset = (cursor?: string): number => Math.max(0, Number.parseInt(cursor || '0', 10) || 0);
 const lowerKey = (value: string | null | undefined): string => (value || '').trim().toLocaleLowerCase();
+// Addresses name a New York City borough as their city (the postal convention), so a search for the city lists all five.
+const newYorkCity = ['New York', 'New York City', 'NYC', '纽约'];
+const citySearchAliases: Partial<Record<CountryCode, Record<string, Record<string, string[]>>>> = {
+  US: { NY: Object.fromEntries(['manhattan', 'brooklyn', 'queens', 'the bronx', 'bronx', 'staten island'].map((borough) => [borough, newYorkCity])) }
+};
 const regionLabel = (row: RegionRow, country: CountryCode): string => {
   if (country === 'CN') return row.zh_name;
   const abbreviation = row.code && ['US', 'CA', 'AU', 'BR', 'IN', 'MX', 'NG'].includes(country) ? `（${row.code}）` : '';
@@ -398,7 +403,8 @@ const buildAdminSnapshot = async (db: Database, country: CountryCode, residentia
           regionId: region.option.id, regionValue: region.option.value, regionCode: region.option.regionCode,
           native: row.native_name, en: row.name, zhCN: row.zh_name || row.native_name
         },
-        search: [...new Set([row.name, row.native_name, row.zh_name, ...entry.keys].map(lowerKey))],
+        search: [...new Set([row.name, row.native_name, row.zh_name, ...entry.keys,
+          ...citySearchAliases[country]?.[region.option.regionCode || '']?.[lowerKey(row.name)] || []].map(lowerKey))],
         regionId: region.rootId, regionKey, clause, population: Number(row.population || 0)
       });
     }
@@ -826,7 +832,7 @@ const queryPostcodes = async (db: Database, input: CatalogQuery, snapshot: Postc
 // Configured shortcuts select the dropdown option they name (大阪府 is the option 大阪, the Taiwanese "city" 臺北市 is
 // a region option); shortcuts naming no published address are left out. Countries whose snapshot is still being built
 // keep their shortcuts as configured.
-type ShortcutIndex = Record<'region' | 'city', { exact: Map<string, LocationOption[]>; loose: Map<string, LocationOption[]> }>;
+type ShortcutIndex = Record<'region' | 'city', { exact: Map<string, LocationOption[]>; loose: Map<string, LocationOption[]> }> & { population: Map<LocationOption, number> };
 const shortcutIndexes = new WeakMap<AdminSnapshot, ShortcutIndex>();
 const shortcutIndex = (snapshot: AdminSnapshot): ShortcutIndex => {
   const cached = shortcutIndexes.get(snapshot);
@@ -843,7 +849,8 @@ const shortcutIndex = (snapshot: AdminSnapshot): ShortcutIndex => {
     }
     return { exact, loose };
   };
-  const index = { region: build(snapshot.regions), city: build(snapshot.cities) };
+  const population = new Map(snapshot.cities.map(({ option, population: people }) => [option, Number(people || 0)]));
+  const index = { region: build(snapshot.regions), city: build(snapshot.cities), population };
   shortcutIndexes.set(snapshot, index);
   return index;
 };
@@ -851,7 +858,10 @@ const shortcutOption = (snapshot: AdminSnapshot, shortcut: LocationShortcut): Lo
   if (shortcut.type !== 'region' && shortcut.type !== 'city') return undefined;
   const names = [shortcut.value, shortcut.label.en, shortcut.label['zh-CN']].filter(Boolean);
   const index = shortcutIndex(snapshot);
-  const byCount = (left: LocationOption, right: LocationOption) => Number(right.availableCount) - Number(left.availableCount);
+  // A shortcut names the well-known place: the most populous catalog city of that name (Houston, Texas rather than
+  // Houston, Arkansas), then the option with the most addresses.
+  const byCount = (left: LocationOption, right: LocationOption) => (index.population.get(right) || 0) - (index.population.get(left) || 0)
+    || Number(right.availableCount) - Number(left.availableCount);
   const field = shortcut.type;
   for (const loose of [false, true]) {
     const found = names.flatMap((name) => loose ? [...nameVariants(name)].flatMap((variant) => index[field].loose.get(variant) || [])

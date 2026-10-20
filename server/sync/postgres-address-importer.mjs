@@ -407,7 +407,7 @@ const preserveLocalizations = async (database, records) => {
     for (const language of ['en', 'zh-CN']) {
       const components = stored[language];
       if (!components || !addresses[language] || !semanticAddressFields.every((field) => !native[field]
-        || usableAddressTranslation(components[field], language, native[field]))) continue;
+        || usableAddressTranslation(components[field], language, native[field], field))) continue;
       record.localizations[language] = { components, formattedAddress: addresses[language], source: 'validated-previous-source' };
     }
   }

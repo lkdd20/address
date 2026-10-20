@@ -2,10 +2,12 @@ import { requiresAdminCode } from '../../src/domain/address-contracts.mjs';
 import { englishNativeCountries } from '../database/catalog-native-names.mjs';
 import { nameVariants, variantRegionIndex } from '../../src/domain/region-names.mjs';
 
-export const ADMINISTRATIVE_NAMES_REVISION = 'administrative-names-v15';
+export const ADMINISTRATIVE_NAMES_REVISION = 'administrative-names-v19';
 // A country whose published rows need another pass without rescanning every country takes its own revision.
-const countryRevisions = { KR: 'administrative-names-v17', PH: 'administrative-names-v18', IN: 'administrative-names-v18',
-  AU: 'administrative-names-v18', US: 'administrative-names-v18', CA: 'administrative-names-v18' };
+const countryRevisions = {};
+// Rows the structure and administrative-names repairs retired by region polygons the publication check cannot see; only
+// these repairs' own next revision may restore them.
+export const repairRetirement = /^publication-validation:(?:address-structure|administrative-names)-/u;
 export const administrativeNamesRevision = (countryCode) => countryRevisions[countryCode] || ADMINISTRATIVE_NAMES_REVISION;
 // USPS, Canada Post, Australia Post and Correios write first-level regions as codes, so the native and English
 // address keep the code; the Chinese address always names the region.

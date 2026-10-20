@@ -1079,7 +1079,10 @@ export const computeQueueSnapshot = async ({
         if (meteredOrder) return meteredOrder;
         const leftAt = left.matches ? left.nextAttempt : 0;
         const rightAt = right.matches ? right.nextAttempt : 0;
-        return (leftAt > now.getTime()) - (rightAt > now.getTime()) || leftAt - rightAt;
+        // Popular regions run first; unprioritised shards keep their catalogue order.
+        const priority = (source) => Number(source.shard.priority) || Number.MAX_SAFE_INTEGER;
+        return (leftAt > now.getTime()) - (rightAt > now.getTime()) || leftAt - rightAt
+          || priority(left) - priority(right);
       });
     const selectedSource = runnableSources[0] || null;
     const pausedQuotaSource = sourceEntries.find((source) => source.matches

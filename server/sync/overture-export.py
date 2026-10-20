@@ -9,6 +9,8 @@ import zipfile
 
 import duckdb
 
+from locality_quotas import LocalityWeights, allocate_quotas
+
 
 def sql_string(value):
     return "'" + value.replace("'", "''") + "'"
@@ -34,6 +36,7 @@ parser.add_argument("--candidate-jsonl")
 parser.add_argument("--admin1")
 parser.add_argument("--structures-zip")
 parser.add_argument("--structures-provider", default="usa-structures")
+parser.add_argument("--locality-weights")
 args = parser.parse_args()
 
 if not args.country.isalpha() or len(args.country) != 2:
@@ -120,6 +123,20 @@ candidate_limit = min(max(args.max_records, args.max_records * candidate_multipl
 partition_mode = args.admin1 is not None and not args.candidate_jsonl
 admin1_predicate = f"AND address_levels[1].value = {sql_string(args.admin1)}" if args.admin1 else ""
 residential_grid_scale = 4
+weights = (LocalityWeights(json.loads(pathlib.Path(args.locality_weights).read_text(encoding="utf-8")))
+           if args.locality_weights else None)
+weighted = weights is not None and not args.candidate_jsonl
+locality_cap = min(args.per_locality, weights.city_limit) if weighted else args.per_locality
+# The city cap applies to named cities only; unnamed rows are ranked per coordinate grid cell.
+rank_limit = (f"CASE WHEN nullif(trim(locality), '') IS NULL THEN {args.per_locality} ELSE {locality_cap} END"
+              if weighted else str(args.per_locality))
+admin1_sql = "coalesce(address_levels[1].value, '')"
+locality_sql = """coalesce(
+        nullif(trim(postal_city), ''),
+        CASE WHEN len(address_levels) >= 3 THEN address_levels[-2].value
+          WHEN len(address_levels) = 2 THEN address_levels[-1].value ELSE '' END,
+        ''
+      )"""
 
 if args.candidate_jsonl:
     candidate_file = pathlib.Path(args.candidate_jsonl).resolve()
@@ -135,7 +152,7 @@ CREATE TEMP TABLE address_candidates AS
     CASE WHEN nullif(trim(number), '') IS NULL THEN '' ELSE coalesce(unit, '') END AS unit,
     CASE WHEN nullif(trim(number), '') IS NULL THEN 'street' WHEN nullif(trim(unit), '') IS NULL THEN 'premise' ELSE 'subpremise' END AS match_level,
     longitude, latitude, source_dataset, source_record_id,
-    ST_Point(longitude, latitude) AS geometry
+    ST_Point(longitude, latitude) AS geometry, 1.0 AS locality_weight, 0 AS locality_popular_limit
   FROM read_json_auto({sql_string(str(candidate_file))}, format='newline_delimited')
   WHERE country = {country}
     AND nullif(trim(street), '') IS NOT NULL
@@ -145,6 +162,33 @@ CREATE TEMP TABLE address_candidates AS
 """
 else:
     per_asset_limit = max(1, math.ceil(candidate_limit / len(assets)))
+    asset_filter = f"""WHERE country = {country}
+      AND {bbox_predicate('bbox.xmin', 'bbox.xmax', 'bbox.ymin', 'bbox.ymax', box_areas)}
+      AND nullif(trim(street), '') IS NOT NULL
+      AND (country <> 'CN' OR nullif(trim(number), '') IS NOT NULL)
+      AND geometry IS NOT NULL
+      {admin1_predicate}"""
+    if weighted:
+        # First pass counts addresses per locality; the second keeps a hash slice of each locality sized by its quota,
+        # so the sample streams instead of materializing the whole country.
+        locality_counts = "\nUNION ALL\n".join(
+            f"SELECT {admin1_sql} AS admin1, {locality_sql} AS locality, bbox.xmin AS longitude, bbox.ymin AS latitude "
+            f"FROM read_parquet({sql_string(asset)}, union_by_name=true) {asset_filter}"
+            for asset in assets)
+        groups = connection.execute(
+            f"SELECT admin1, locality, count(*), avg(longitude), avg(latitude) FROM ({locality_counts}) "
+            "GROUP BY admin1, locality").fetchall()
+        quota_budget = min(max(args.max_records * 3 // 2, args.max_records + 1000), 2_000_000)
+        connection.execute("""CREATE TEMP TABLE locality_quotas(admin1 VARCHAR, locality VARCHAR, threshold BIGINT,
+            locality_weight DOUBLE, locality_popular_limit BIGINT)""")
+        quota_rows = [
+            f"({sql_string(entry['admin1'])},{sql_string(entry['locality'])},"
+            f"{min(1_000_000, math.ceil(entry['quota'] / entry['count'] * 1_000_000))},{entry['weight']},"
+            f"{math.ceil(entry['popular_limit'])})"
+            for entry in allocate_quotas(groups, quota_budget, weights) if entry["quota"] > 0
+        ]
+        for start in range(0, len(quota_rows), 1000):
+            connection.execute("INSERT INTO locality_quotas VALUES " + ",".join(quota_rows[start:start + 1000]))
     asset_queries = []
     for asset in assets:
         asset_queries.append(f"""
@@ -152,13 +196,8 @@ else:
     SELECT
       id,
       country,
-      coalesce(address_levels[1].value, '') AS admin1,
-      coalesce(
-        nullif(trim(postal_city), ''),
-        CASE WHEN len(address_levels) >= 3 THEN address_levels[-2].value
-          WHEN len(address_levels) = 2 THEN address_levels[-1].value ELSE '' END,
-        ''
-      ) AS locality,
+      {admin1_sql} AS admin1,
+      {locality_sql} AS locality,
       coalesce(postal_city, '') AS postal_city,
       coalesce(address_levels[-1].value, '') AS district,
       list_transform(address_levels, address_level -> coalesce(address_level.value, '')) AS address_levels,
@@ -173,22 +212,29 @@ else:
       coalesce(sources[1].record_id, id) AS source_record_id,
       geometry
     FROM read_parquet({sql_string(asset)}, union_by_name=true)
-    WHERE country = {country}
-      AND {bbox_predicate('bbox.xmin', 'bbox.xmax', 'bbox.ymin', 'bbox.ymax', box_areas)}
-      AND nullif(trim(street), '') IS NOT NULL
-      AND (country <> 'CN' OR nullif(trim(number), '') IS NOT NULL)
-      AND geometry IS NOT NULL
-      {admin1_predicate}
-    {'' if partition_mode else f'LIMIT {per_asset_limit}'}
+    {asset_filter}
+    {'' if partition_mode or weighted else f'LIMIT {per_asset_limit}'}
     )
 """)
     candidate_sources = "\nUNION ALL\n".join(asset_queries)
-    candidate_query = f"""
+    if weighted:
+        candidate_query = f"""
 CREATE TEMP TABLE address_candidates AS
   WITH source AS (
 {candidate_sources}
   )
-  SELECT 0 AS priority, *
+  SELECT 0 AS priority, source.*, quotas.locality_weight, quotas.locality_popular_limit
+  FROM source
+  JOIN locality_quotas quotas ON quotas.admin1 = source.admin1 AND quotas.locality = source.locality
+  WHERE hash(source.id) % 1000000 < quotas.threshold;
+"""
+    else:
+        candidate_query = f"""
+CREATE TEMP TABLE address_candidates AS
+  WITH source AS (
+{candidate_sources}
+  )
+  SELECT 0 AS priority, *, 1.0 AS locality_weight, 0 AS locality_popular_limit
   FROM source
   {'' if partition_mode else f'LIMIT {candidate_limit}'};
 """
@@ -222,9 +268,32 @@ FROM residential_grids
 ORDER BY address_count DESC, grid_latitude, grid_longitude;
 """).fetchall()
 
+locality_rank_sql = """row_number() OVER (
+    PARTITION BY coalesce(nullif(trim(admin1), ''), '*'),
+      coalesce(nullif(trim(locality), ''), concat('grid:', floor(latitude), ':', floor(longitude)))
+    ORDER BY hash(id))"""
+
+
+def weighted_order(rank, residential=True):
+    """Every locality's baseline first, then each popular metro area's share, then the rest by rank over sqrt(population)."""
+    baseline = weights.baseline
+    return (f"CASE WHEN {rank} <= {baseline} THEN 0 WHEN {rank} <= locality_popular_limit THEN 1 ELSE 2 END, "
+            + ("CASE WHEN property_type = 'unknown' THEN 1 ELSE 0 END, " if residential else "")
+            + f"CASE WHEN {rank} <= {baseline} THEN {rank} ELSE ({rank} - {baseline}) / locality_weight END, hash(id)")
+
+
 fallback_query = f"""
 COPY (
-  SELECT * EXCLUDE (priority, geometry), 'unknown' AS property_type,
+  SELECT * EXCLUDE (priority, geometry, locality_weight, locality_popular_limit, locality_rank), 'unknown' AS property_type,
+    '' AS residential_building_id, '' AS residential_building_class
+  FROM (SELECT *, {locality_rank_sql} AS locality_rank FROM address_candidates)
+  WHERE locality_rank <= {rank_limit}
+  ORDER BY {weighted_order('locality_rank', residential=False)}
+  LIMIT {args.max_records}
+) TO {output} (FORMAT JSON, ARRAY false);
+""" if weighted else f"""
+COPY (
+  SELECT * EXCLUDE (priority, geometry, locality_weight, locality_popular_limit), 'unknown' AS property_type,
     '' AS residential_building_id, '' AS residential_building_class
   FROM address_candidates
   LIMIT {args.max_records}
@@ -326,7 +395,9 @@ if classification_ctes is None:
     connection.execute(fallback_query)
 else:
     provider_column = f", {sql_string(args.structures_provider)} AS residential_source_provider" if args.structures_zip else ""
-    selection_order = ("CASE WHEN property_type = 'unknown' THEN 1 ELSE 0 END, residential_locality_rank, hash(id)"
+    selection_order = ((("" if partition_mode else "residential_priority, ") + weighted_order("residential_locality_rank"))
+                       if weighted else
+                       "CASE WHEN property_type = 'unknown' THEN 1 ELSE 0 END, residential_locality_rank, hash(id)"
                        if partition_mode else
                        "residential_priority, hash(coalesce(nullif(trim(admin1), ''), '*')), hash(id)")
     classified_query = f"""
@@ -354,10 +425,10 @@ COPY (
     SELECT CASE WHEN residential_region_rank = 1 THEN 0 ELSE 1 END AS residential_priority,
       * EXCLUDE (residential_region_rank)
     FROM residential_candidates
-    WHERE residential_region_rank = 1 OR residential_locality_rank <= {args.per_locality}
+    WHERE residential_region_rank = 1 OR residential_locality_rank <= {rank_limit}
   )
   SELECT
-    balanced.* EXCLUDE (priority, residential_priority, residential_locality_rank, geometry)
+    balanced.* EXCLUDE (priority, residential_priority, residential_locality_rank, geometry, locality_weight, locality_popular_limit)
   FROM balanced
   ORDER BY {selection_order}
   LIMIT {args.max_records}

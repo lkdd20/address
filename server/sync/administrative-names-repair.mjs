@@ -3,7 +3,7 @@ import { addressCanonicalKey, junkCharacters, localityIssue, validateAddressQual
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
 import { formattedAddress, localizedFormattedAddress } from './address-etl.mjs';
 import { administrativeNameCountries, administrativeNamesRevision, loadAdministrativeNames, mixedLevelCountries, postalRegionCodeCountries,
-  singaporeRegion } from './administrative-names.mjs';
+  repairRetirement, singaporeRegion } from './administrative-names.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
 import { regionBoundaryCountries, regionsForPoints } from './region-boundaries.mjs';
 import { staleCoverage } from './stale-coverage.mjs';
@@ -131,17 +131,21 @@ export const repairAdministrativeNames = async ({
   const removed = new Set();
   for (let offset = 0; offset < candidates.length; offset += pageSize) {
     const batch = candidates.slice(offset, offset + pageSize);
-    const rows = (await database.prepare(`SELECT id,active,match_level,latitude,longitude,generation,component_variants_json,address_variants_json
+    const rows = (await database.prepare(`SELECT id,active,retired_at,match_level,latitude,longitude,generation,component_variants_json,address_variants_json
       FROM address_pool WHERE id IN (${batch.map(() => '?').join(',')})`).bind(...batch).all()).results;
     await pause();
     await database.transaction(async (transaction) => {
+      // A row retired for another reason takes this repair's retirement too, so translation recovery cannot republish it.
+      const retire = async (row) => {
+        if (Number(row.active) !== 1 && repairRetirement.test(String(row.retired_at || ''))) return;
+        await transaction.prepare('UPDATE address_pool SET active=0,retired_at=? WHERE id=?').bind(retiredAt, row.id).run();
+        summary.retired += 1;
+      };
       for (const row of rows) {
         if (removed.has(row.id)) continue;
         if (boundaries.get(row.id)?.outside) {
-          if (Number(row.active) !== 1) continue;
-          await transaction.prepare('UPDATE address_pool SET active=0,retired_at=? WHERE id=?').bind(retiredAt, row.id).run();
-          touched.push(row.id);
-          summary.retired += 1;
+          if (Number(row.active) === 1) touched.push(row.id);
+          await retire(row);
           continue;
         }
         const variants = JSON.parse(row.component_variants_json || '{}');
@@ -176,9 +180,7 @@ export const repairAdministrativeNames = async ({
         // A row the import gate still rejects (a whole address in the street field) is never generated and retires, as
         // does a region the polygon proved wrong when no province code can replace a required one (Italy).
         if (quality.reasons.length || moved && requiresAdminCode(countryCode) && !clean(next.admin1Code)) {
-          if (!active) continue;
-          await transaction.prepare('UPDATE address_pool SET active=0,retired_at=? WHERE id=?').bind(retiredAt, row.id).run();
-          summary.retired += 1;
+          await retire(row);
           continue;
         }
         // A published row keeps its address over a retired twin; a retired row yields to any twin.

@@ -84,9 +84,20 @@ const conversationalChinese = /它是|什么|无法|抱歉|对不起|说明/u;
 const replyPunctuation = /[？?！!]/u;
 const cyrillicStreetType = /(?<!\p{L})(?:улица|ул\.|проспект|переулок|шоссе|бульвар|проезд|площадь|набережная|тупик|аллея)(?!\p{L})/iu;
 const chineseStreetType = /[街路道巷弄场岸滨堤]|胡同|林荫/u;
+// Renderings of names written without Han characters that read as a sentence (是时候该走了。), speak in the first or
+// second person (我爱你; 我们, 迷你, 勿忘我, 多明我 and 额我略 also render 우리, Mini, myosotis, Dominic and Gregory, and a
+// source with its own pronouns keeps them: You & I, Mon Brico, rumah ku, myVillage), or name a web page, a chapter, a meaning
+// or a time (首页, 第 4 章, 祈祷的意义, 2年前).
+const sourcePronoun = /\b(?:me|my|you|your|yours|thy|u|she|her|we|our|mon|ma|mes|moi|toi|ton|ta|tes|mi|mis|tu|tus|te|yo|mio|mia|tuo|tua|meu|minha|mein|meine|dein|deine|ihr|ich|elle|lui|vous|votre|vos|nous|notre|nos|ene|ku|aku)\b|\b[mt]['’]|\bI\s+(?:am|can|win|will|love|do|have)\b/iu;
+const sourceSubject = /\b[Mm]y(?=\p{Lu})/u;
+const chineseSentence = /(?<![额勿忘明])我(?![们略])|(?<!迷)你(?!们)|您|她|首页|主页|详情|意思|意义|第\s*\d+\s*章|\d+\s*页|\d+\s*(?:年|个月|天|周|小时)前/u;
 export const implausibleChineseTranslation = (original, translated) => {
   const value = String(translated ?? '').trim();
   if (conversationalChinese.test(value) || replyPunctuation.test(value) && !replyPunctuation.test(String(original ?? ''))) return true;
+  const source = String(original ?? '');
+  if (/\p{L}/u.test(source) && !/\p{Script=Han}/u.test(source)
+    && (chineseSentence.test(sourcePronoun.test(source) || sourceSubject.test(source) ? value.replace(/[我你您她]/gu, '') : value)
+      || value.includes('。') && !source.includes('.'))) return true;
   if (cyrillicStreetType.test(String(original ?? '')) && !chineseStreetType.test(value)) return true;
   // Short names can be one-syllable transliterations (Rau → 劳) and generic words can be one character (Street → 街,
   // West → 西); other longer names collapsed to one character were translated literally (Badger → 獾).
@@ -96,10 +107,37 @@ export const implausibleChineseTranslation = (original, translated) => {
   return sourceLetters.length >= minimum && /^\p{Script=Han}$/u.test(value);
 };
 
-export const usableAddressTranslation = (value, target, original = '') => {
+// English renderings of non-Latin names that answer back (What is it?, Sorry to bother you), read as a sentence
+// (It's time to go.), name a time (1 year ago), lose every letter, or drop the Korean or Russian type of the place
+// (마라로 → I'm in love., 학동 → Home) are machine-translation phrases, not address translations. The Korean type is
+// only checked for streets and neighbourhoods named by `field`: building names may end in the same syllables (원앤온리 →
+// One and Only) and cities and provinces often drop it (서울특별시 → Seoul).
+const englishSubject = /(?<![\p{L}\p{N}'’.-])I(?:['’](?:m|ve|ll|d)\b|\s+\p{Ll})/u;
+const englishPhrase = /\b(?:you|you['’]re|your|it['’]s|that['’]s|what['’]s|let['’]s|don['’]t|doesn['’]t|isn['’]t|aren['’]t|can['’]t|won['’]t|sorry|please|thanks?|meaning|read more|home ?page)\b|\b\d+\s+(?:years?|months?|weeks?|days?|hours?|minutes?)\s+ago\b/iu;
+const englishSentenceEnd = /\s\p{Ll}[\p{Ll}'’]*\.$/u;
+const hangulPlaceTypes = {
+  로: /(?:ro|no)\b|road|street|avenue|boulevard/iu, 길: /gil\b|street|road|lane|alley/iu, 동: /dong\b|town|village/iu,
+  리: /(?:ri|li)\b|village/iu, 가: /ga\b/iu, 읍: /eup\b|town/iu, 면: /myeon\b|township/iu
+};
+const englishStreetType = /\b(?:street|st|ulitsa|ul|avenue|ave|prospekt|prospect|prosp|pr|lane|pereulok|per|highway|shosse|sh|boulevard|blvd|bulvar|passage|proezd|proyezd|drive|square|ploshchad|pl|embankment|naberezhnaya|nab|tupik|dead end|cul-de-sac|alley|alleya|aleya|road)\b/iu;
+const hangulTypedFields = new Set(['street', 'district', 'dependentLocality']);
+export const implausibleEnglishTranslation = (original, translated, field = '') => {
+  const source = String(original ?? '').trim();
+  const value = String(translated ?? '').trim();
+  if (!/\p{L}/u.test(source) || /\p{Script=Latin}/u.test(source)) return false;
+  if (!/\p{L}/u.test(value) || replyPunctuation.test(value) && !replyPunctuation.test(source)) return true;
+  if (englishSubject.test(value) || englishPhrase.test(value) || englishSentenceEnd.test(value)) return true;
+  if (cyrillicStreetType.test(source) && !englishStreetType.test(value)) return true;
+  const hangul = source.match(/\p{Script=Hangul}+/gu)?.join('') || '';
+  const type = hangulTypedFields.has(field) && hangul.length >= 2 ? hangulPlaceTypes[hangul.at(-1)] : null;
+  return Boolean(type && !type.test(value));
+};
+
+export const usableAddressTranslation = (value, target, original = '', field = '') => {
   const translated = String(value ?? '').replace(/\s+/gu, ' ').trim();
   if (!translated || original && (!preservesAddressNumbers(original, translated) || !preservesAddressIdentifiers(original, translated))) return false;
   if (!componentLooksLocalized(translated, target)) return false;
+  if (target === 'en' && original && implausibleEnglishTranslation(original, translated, field)) return false;
   if (target === 'en') return !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Thai}\p{Script=Cyrillic}]/u.test(translated);
   if (target === 'zh-CN' && original && implausibleChineseTranslation(original, translated)) return false;
   if (target === 'zh-CN') return !/\p{L}/u.test(original || translated) || /\p{Script=Han}/u.test(translated)

@@ -150,7 +150,7 @@ function IndexTranslateSection({ value = defaultIndexTranslate, route, locale, b
       await mutate('/settings/translation', 'PUT', { indexTranslate: { concurrency: Number(form.concurrency), baseUrl: form.baseUrl.trim(), model: form.model.trim() } }, t.translationSaved);
     }}>
       <label><span>{openAIText(locale).routePriority}</span><input name="indexTranslatePriority" type="number" min="1" max="10000" required value={form.priority} onChange={field('priority')} /></label>
-      <ConcurrencyField value={form.concurrency} onChange={(concurrency) => setForm((current) => ({ ...current, concurrency }))} locale={locale} hint={false} />
+      <ConcurrencyField value={form.concurrency} onChange={(concurrency) => setForm((current) => ({ ...current, concurrency }))} locale={locale} hint={false} max={100} />
       <label><span>{text.baseUrl}</span><input name="indexTranslateBaseUrl" type="url" required value={form.baseUrl} onChange={field('baseUrl')} /></label>
       <label><span>{text.model}</span><input name="indexTranslateModel" required pattern={'[\\w.:\\/\\-]{1,128}'} value={form.model} onChange={field('model')} /></label>
       <div className="index-translate-actions"><button type="submit" className="secondary-action" disabled={busy}>{t.save}</button>
@@ -165,8 +165,8 @@ const concurrencyText = (locale: AdminLocale) => ({
   'zh-TW': { label: '並發數', hint: '同時進行的請求數（1-50）；超出時排隊等待。' },
   en: { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' }
 } as Record<string, { label: string; hint: string }>)[locale] || { label: 'Concurrency', hint: 'Requests in flight at once (1-50); extra requests wait.' };
-const ConcurrencyField = ({ value, onChange, locale, hint = true }: { value: string; onChange: (value: string) => void; locale: AdminLocale; hint?: boolean }) =>
-  <label><span>{concurrencyText(locale).label}</span><input name="maxConcurrency" type="number" min="1" max="50" step="1" required value={value} onChange={(event) => onChange(event.target.value)} />{hint && <small>{concurrencyText(locale).hint}</small>}</label>;
+const ConcurrencyField = ({ value, onChange, locale, hint = true, max = 50 }: { value: string; onChange: (value: string) => void; locale: AdminLocale; hint?: boolean; max?: number }) =>
+  <label><span>{concurrencyText(locale).label}</span><input name="maxConcurrency" type="number" min="1" max={max} step="1" required value={value} onChange={(event) => onChange(event.target.value)} />{hint && <small>{concurrencyText(locale).hint}</small>}</label>;
 
 export function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   value?: Credential; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;
@@ -301,6 +301,8 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
   const savedEffort = value?.openAICompatible?.reasoningEffort;
   const [reasoningEffort, setReasoningEffort] = useState(savedEffort && savedEffort !== 'default' ? savedEffort : 'low');
   const [maxTokens, setMaxTokens] = useState(String(value?.openAICompatible?.maxTokens || 8192));
+  const [requestFormat, setRequestFormat] = useState(value?.openAICompatible?.requestFormat || 'openai');
+  const indexFormat = requestFormat === 'index-translate';
   const [maxConcurrency, setMaxConcurrency] = useState(String(value?.maxConcurrency ?? 3));
   const [translationPriority, setTranslationPriority] = useState(String(value?.translationPriority ?? 10));
   const [translationPrompt, setTranslationPrompt] = useState(value?.translationPrompt || DEFAULT_TRANSLATION_PROMPT);
@@ -353,7 +355,7 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
     const key = apiKey.trim();
     const body = {
       provider: 'openai-compatible', label: label.trim() || `${providerLabel(locale, 'openai-compatible')} ${t.key}`,
-      ...(key ? { apiKey: key } : {}), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort,
+      ...(key ? { apiKey: key } : {}), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort, requestFormat,
       maxTokens: Number(maxTokens), translationPriority: Number(translationPriority), translationPrompt: translationPrompt.trim(),
       quotaLimit: unlimited ? UNLIMITED_QUOTA : Number(quotaLimit), quotaPeriod: 'day',
       maxConcurrency: Number(maxConcurrency), enabled
@@ -371,13 +373,15 @@ export function OpenAICompatibleCredentialDialog({ value, locale, busy, mutate, 
     {!modelCompatible && <p className="field-error" role="alert">{capabilityText.incompatible}</p>}
     {modelFetchState === 'empty' && <p className="field-error" role="status">{text.modelsEmpty}</p>}
     {modelFetchState === 'error' && <p className="field-error" role="alert">{text.modelsFailed}{modelFetchError && `: ${modelFetchError}`}</p>}
-    <label><span>{text.reasoning}</span><input name="reasoningEffort" list={reasoningListId} required pattern={'[a-z][a-z0-9_\\-]{0,31}'} value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} /><datalist id={reasoningListId}>{selectedModel?.reasoningEfforts?.filter((effort) => effort !== 'default').map((effort) => <option key={effort} value={effort} />)}</datalist><small>{selectedModel?.reasoningEfforts ? capabilityText.known : capabilityText.unknown}</small></label>
+    <label><span>{modelText.format}</span><select name="requestFormat" value={requestFormat} onChange={(event) => setRequestFormat(event.target.value)}><option value="openai">{modelText.formatOpenAI}</option><option value="index-translate">{modelText.formatIndex}</option></select>{indexFormat && <small>{modelText.formatHint}</small>}</label>
+    {/^http:\/\//iu.test(baseUrl.trim()) && <p className="field-error" role="alert">{modelText.httpWarning}</p>}
+    {!indexFormat && <label><span>{text.reasoning}</span><input name="reasoningEffort" list={reasoningListId} required pattern={'[a-z][a-z0-9_\\-]{0,31}'} value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} /><datalist id={reasoningListId}>{selectedModel?.reasoningEfforts?.filter((effort) => effort !== 'default').map((effort) => <option key={effort} value={effort} />)}</datalist><small>{selectedModel?.reasoningEfforts ? capabilityText.known : capabilityText.unknown}</small></label>}
     <label><span>{text.maxTokens}</span><input name="maxTokens" type="number" min="1024" max="32768" step="1" required value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></label>
     <label><span>{text.priority}</span><input name="translationPriority" type="number" min="1" max="10000" step="1" required value={translationPriority} onChange={(event) => setTranslationPriority(event.target.value)} /></label>
-    <label><span>{text.prompt}</span><textarea name="translationPrompt" maxLength={4000} value={translationPrompt} onChange={(event) => setTranslationPrompt(event.target.value)} /><small>{text.promptHint}</small>{translationPrompt.trim() !== DEFAULT_TRANSLATION_PROMPT && <button type="button" className="compact-action prompt-reset" onClick={() => setTranslationPrompt(DEFAULT_TRANSLATION_PROMPT)}>{localeText[locale].test.restoreDefaultPrompt}</button>}</label>
+    {!indexFormat && <label><span>{text.prompt}</span><textarea name="translationPrompt" maxLength={4000} value={translationPrompt} onChange={(event) => setTranslationPrompt(event.target.value)} /><small>{text.promptHint}</small>{translationPrompt.trim() !== DEFAULT_TRANSLATION_PROMPT && <button type="button" className="compact-action prompt-reset" onClick={() => setTranslationPrompt(DEFAULT_TRANSLATION_PROMPT)}>{localeText[locale].test.restoreDefaultPrompt}</button>}</label>}
     <label className="check"><input name="unlimitedQuota" type="checkbox" checked={unlimited} onChange={(event) => { setUnlimited(event.target.checked); if (!event.target.checked && Number(quotaLimit) >= UNLIMITED_QUOTA) setQuotaLimit('1000'); }} />{localeText[locale].ui.unlimitedQuota}</label>
     {!unlimited && <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max={UNLIMITED_QUOTA - 1} required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>}
-    <ConcurrencyField value={maxConcurrency} onChange={setMaxConcurrency} locale={locale} />
+    <ConcurrencyField value={maxConcurrency} onChange={setMaxConcurrency} locale={locale} max={100} />
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;

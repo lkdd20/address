@@ -831,6 +831,28 @@ describe('queue snapshot', () => {
     });
   });
 
+  it('releases only popular-region shards whose cap was raised', () => {
+    const shard = (extra) => ({ id: 'geofabrik-osm-de-by', countryCode: 'DE', maxRecords: 50_000, source: { adapter: 'geofabrik' }, ...extra });
+    const plain = sourceCapabilityRevision(shard());
+    expect(sourceCapabilityRevision(shard({ maxRecords: 80_000 }))).toBe(plain);
+    const popular = sourceCapabilityRevision(shard({ priority: 2, maxRecords: 80_000 }));
+    expect(popular.startsWith(`${plain}:popular-`)).toBe(true);
+    expect(sourceCapabilityRevision(shard({ priority: 2, maxRecords: 100_000 }))).not.toBe(popular);
+  });
+
+  it('runs popular-region shards before the rest of the catalogue', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget.add('US');
+    const shard = (id, priority) => ({ id, countryCode: 'US', ...(priority ? { priority } : {}), source: { adapter: 'overture' } });
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {}),
+      catalogShards: [shard('overture-us-al'), shard('overture-us-tx', 2), shard('overture-us-ca', 1)],
+      queueState: { schemaVersion: 1, countries: {} },
+      now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'US')?.runnableShardId).toBe('overture-us-ca');
+  });
+
   it('keeps an incomplete Singapore source waiting when OneMap is not configured', async () => {
     const facts = stubFacts();
     facts.deficits.belowTarget.add('SG');

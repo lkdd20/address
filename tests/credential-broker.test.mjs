@@ -756,7 +756,7 @@ describe('credential broker', () => {
   });
 
   it('skips a key whose in-flight dispatches reach its concurrency until one completes', async () => {
-    await expect(addGeoapify('Too many', 'too-many-secret', { maxConcurrency: 51 })).rejects.toThrow('INVALID_CREDENTIAL_CONCURRENCY');
+    await expect(addGeoapify('Too many', 'too-many-secret', { maxConcurrency: 101 })).rejects.toThrow('INVALID_CREDENTIAL_CONCURRENCY');
     const id = await addGeoapify('Concurrent', 'concurrent-secret', { maxConcurrency: 2 });
     const broker = await createCredentialBroker({ database, masterKey, tokens, fetchImpl: async () => Response.json({ results: [] }) });
     const reserve = async (requestId) => {
