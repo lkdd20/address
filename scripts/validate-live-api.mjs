@@ -139,7 +139,7 @@ assert(california, 'California region is missing');
 const losAngeles = await get(`/locations/search?country=US&field=city&regionId=${california.id}&q=Los%20Angeles&limit=20`);
 const chicago = await get(`/locations/search?country=US&field=city&regionId=${california.id}&q=Chicago&limit=20`);
 assert(losAngeles.cities.some((city) => city.value === 'Los Angeles'), 'California is missing Los Angeles');
-assert(chicago.total === 0, 'California contains Chicago');
+assert(!chicago.cities.some((city) => city.value === 'Chicago'), 'California contains Chicago');
 
 const cnRegions = await get('/locations/search?country=CN&field=region&q=%E5%B9%BF%E4%B8%9C&limit=20');
 const guangdong = cnRegions.regions.find((region) => region.value === 'Guangdong' || region.en === 'Guangdong');

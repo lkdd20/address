@@ -266,7 +266,7 @@ describe('published residential coverage', () => {
     'reuses the freshly validated index for national counts of %s without repeating the strict scan', async (state) => {
       await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
       if (state === 'retired') await database.prepare("UPDATE address_pool SET active=0,retired_at=? WHERE id='ny'").bind(now).run();
-      if (state === 'invalid_language') await database.prepare("UPDATE address_pool SET component_variants_json='{}' WHERE id='ny'").run();
+      if (state === 'invalid_language') await database.prepare(`UPDATE address_pool SET component_variants_json='{"en":{"street":"测试路"}}' WHERE id='ny'`).run();
       if (state === 'revoked_source') await database.prepare('UPDATE address_sources SET redistribution_allowed=0').run();
       await refreshAddressGenerationIndex(database, 'US');
       await refreshCountryCounts(database, 'US', now);
@@ -313,7 +313,7 @@ describe('published residential coverage', () => {
   it.each(['published', 'retired', 'invalid_language', 'revoked_source', 'stale_primary', 'missing_primary'])(
     'matches strict coverage after index refresh for %s', async (state) => {
       if (state === 'retired') await database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id='ny'`).bind(now).run();
-      if (state === 'invalid_language') await database.prepare(`UPDATE address_pool SET component_variants_json='{}' WHERE id='ny'`).run();
+      if (state === 'invalid_language') await database.prepare(`UPDATE address_pool SET component_variants_json='{"en":{"street":"测试路"}}' WHERE id='ny'`).run();
       if (state === 'revoked_source') await database.prepare('UPDATE address_sources SET redistribution_allowed=0').run();
       if (state === 'stale_primary') await database.exec("UPDATE address_pool_evidence SET is_current=0 WHERE id='ny-address_existence'");
       if (state === 'missing_primary') await database.exec("UPDATE address_pool_evidence SET is_primary=0 WHERE id='ny-address_existence'");

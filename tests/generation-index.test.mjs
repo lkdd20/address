@@ -27,12 +27,21 @@ describe('address generation index', () => {
             .bind(JSON.stringify(variants)).run();
           const eligible = Number(await database.prepare(`SELECT COUNT(*) AS total FROM address_pool
             WHERE ${addressPublicationSqlClause()}`).first('total'));
-          expect(eligible, `${language}:${field}:${value}`).toBe(Number(
-            storedVariantLooksLocalized(variants.en, 'en') && storedVariantLooksLocalized(variants['zh-CN'], 'zh-CN')
-            && fields.some((key) => /\p{Script=Han}/u.test(variants['zh-CN'][key] || ''))
-          ));
+          // Chinese fields never block publication; the reader shows their English form until they are translated.
+          expect(eligible, `${language}:${field}:${value}`).toBe(Number(storedVariantLooksLocalized(variants.en, 'en')));
         }
       }
+      // A Japanese row stores its ward as the English district; the reader shows it as the dependent locality.
+      await database.prepare(`UPDATE address_pool SET district='中央区',component_variants_json=?`).bind(JSON.stringify({
+        ...valid, native: { ...native, district: '中央区' }, en: { ...valid.en, district: 'Chuo' }
+      })).run();
+      expect(Number(await database.prepare(`SELECT COUNT(*) AS total FROM address_pool WHERE ${addressPublicationSqlClause()}`)
+        .first('total'))).toBe(1);
+      await database.prepare(`UPDATE address_pool SET component_variants_json=?`).bind(JSON.stringify({
+        ...valid, native: { ...native, district: '中央区' } })).run();
+      expect(Number(await database.prepare(`SELECT COUNT(*) AS total FROM address_pool WHERE ${addressPublicationSqlClause()}`)
+        .first('total'))).toBe(0);
+      await database.prepare(`UPDATE address_pool SET district=''`).run();
       const identifiers = { houseNumber: '١', unit: '동1', postcode: '١٢٣' };
       await database.prepare('UPDATE address_pool SET component_variants_json=?').bind(JSON.stringify({
         ...valid, en: { ...valid.en, ...identifiers }, 'zh-CN': { ...valid['zh-CN'], ...identifiers }

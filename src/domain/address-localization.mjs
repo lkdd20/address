@@ -91,6 +91,71 @@ const chineseStreetType = /[街路道巷弄场岸滨堤]|胡同|林荫/u;
 const sourcePronoun = /\b(?:me|my|you|your|yours|thy|u|she|her|we|our|mon|ma|mes|moi|toi|ton|ta|tes|mi|mis|tu|tus|te|yo|mio|mia|tuo|tua|meu|minha|mein|meine|dein|deine|ihr|ich|elle|lui|vous|votre|vos|nous|notre|nos|ene|ku|aku)\b|\b[mt]['’]|\bI\s+(?:am|can|win|will|love|do|have)\b/iu;
 const sourceSubject = /\b[Mm]y(?=\p{Lu})/u;
 const chineseSentence = /(?<![额勿忘明])我(?![们略])|(?<!迷)你(?!们)|您|她|首页|主页|详情|意思|意义|第\s*\d+\s*章|\d+\s*页|\d+\s*(?:年|个月|天|周|小时)前/u;
+// English street types at the end of a Latin name (Main ST, Carson DR NE), with the Chinese type an address uses, the
+// Chinese types that render it, and the literal or misread renderings machine translation gives it (Close → 关闭,
+// DR → 灾难恢复 or 博士, ST → 意法半导体 or 圣, Terrace → 露台).
+const englishStreetTypes = [
+  ['Street', ['st'], '街', /[街路道]/u, /意法半导体|圣|斯特里特|[·・]斯特/u],
+  ['Road', ['rd'], '路', /[路道街]/u, /研发(?:中心)?/u],
+  ['Drive', ['dr', 'drv'], '大道', /[路道街]/u, /驱动[器力]?|驾驶|驾车|开车|行驶|博士|医生|灾难恢复|德[赖莱]夫/u],
+  ['Avenue', ['ave', 'av'], '大道', /[道街路]/u, /平均|[·・][艾阿]夫/u],
+  ['Boulevard', ['blvd'], '大道', /[道路街]/u, null],
+  ['Lane', ['ln'], '巷', /[巷路街道弄里]/u, /[·・]莱恩/u],
+  ['Court', ['ct', 'crt'], '庭', /[庭阁院苑巷场街路府坊弄]/u, /法院|法庭|[·・]考特/u],
+  ['Close', ['cl'], '巷', /[巷路街苑弄里庭阁坊道]|胡同/u, /关闭|关上|接近|靠近|近路|克洛斯|[关近]/u],
+  ['Place', ['pl'], '坊', /[坊场巷街路苑府阁里道]/u, /地方/u],
+  ['Terrace', ['ter', 'terr', 'tce'], '台', /[台街路巷苑坊道]|排屋/u, /露台|阳台|特莱斯|泰瑞斯|特雷斯|特拉斯/u],
+  ['Way', ['wy'], '路', /[路道街巷径]/u, /方式|方法|[·・][韦威]/u],
+  ['Crescent', ['cres'], '弯', /[弯湾月街路巷环道]/u, /克雷森特|[·・]克雷斯/u],
+  ['Circle', ['cir'], '环路', /[环圈圆路街道]/u, /圆圈/u],
+  ['Trail', ['trl'], '小径', /[径路道]/u, /足迹|踪迹/u],
+  ['Highway', ['hwy'], '公路', /[路道]/u, null],
+  ['Parkway', ['pkwy'], '公园大道', /[道路]/u, null],
+  ['Square', ['sq'], '广场', /[场街路]/u, null]
+].map(([name, abbreviations, chinese, accepted, misread]) => ({ name, abbreviations, chinese, accepted, misread,
+  latin: new RegExp(String.raw`(?<![A-Za-z])(?:${[name, ...abbreviations].join('|')})\.?`, 'iu') }));
+const englishDirections = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west']);
+const trailingEnglishStreetType = (value) => {
+  const source = String(value ?? '').trim();
+  if (!/\p{Script=Latin}/u.test(source) || /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(source)) return null;
+  const tokens = source.split(/\s+/u);
+  let index = tokens.length - 1;
+  if (index >= 2 && englishDirections.has(tokens[index].replace(/\.$/u, '').toLowerCase())) index -= 1;
+  if (index < 1) return null;
+  const word = tokens[index].replace(/\.$/u, '').toLowerCase();
+  const type = englishStreetTypes.find((item) => item.name.toLowerCase() === word || item.abbreviations.includes(word));
+  return type ? { type, tokens, index } : null;
+};
+// Providers read the type written out (Main ST → Main Street); stored values keep the source spelling.
+export const expandEnglishStreetType = (value) => {
+  const match = trailingEnglishStreetType(value);
+  if (!match || match.tokens[match.index].replace(/\.$/u, '').toLowerCase() === match.type.name.toLowerCase()) return value;
+  return match.tokens.map((token, index) => index === match.index ? match.type.name : token).join(' ');
+};
+// Replaces a misread or untranslated type at the end of a Chinese street with the address type, keeping the name and a
+// trailing direction: 果园关闭 → 果园巷, 卡森博士 → 卡森大道, 霍华德·圣 → 霍华德街, 杜松CT → 杜松庭.
+export const normalizeChineseStreetType = (original, translated) => {
+  const value = String(translated ?? '');
+  const match = trailingEnglishStreetType(original);
+  if (!match || !/\p{Script=Han}/u.test(value)) return translated;
+  const { type } = match;
+  const wrong = [type.misread?.source, type.latin.source].filter(Boolean).join('|');
+  const tail = new RegExp(String.raw`[\s·・]*(?:${wrong})([\s·・]*(?:东北|西北|东南|西南|[东西南北]|(?:NE|NW|SE|SW|N|S|E|W)(?![A-Za-z])\.?))?$`, 'iu');
+  const found = value.match(tail);
+  if (!found) return translated;
+  const name = value.slice(0, found.index);
+  const direction = (found[1] || '').replace(/^[\s·・]+/u, '');
+  const suffix = /^[A-Z]/iu.test(direction) ? ` ${direction}` : direction;
+  // A street named only by its type (The Drive, The Close) is the type itself.
+  if (!name.trim() && match.tokens.slice(0, match.index).join(' ').toLowerCase() === 'the') return `${type.chinese}${suffix}`;
+  if (!/\p{Script=Han}|\p{L}{2}|\p{N}/u.test(name)) return translated;
+  const street = name.endsWith(type.chinese) ? name : `${name}${/\p{Script=Han}$/u.test(name) ? '' : ' '}${type.chinese}`;
+  return `${street}${suffix}`;
+};
+const englishStreetTypeMissing = (original, value) => {
+  const match = trailingEnglishStreetType(original);
+  return Boolean(match && /\p{Script=Han}/u.test(value) && !match.type.accepted.test(value));
+};
 export const implausibleChineseTranslation = (original, translated) => {
   const value = String(translated ?? '').trim();
   if (conversationalChinese.test(value) || replyPunctuation.test(value) && !replyPunctuation.test(String(original ?? ''))) return true;
@@ -99,6 +164,7 @@ export const implausibleChineseTranslation = (original, translated) => {
     && (chineseSentence.test(sourcePronoun.test(source) || sourceSubject.test(source) ? value.replace(/[我你您她]/gu, '') : value)
       || value.includes('。') && !source.includes('.'))) return true;
   if (cyrillicStreetType.test(String(original ?? '')) && !chineseStreetType.test(value)) return true;
+  if (englishStreetTypeMissing(original, value)) return true;
   // Short names can be one-syllable transliterations (Rau → 劳) and generic words can be one character (Street → 街,
   // West → 西); other longer names collapsed to one character were translated literally (Badger → 獾).
   if (/^[街路道巷弄栋楼座塔号区村镇乡市县省州港桥岛园场庄屯东西南北中]$/u.test(value)) return false;

@@ -120,8 +120,9 @@ const regionIssues = (code, address, regionFor) => {
   if (/\p{Script=Han}/u.test(region.zhCN || '') && zh.admin1 !== region.zhCN) issues.push('zh_region_mismatch');
   return issues;
 };
-// Untranslated Chinese place names are reported but do not fail the audit while the translation queue catches up.
-const warningIssues = new Set(['zh_place_untranslated']);
+// English-first publication: untranslated Chinese names are reported but do not fail the audit while the translation
+// queue catches up; foreign scripts in the Chinese variant still fail.
+const warningIssues = new Set(['zh_place_untranslated', 'zh_missing_han']);
 const placeWarnings = (address) => {
   const zh = address.componentVariants?.['zh-CN'] || {};
   return ['admin1', 'locality'].some((field) => zh[field] && /\p{L}/u.test(zh[field]) && !/\p{Script=Han}/u.test(zh[field]))

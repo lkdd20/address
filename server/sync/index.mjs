@@ -160,6 +160,14 @@ export const createSyncRuntime = async ({
         if (summary.repaired) console.log(JSON.stringify({ event: 'chinese_address_repair', ...summary }));
       }
     });
+    await startupStep('english-first republication', async () => {
+      const { republishEnglishReadyRows } = await import('./translation-backfill.mjs');
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 AND country_code<>'CN' ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await republishEnglishReadyRows({ database, countryCode });
+        if (summary.republished) console.log(JSON.stringify({ event: 'english_first_republication', ...summary }));
+      }
+    });
     await startupStep('taiwan official names', async () => {
       const summary = await repairTaiwanOfficialNames({ database });
       if (summary.renamed || summary.duplicates) console.log(JSON.stringify({ event: 'taiwan_official_name_repair', ...summary }));

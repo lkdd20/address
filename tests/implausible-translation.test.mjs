@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { implausibleChineseTranslation, implausibleEnglishTranslation, usableAddressTranslation } from '../src/domain/address-localization.mjs';
+import { expandEnglishStreetType, implausibleChineseTranslation, implausibleEnglishTranslation, normalizeChineseStreetType, usableAddressTranslation } from '../src/domain/address-localization.mjs';
 
 describe('implausible Chinese translations', () => {
   it.each([
@@ -26,7 +26,11 @@ describe('implausible Chinese translations', () => {
     ['Im Wiesengrund', '我是维森格伦德'],
     ['Rue du Moulin', '我的磨坊路'],
     ['227 ST', '第227章'],
-    ['Okosun Close', '您的持仓将被平仓。']
+    ['Okosun Close', '您的持仓将被平仓。'],
+    ['Judge Close', '克洛斯法官'],
+    ['Juniper Drive', '杜松驱动器'],
+    ['Marine DR', '海洋灾难恢复'],
+    ['2nd ST', '2nd 意法半导体']
   ])('rejects %s → %s', (original, translated) => {
     expect(implausibleChineseTranslation(original, translated)).toBe(true);
     expect(usableAddressTranslation(translated, 'zh-CN', original)).toBe(false);
@@ -59,6 +63,11 @@ describe('implausible Chinese translations', () => {
     ['rumah ku', '我的房子'],
     ['myNEWS.com', '我的新闻网'],
     ['I Can Learning Centre', '我能学习中心'],
+    ['Stratton Drive', '斯特拉顿大道'],
+    ['Kensington Court', '肯辛顿阁'],
+    ['West 23rd Street', '西 23rd 街'],
+    ['HWY 128', 'HWY 128号公路'],
+    ['St Kilda Road', '圣基尔达路'],
     ['Le Bar et Vous', '酒吧与您'],
     ["Un jour une fleur m'a dit", '有一天一朵花对我说'],
     ['Église protestante Notre Seigneur Jésus', '我主耶稣新教教堂']
@@ -125,5 +134,36 @@ describe('implausible English translations', () => {
     expect(implausibleEnglishTranslation('학동', 'Home', 'district')).toBe(true);
     expect(implausibleEnglishTranslation('학동', 'Home')).toBe(false);
     expect(usableAddressTranslation('Home', 'en', '학동', 'dependentLocality')).toBe(false);
+  });
+});
+
+describe('English street types in Chinese', () => {
+  it('writes abbreviated types out for providers and leaves other names alone', () => {
+    expect(expandEnglishStreetType('Carson DR')).toBe('Carson Drive');
+    expect(expandEnglishStreetType('Madigan DR NE')).toBe('Madigan Drive NE');
+    expect(expandEnglishStreetType('St Kilda Road')).toBe('St Kilda Road');
+    expect(expandEnglishStreetType('HWY 128')).toBe('HWY 128');
+    expect(expandEnglishStreetType('ST')).toBe('ST');
+  });
+
+  it.each([
+    ['Orchard Close', '果园关闭', '果园巷'],
+    ['Park View Close', '公园景观 关闭', '公园景观巷'],
+    ['Mill Lane Close', '米尔巷关闭', '米尔巷'],
+    ['Paul Close', '保罗·克洛斯', '保罗巷'],
+    ['Carson DR', '卡森博士', '卡森大道'],
+    ['Marine DR', '海洋灾难恢复', '海洋大道'],
+    ['Madigan Drive NE', '马迪根驱动器东北', '马迪根大道东北'],
+    ['HOWARD ST', '霍华德·圣', '霍华德街'],
+    ['2nd ST', '2nd 意法半导体', '2nd 街'],
+    ['JUNIPER CT', '杜松CT', '杜松庭'],
+    ['Eaton Terrace', '伊顿露台', '伊顿台'],
+    ['Coventry Hills Way NE', '考文垂山方式 NE', '考文垂山路 NE'],
+    ['Stratton Drive', '斯特拉顿大道', '斯特拉顿大道'],
+    ['Rue de la Paix', '和平街', '和平街'],
+    ['Smith Closet', '史密斯衣柜', '史密斯衣柜']
+  ])('normalizes %s: %s → %s', (original, translated, expected) => {
+    expect(normalizeChineseStreetType(original, translated)).toBe(expected);
+    expect(implausibleChineseTranslation(original, expected)).toBe(false);
   });
 });

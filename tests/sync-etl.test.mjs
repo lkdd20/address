@@ -133,7 +133,7 @@ const source = {
 describe('address source shard catalog', () => {
   it('expands independently supported country shards with explicit refresh intervals', async () => {
     const catalog = await loadSourceCatalog();
-    expect(catalog.shards).toHaveLength(230);
+    expect(catalog.shards).toHaveLength(229);
     expect(catalog.shards.filter((shard) => shard.id !== 'korea-kapt-residential')
       .every((shard) => shard.intervalDays === 30)).toBe(true);
     expect(catalog.shards.some((shard) => shard.countryCode === 'CN')).toBe(false);
@@ -150,7 +150,8 @@ describe('address source shard catalog', () => {
       'france-bdnb-gironde-residential', 'france-bdnb-rhone-residential', 'france-bdnb-paris-residential'
     ].includes(shard.id))).toHaveLength(3);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'NL')).toHaveLength(2);
-    expect(catalog.shards.filter((shard) => shard.countryCode === 'HK')).toHaveLength(3);
+    expect(catalog.shards.filter((shard) => shard.countryCode === 'HK')).toHaveLength(2);
+    expect(catalog.shards.some((shard) => shard.id === 'overture-addresses-hk')).toBe(false);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'TW')).toHaveLength(3);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'MX')).toHaveLength(3);
     expect(catalog.shards.filter((shard) => shard.countryCode === 'SA')).toHaveLength(2);
@@ -2967,8 +2968,7 @@ describe('built-in ETL planning and publishing', () => {
       houseNumber: '1', street: language === 'zh-CN' ? '市场街' : 'Market Street',
       admin1: language === 'zh-CN' ? '宾夕法尼亚州' : 'Pennsylvania', postcode: '19103'
     }])));
-    await database.prepare(`INSERT INTO address_generation_index(address_id,country_code,residential_ready,random_key,updated_at)
-      SELECT id,country_code,1,1,'2026-08-16' FROM address_pool WHERE country_code='US'`).run();
+    // English-first publication indexes the English-language row at import, before any Chinese translation.
     expect(await database.prepare(`SELECT COUNT(*) count FROM address_generation_index
       WHERE country_code='US' AND active=1`).first('count')).toBe(1);
     await database.prepare(`UPDATE address_pool SET locality='',postal_locality='',component_variants_json=?,expires_at=NULL

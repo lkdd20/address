@@ -1,35 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { addressQualitySqlClause } from '../../src/domain/address-quality.mjs';
 import { foreignAddressScriptPattern, semanticAddressFields } from '../../src/domain/address-localization.mjs';
-import { addressContracts } from '../../src/domain/address-contracts.mjs';
 import { administrativeKeySql, administrativeValueSql, refreshAdministrativeAssignments } from './administrative-assignments.mjs';
 
-const localizedHanClause = (prefix = '') => {
-  const value = (language, field) => `${prefix}component_variants_json::jsonb -> '${language}' ->> '${field}'`;
-  const country = `${prefix}country_code`;
-  const anyHan = `(${semanticAddressFields.map((field) => `(${value('zh-CN', field)} ~ '[一-龥]')`).join(' OR ')})`;
-  const requiredCountryPredicate = (field) => {
-    const countries = Object.entries(addressContracts)
-      .filter(([, contract]) => field === 'street' || contract.required.includes(field))
-      .map(([code]) => `'${code}'`);
-    return countries.length ? `${country} NOT IN (${countries.join(',')})` : 'TRUE';
+// English-first publication: a row publishes once its English variant is usable; Chinese fields still untranslated
+// show their English form at read time and are replaced as translation recovery completes them. A field the English
+// variant omits takes the value the reader gives it: the source column, the English city for an equal postal city, and
+// the English district for the dependent locality.
+const englishReaderValues = (prefix) => {
+  const en = (field) => `${prefix}component_variants_json::jsonb -> 'en' ->> '${field}'`;
+  return {
+    buildingName: `coalesce(${en('buildingName')},${prefix}building_name)`,
+    street: `coalesce(${en('street')},${prefix}street)`,
+    locality: `coalesce(${en('locality')},nullif(${prefix}locality,''),${prefix}postal_locality)`,
+    postalLocality: `coalesce(${en('postalLocality')},CASE WHEN ${en('locality')} IS NOT NULL
+      AND lower(trim(${prefix}postal_locality))=lower(trim(${prefix}locality)) THEN ${en('locality')} ELSE ${prefix}postal_locality END)`,
+    dependentLocality: `coalesce(${en('dependentLocality')},${en('district')})`,
+    district: `coalesce(${en('district')},${prefix}district)`,
+    admin1: `coalesce(${en('admin1')},${prefix}admin1)`
   };
-  const unchangedIdentifier = (field) => `${value('native', field)} ~ '^[A-Z]{1,6}[-./ ]{0,1}[0-9]+([-./ ]{0,1}[A-Z0-9]+)*$'`;
-  const translated = semanticAddressFields.filter((field) => field !== 'buildingName').map((field) => {
-    const original = value('native', field);
-    const ordinaryStreet = field === 'street' ? ` OR ${prefix}property_type NOT IN ('residential','apartment')` : '';
-    return `(${requiredCountryPredicate(field)} OR trim(${original})='' OR ${value('zh-CN', field)} ~ '[一-龥]'
-      OR NOT (${original} ~ '[^0-9[:punct:][:space:]]') OR ${unchangedIdentifier(field)}${ordinaryStreet})`;
-  });
-  return [anyHan, ...translated].join(' AND ');
 };
-
-export const addressLocalizationSqlClause = (prefix = '') => [
-  localizedHanClause(prefix),
-  ...['en', 'zh-CN'].map((language) => `NOT (concat_ws('',${semanticAddressFields
-    .map((field) => `${prefix}component_variants_json::jsonb -> '${language}' ->> '${field}'`).join(',')})
-      ~ '${foreignAddressScriptPattern(language)}')`)
-].join(' AND ');
+export const addressLocalizationSqlClause = (prefix = '') => {
+  const values = englishReaderValues(prefix);
+  return `NOT (concat_ws('',${semanticAddressFields.map((field) => values[field]).join(',')}) ~ '${foreignAddressScriptPattern('en')}')`;
+};
 
 export const addressPublicationSqlClause = (prefix = '') => [
   `${prefix}quality_score >= 0.7`,

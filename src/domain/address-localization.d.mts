@@ -8,4 +8,6 @@ export function preservesAddressNumbers(original: string, translated: string): b
 export function preservesAddressIdentifiers(original: string, translated: string): boolean;
 export function implausibleChineseTranslation(original: unknown, translated: unknown): boolean;
 export function implausibleEnglishTranslation(original: unknown, translated: unknown, field?: string): boolean;
+export function expandEnglishStreetType(value: string): string;
+export function normalizeChineseStreetType(original: unknown, translated: string): string;
 export function normalizeAddressDigits(value: string): string;

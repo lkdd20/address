@@ -40,5 +40,43 @@ describe('Chinese address spacing', () => {
       expect(rows.get('stale')).toBe('美国加利福尼亚州布恩维尔HWY 128 17500 95415');
       expect(await repairChineseAddressStrings({ database, countryCode: 'US' })).toMatchObject({ scanned: 0, repaired: 0 });
     });
+
+    it('gives a Chinese street that misreads its English type the address type', async () => {
+      const native = { houseNumber: '4', street: 'Orchard Close', locality: 'Oxford', admin1: 'England', postcode: 'OX1 1AA' };
+      const zh = { ...native, street: '果园关闭', locality: '牛津', admin1: '英格兰' };
+      await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,locality,street,house_number,latitude,longitude,
+          native_language,component_variants_json,address_variants_json,property_type,quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,match_level)
+        VALUES ('close','GB','England','Oxford','Orchard Close','4',51.7,-1.2,'en',?,?,'unknown',.9,'v1','x',1,1,'2026-10-07','2026-10-07','premise')`)
+        .bind(JSON.stringify({ native, en: native, 'zh-CN': zh }), JSON.stringify({ native: 'n', en: 'e', 'zh-CN': localizedFormattedAddress(zh, 'GB', 'zh-CN') })).run();
+      expect(await repairChineseAddressStrings({ database, countryCode: 'GB' })).toMatchObject({ scanned: 1, repaired: 1, streetTypes: 1 });
+      const row = await database.prepare("SELECT component_variants_json,address_variants_json FROM address_pool WHERE id='close'").first();
+      expect(JSON.parse(row.component_variants_json)['zh-CN'].street).toBe('果园巷');
+      expect(JSON.parse(row.address_variants_json)['zh-CN']).toBe(localizedFormattedAddress({ ...zh, street: '果园巷' }, 'GB', 'zh-CN'));
+    });
+
+    it('restores kanji place names an English fallback replaced in the Chinese variant', async () => {
+      const native = { houseNumber: '1', street: '北一条西二丁目', locality: '札幌市', admin1: '北海道', postcode: '060-0001' };
+      const en = { ...native, street: 'Kita 1-jo Nishi 2-chome', locality: 'Sapporo', admin1: 'Hokkaidō' };
+      const zh = { ...native, street: '北一条西二丁目', locality: 'Sapporo', admin1: 'Hokkaidō' };
+      await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,locality,street,house_number,latitude,longitude,
+          native_language,component_variants_json,address_variants_json,property_type,quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,match_level)
+        VALUES ('kanji','JP','北海道','札幌市','北一条西二丁目','1',43.06,141.35,'ja',?,?,'unknown',.9,'v1','x',1,1,'2026-10-07','2026-10-07','premise')`)
+        .bind(JSON.stringify({ native, en, 'zh-CN': zh }), JSON.stringify({ native: 'n', en: 'e', 'zh-CN': 'z' })).run();
+      await repairChineseAddressStrings({ database, countryCode: 'JP' });
+      const row = await database.prepare("SELECT component_variants_json FROM address_pool WHERE id='kanji'").first();
+      expect(JSON.parse(row.component_variants_json)['zh-CN']).toMatchObject({ admin1: '北海道', locality: '札幌市', street: '北一条西二丁目' });
+    });
+
+    it('falls back to the source street when the Chinese street keeps no usable type', async () => {
+      const native = { houseNumber: '9', street: 'Judge Close', locality: 'Oxford', admin1: 'England', postcode: 'OX1 1AA' };
+      const zh = { ...native, street: '克洛斯法官', locality: '牛津', admin1: '英格兰' };
+      await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,locality,street,house_number,latitude,longitude,
+          native_language,component_variants_json,address_variants_json,property_type,quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,match_level)
+        VALUES ('judge','GB','England','Oxford','Judge Close','9',51.7,-1.2,'en',?,?,'unknown',.9,'v1','x',1,1,'2026-10-07','2026-10-07','premise')`)
+        .bind(JSON.stringify({ native, en: native, 'zh-CN': zh }), JSON.stringify({ native: 'n', en: 'e', 'zh-CN': localizedFormattedAddress(zh, 'GB', 'zh-CN') })).run();
+      await repairChineseAddressStrings({ database, countryCode: 'GB' });
+      const row = await database.prepare("SELECT component_variants_json FROM address_pool WHERE id='judge'").first();
+      expect(JSON.parse(row.component_variants_json)['zh-CN'].street).toBe('Judge Close');
+    });
   });
 });

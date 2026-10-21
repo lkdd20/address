@@ -17,7 +17,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
-      "countries": ["US", "CA", "MX", "DE", "FR", "IT", "ES", "NL", "TW", "HK", "AU", "BR", "SG"]
+      "countries": ["US", "CA", "MX", "DE", "FR", "IT", "ES", "NL", "TW", "AU", "BR", "SG"]
     },
     {
       "id": "overture-usa-structures",

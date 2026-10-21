@@ -119,14 +119,15 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(storedAddressPoolV2RowIsPublishable({ ...row, expires_at: '2026-09-19' }, new Date('2026-09-20T00:00:00Z'))).toBe(false);
   });
 
-  it('publishes an ordinary address with an untranslated Chinese street but keeps residential addresses strict', () => {
+  it('publishes ordinary and residential addresses with an untranslated Chinese street but keeps them queued', () => {
     const variants = JSON.parse(row.component_variants_json);
     variants['zh-CN'].street = 'Eifuku';
     const fallback = { ...row, component_variants_json: JSON.stringify(variants) };
     const ordinary = { ...fallback, property_type: 'unknown', residential_evidence: 0 };
     expect(storedAddressPoolV2RowIsPublishable(ordinary)).toBe(true);
     expect(storedAddressPoolV2RowIsFullyTranslated(ordinary)).toBe(false);
-    expect(storedAddressPoolV2RowIsPublishable(fallback)).toBe(false);
+    expect(storedAddressPoolV2RowIsPublishable(fallback)).toBe(true);
+    expect(storedAddressPoolV2RowIsFullyTranslated(fallback)).toBe(false);
     expect(storedAddressPoolV2RowIsFullyTranslated(row)).toBe(true);
   });
 
@@ -319,15 +320,17 @@ describe('ADDRESS_DB v2 repository', () => {
       .resolves.toBeUndefined();
   });
 
-  it('does not publish a Chinese variant with an untranslated required field', () => {
+  it('publishes a Chinese variant with an untranslated or unusable field in its English form', () => {
     const components = JSON.parse(row.component_variants_json);
-    components['zh-CN'].street = 'Eifuku';
-    expect(storedAddressPoolV2RowIsPublishable({
-      ...row, component_variants_json: JSON.stringify(components)
-    })).toBe(false);
+    components['zh-CN'].street = 'Эйфуку';
+    const candidate = { ...row, component_variants_json: JSON.stringify(components) };
+    expect(storedAddressPoolV2RowIsPublishable(candidate)).toBe(true);
+    expect(storedAddressPoolV2RowIsFullyTranslated(candidate)).toBe(false);
+    components.en.street = 'Эйфуку';
+    expect(storedAddressPoolV2RowIsPublishable({ ...row, component_variants_json: JSON.stringify(components) })).toBe(false);
   });
 
-  it('skips a Singapore row whose stored Chinese semantic fields are entirely Latin', async () => {
+  it('publishes a Singapore row whose stored Chinese semantic fields are still Latin with their English text', async () => {
     const native = {
       houseNumber: '111B', street: 'PLANTATION CRES', locality: 'Tengah',
       postalLocality: 'Singapore', postcode: '699111'
@@ -360,16 +363,19 @@ describe('ADDRESS_DB v2 repository', () => {
           bind() { return statement; },
           async all() {
             return { results: sql.startsWith('SELECT id FROM address_pool')
-              ? [{ id: untranslated.id }, { id: valid.id }]
-              : [untranslated, valid] };
+              ? [{ id: untranslated.id }]
+              : [untranslated] };
           }
         };
         return statement;
       }
     };
 
-    await expect(pickAddressPoolV2Address(database, 'SG', false, {}, undefined, 'translation-gate'))
-      .resolves.toMatchObject({ id: 'pool-v2-sg-translated' });
+    const picked = await pickAddressPoolV2Address(database, 'SG', false, {}, undefined, 'translation-gate');
+    expect(picked).toMatchObject({ id: 'pool-v2-sg-untranslated' });
+    expect(picked.componentVariants['zh-CN']).toMatchObject({ street: 'PLANTATION CRES', locality: 'Tengah' });
+    expect(storedAddressPoolV2RowIsFullyTranslated(untranslated)).toBe(false);
+    expect(storedAddressPoolV2RowIsFullyTranslated(valid)).toBe(true);
   });
 
   it('attributes Overture residential classification to the buildings theme', async () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
-import { refreshStaleCoverage, runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
+import { refreshStaleCoverage, republishEnglishReadyRows, runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from '../server/sync/translation-providers.mjs';
 import { PostgresTranslationCache } from '../server/sync/address-etl.mjs';
 import { ControlStore } from '../server/control/store.ts';
@@ -14,10 +14,22 @@ const native = { houseNumber: '', street: 'Main Street 21', locality: 'Springfie
   admin1: 'Illinois', admin1Code: 'IL', postcode: '' };
 const chinese = { ...native, street: '\u4e3b\u8857 21', locality: '\u65af\u666e\u6797\u83f2\u5c14\u5fb7', admin1: '\u4f0a\u5229\u8bfa\u4f0a\u5dde' };
 const translations = new Map(Object.keys(native).map((field) => [native[field], chinese[field]]));
+// A street written in Cyrillic needs an English translation before its address can publish.
+const cyrillicStreet = 'Мейн-стрит 21';
+translations.set(cyrillicStreet, chinese.street);
+const englishTranslations = new Map([[cyrillicStreet, native.street]]);
 const translate = vi.fn(async (url) => {
   const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
   const values = new URL(url).searchParams.get('q').split(`\n${boundary}\n`);
-  return Response.json([[[values.map((value) => translations.get(value) || value).join(`\n${boundary}\n`)]]]);
+  const english = new URL(url).searchParams.get('tl') === 'en';
+  return Response.json([[[values.map((value) => (english ? englishTranslations : translations).get(value) || value).join(`\n${boundary}\n`)]]]);
+});
+// A provider answer that is no usable translation in either target language.
+const unusable = vi.fn(async (url) => {
+  const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
+  const values = new URL(url).searchParams.get('q').split(`\n${boundary}\n`);
+  const english = new URL(url).searchParams.get('tl') === 'en';
+  return Response.json([[[values.map((value) => english ? '无效' : value).join(`\n${boundary}\n`)]]]);
 });
 
 describe('source-backed translation recovery', () => {
@@ -76,6 +88,18 @@ describe('source-backed translation recovery', () => {
     translate.mockClear();
   });
   afterEach(async () => { await database.close(); vi.restoreAllMocks(); });
+  // English-first publication: only a missing English street blocks publication, so retry and wait behaviour is
+  // exercised on a record whose English variant still needs translation.
+  const requireEnglish = async () => {
+    const source = { ...native, street: cyrillicStreet };
+    await database.prepare("UPDATE address_pool SET street=?,component_variants_json=? WHERE id='street-fixture'")
+      .bind(cyrillicStreet, JSON.stringify({ native: source, en: source, 'zh-CN': source })).run();
+  };
+  const cacheTranslations = async () => {
+    const cache = new PostgresTranslationCache(database);
+    await cache.set(translations, 'zh-CN');
+    await cache.set(englishTranslations, 'en');
+  };
 
   it('publishes an ordinary address with its English street when the Chinese street is not translated yet', async () => {
     const partial = vi.fn(async (url) => {
@@ -90,11 +114,46 @@ describe('source-backed translation recovery', () => {
     expect(row.active).toBe(1);
     expect(JSON.parse(row.component_variants_json)['zh-CN']).toMatchObject({ street: native.street, admin1: chinese.admin1 });
     expect(await database.prepare('SELECT status,reason FROM translation_recovery').first())
-      .toEqual({ status: 'waiting', reason: 'chinese_street_fallback' });
+      .toEqual({ status: 'waiting', reason: 'chinese_fallback' });
     expect(await database.prepare("SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1").first('total')).toBe(1);
   });
 
-  it('publishes a backlog of ordinary addresses without first sending their streets to providers', async () => {
+  it('publishes once the English variant is translated while Chinese names are still missing', async () => {
+    await requireEnglish();
+    const englishOnly = vi.fn(async (url) => {
+      const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
+      const values = new URL(url).searchParams.get('q').split(`\n${boundary}\n`);
+      const english = new URL(url).searchParams.get('tl') === 'en';
+      return Response.json([[[values.map((value) => english ? englishTranslations.get(value) || value : value).join(`\n${boundary}\n`)]]]);
+    });
+    expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: englishOnly, now })).updated).toBe(1);
+    const row = await database.prepare("SELECT active,component_variants_json FROM address_pool WHERE id='street-fixture'").first();
+    expect(row.active).toBe(1);
+    const variants = JSON.parse(row.component_variants_json);
+    expect(variants.en.street).toBe(native.street);
+    expect(variants['zh-CN'].street).toBe(native.street);
+    expect(await database.prepare('SELECT status,reason FROM translation_recovery').first())
+      .toEqual({ status: 'waiting', reason: 'chinese_fallback' });
+  });
+
+  it('republishes rows retired only for untranslated Chinese names once, leaving repair retirements alone', async () => {
+    await database.exec(`UPDATE address_pool SET retired_at='publication-validation:address-reader-v7-implausible-phrases:2026-09-01'`);
+    await database.exec(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,latitude,longitude,native_language,
+        component_variants_json,address_variants_json,property_type,quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
+        SELECT 'outside',country_code,admin1,admin1_code,locality,street,house_number,latitude,longitude,native_language,component_variants_json,
+        address_variants_json,property_type,quality_score,generation,coverage,2,active,first_seen_at,last_seen_at,
+        'publication-validation:administrative-names-v19:2026-09-01',match_level FROM address_pool WHERE id='street-fixture';
+      INSERT INTO address_pool_evidence(id,address_id,dataset_id,source_record_id,observed_at,evidence_type,is_primary,is_current,created_at)
+        VALUES ('outside-evidence','outside','dataset','way/23','${observedAt}','address_existence',1,1,'${observedAt}');`);
+    expect(await republishEnglishReadyRows({ database, countryCode: 'US', pauseMs: 0, now }))
+      .toEqual({ countryCode: 'US', scanned: 1, republished: 1 });
+    const rows = new Map((await database.prepare('SELECT id,active FROM address_pool').all()).results.map((row) => [row.id, row.active]));
+    expect(Object.fromEntries(rows)).toEqual({ 'street-fixture': 1, outside: 0 });
+    expect(await database.prepare("SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1").first('total')).toBe(1);
+    expect(await republishEnglishReadyRows({ database, countryCode: 'US', pauseMs: 0, now })).toMatchObject({ scanned: 0, republished: 0 });
+  });
+
+  it('publishes a backlog of addresses without first sending their Chinese names to providers', async () => {
     for (let index = 0; index < 200; index++) {
       const id = `backlog-${String(index).padStart(3, '0')}`;
       await database.exec(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,latitude,longitude,native_language,
@@ -109,7 +168,7 @@ describe('source-backed translation recovery', () => {
     const requested = translate.mock.calls.map(([url]) => new URL(url).searchParams.get('q')).join('\n');
     expect(requested).not.toContain('Backlog Street');
     expect(result.updated).toBeGreaterThan(100);
-    expect(await database.prepare("SELECT COUNT(*) AS total FROM translation_recovery WHERE reason='chinese_street_fallback'").first('total'))
+    expect(await database.prepare("SELECT COUNT(*) AS total FROM translation_recovery WHERE reason='chinese_fallback'").first('total'))
       .toBeGreaterThan(100);
   }, 120_000);
 
@@ -179,6 +238,7 @@ describe('source-backed translation recovery', () => {
   });
 
   it('keeps discovering records while a due record repeatedly waits for provider cooldown', async () => {
+    await requireEnglish();
     await database.exec(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,
       house_number,latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,
       quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
@@ -301,6 +361,7 @@ describe('source-backed translation recovery', () => {
   });
 
   it('persists finite repeated failure across worker invocations', async () => {
+    await requireEnglish();
     const fetchImpl = vi.fn(async () => { throw new Error('fixture outage'); });
     for (let index = 0; index < 12; index += 1) {
       await runTranslationBackfillBatch({ database, environment: {}, fetchImpl,
@@ -312,11 +373,11 @@ describe('source-backed translation recovery', () => {
   });
 
   it('recovers an unchanged terminal translation from newly valid cache without resetting attempts or calling a provider', async () => {
-    const invalid = vi.fn(async (url) => Response.json([[[new URL(url).searchParams.get('q')]]]));
-    for (let index = 0; index < 3; index++) await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: invalid,
+    await requireEnglish();
+    for (let index = 0; index < 3; index++) await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: unusable,
       now: () => new Date(now().getTime() + index * 600_000) });
     expect(await database.prepare('SELECT status,attempts FROM translation_recovery').first()).toEqual({ status: 'failed', attempts: 3 });
-    await new PostgresTranslationCache(database).set(translations, 'zh-CN');
+    await cacheTranslations();
     await writeBackfillProgress(database, 'scan', { phase: 'all', cursor: 'zzzz' }, now());
     translate.mockClear();
     expect((await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: translate, now })).updated).toBe(1);
@@ -354,10 +415,10 @@ describe('source-backed translation recovery', () => {
   });
 
   it.each(['cancelled', 'batch_timeout'])('resumes cache-only recovery directly after %s without a fourth provider attempt', async (reason) => {
-    const invalid = vi.fn(async (url) => Response.json([[[new URL(url).searchParams.get('q')]]]));
-    for (let index = 0; index < 3; index++) await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: invalid,
+    await requireEnglish();
+    for (let index = 0; index < 3; index++) await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: unusable,
       now: () => new Date(now().getTime() + index * 600_000) });
-    await new PostgresTranslationCache(database).set(translations, 'zh-CN');
+    await cacheTranslations();
     const controller = new AbortController();
     const timeout = AbortSignal.timeout;
     const timeoutMock = reason === 'batch_timeout' ? vi.spyOn(AbortSignal, 'timeout')
@@ -426,9 +487,9 @@ describe('source-backed translation recovery', () => {
   });
 
   it('wakes a terminal record after a real service configuration change without waiting for a full pool rescan', async () => {
-    const invalidTranslation = vi.fn(async (url) => Response.json([[[new URL(url).searchParams.get('q')]]]));
+    await requireEnglish();
     for (let index = 0; index < 3; index += 1) {
-      await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: invalidTranslation,
+      await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: unusable,
         now: () => new Date(now().getTime() + index * 600_000) });
     }
     expect(await database.prepare('SELECT status,attempts FROM translation_recovery').first())
@@ -516,6 +577,7 @@ describe('source-backed translation recovery', () => {
   });
 
   it('does not consume record retries during repeated rate-limit waits', async () => {
+    await requireEnglish();
     const fetchImpl = vi.fn(async () => new Response('', { status: 429 }));
     for (let index = 0; index < 5; index += 1) {
       await runTranslationBackfillBatch({ database, environment: {}, fetchImpl,
@@ -538,6 +600,7 @@ describe('source-backed translation recovery', () => {
   });
 
   it('keeps waiting through a Google cooldown on the final attempt and translates after the reset', async () => {
+    await requireEnglish();
     const outage = vi.fn(async () => { throw new Error('fixture outage'); });
     for (let index = 0; index < 3; index += 1) {
       await writeBackfillProgress(database, 'providers', { googleFailures: 0, googleRetryAt: null }, now());

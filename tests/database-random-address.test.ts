@@ -47,7 +47,7 @@ describe('database random address index loader', () => {
     expect(calls.filter(({ sql }) => sql.includes('address_pool_runtime'))
       .every(({ sql }) => /WHERE country_code=\?/u.test(sql))).toBe(true);
     expect(calls.filter(({ sql }) => sql.includes('address_pool_runtime'))
-      .every(({ sql }) => sql.includes("component_variants_json::jsonb -> 'zh-CN'"))).toBe(true);
+      .every(({ sql }) => sql.includes("component_variants_json::jsonb -> 'en'"))).toBe(true);
     expect(rows.map(({ addressId }) => addressId).sort()).toEqual(['JP-1', 'US-1']);
   });
 

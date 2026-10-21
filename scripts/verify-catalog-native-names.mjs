@@ -81,7 +81,9 @@ for (const entry of entries) {
     const translation = (languages[country] || []).map((language) => entry.translations?.[language]).find(Boolean);
     const latin = !nonLatinCountries.has(country);
     const asName = nativeNameMatches(current, entry.name, { exact: true });
-    if (label && nativeNameMatches(current, label, { exact: true })) {
+    // Upstream natives sometimes carry a stray digit (Thum3 for Thum).
+    if (current !== entry.name && current.replace(/(?<=\p{L})\d+$/u, '') === entry.name) { corrected = entry.name; status = 'stray-digit'; }
+    else if (label && nativeNameMatches(current, label, { exact: true })) {
       if (!diacriticsOnly(current, label)) corrected = label;
       status = corrected === current ? 'verified' : 'formatted';
     }

@@ -15,6 +15,13 @@ describe('bounded translation backfill', () => {
     expect(result.get('Block D1-12')).toBe('栋 D1-12');
     expect(result.get('Rue du 8 Mai 1945')).toBe('街 8 五月 1945');
   });
+  it('sends English street types written out and keeps the Chinese address type', async () => {
+    const translate = vi.fn(async (values) => values.map((value) => ({ 'Carson Drive': '卡森博士', 'Orchard Close': '果园关闭', 'Main Street': '主街' })[value]));
+    const result = await translateValues(['Carson DR', 'Orchard Close', 'Main ST'], 'zh-CN', {}, vi.fn(), null, undefined,
+      { translationChain: [{ translate }] });
+    expect(translate.mock.calls[0][0]).toEqual(['Carson Drive', 'Orchard Close', 'Main Street']);
+    expect(Object.fromEntries(result)).toEqual({ 'Carson DR': '卡森大道', 'Orchard Close': '果园巷', 'Main ST': '主街' });
+  });
   it('translates chunks in parallel within each route concurrency and shares equal-priority routes', async () => {
     const active = new Map();
     const peak = new Map();

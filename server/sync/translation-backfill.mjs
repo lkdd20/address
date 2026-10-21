@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { createPostgresPool, PostgresDatabase } from '../database/postgres.mjs';
 import { translateValues, translateNumberedValues, localizedFormattedAddress, usableTranslation, PostgresTranslationCache } from './address-etl.mjs';
 import { componentLooksLocalized, semanticAddressFields as localizedFields } from '../../src/domain/address-localization.mjs';
-import { chineseStreetFallbackAllowed, diagnoseStoredAddressPoolV2Row, storedAddressPoolV2RowCanRecoverTranslations, storedAddressPoolV2RowIsFullyTranslated, storedAddressPoolV2RowIsPublishable } from '../api/repositories/address-pool-v2';
+import { diagnoseStoredAddressPoolV2Row, storedAddressPoolV2RowCanRecoverTranslations, storedAddressPoolV2RowIsFullyTranslated, storedAddressPoolV2RowIsPublishable } from '../api/repositories/address-pool-v2';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
-import { adjustCountryCounts, generationIndexContribution } from '../database/published-pool.mjs';
+import { adjustCountryCounts, generationIndexContribution, refreshCountryCounts } from '../database/published-pool.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
 import { administrativeAssignmentJoin, projectAdministrativeRow, refreshAdministrativeAssignments } from '../database/administrative-assignments.mjs';
 import { createBackfillProviders, readBackfillProgress, writeBackfillProgress } from './translation-providers.mjs';
@@ -81,6 +81,49 @@ const sourceRows = async (database, ids) => {
   return new Map(rows.map((row) => [row.id, row]));
 };
 
+// English-first publication: rows publication validation retired while their Chinese fields were untranslated publish
+// again once their English variant passes, country by country and once per revision; translation recovery keeps
+// translating their Chinese names afterwards. Repair retirements (outside the country, import gate) are never touched.
+export const ENGLISH_FIRST_REPUBLICATION_REVISION = 'english-first-republish-v1';
+export const republishEnglishReadyRows = async ({ database, countryCode, pageSize = 500, pauseMs = 200, now = () => new Date() }) => {
+  const country = String(countryCode || '').toUpperCase();
+  const key = `${ENGLISH_FIRST_REPUBLICATION_REVISION}:${country}`;
+  const state = await readBackfillProgress(database, key, { cursor: '', done: false });
+  const summary = { countryCode: country, scanned: 0, republished: 0 };
+  if (state.done) return summary;
+  for (;;) {
+    const ids = (await database.prepare(`SELECT id FROM address_pool WHERE country_code=? AND active=0
+      AND retired_at LIKE 'publication-validation:address-reader-%' AND id>? ORDER BY id LIMIT ?`)
+      .bind(country, state.cursor, pageSize).all()).results.map((row) => row.id);
+    const ready = [...(await sourceRows(database, ids)).values()].filter((row) => storedAddressPoolV2RowIsPublishable(row, now()));
+    if (ready.length) {
+      const activated = new Set((await database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
+        WHERE id IN (${ready.map(() => '?').join(',')}) AND active=0 AND retired_at LIKE 'publication-validation:address-reader-%'
+        RETURNING id`).bind(...ready.map((row) => row.id)).all()).results.map((row) => row.id));
+      if (activated.size) {
+        await refreshAddressGenerationIndex(database, country, { addressIds: [...activated] });
+        const datasets = new Map();
+        for (const row of ready.filter((item) => activated.has(item.id))) datasets.set(row.dataset_id, (datasets.get(row.dataset_id) || 0) + 1);
+        for (const [dataset, count] of datasets) {
+          await database.prepare('UPDATE address_datasets SET active_count=active_count+? WHERE id=?').bind(count, dataset).run();
+        }
+        summary.republished += activated.size;
+      }
+    }
+    summary.scanned += ids.length;
+    state.cursor = ids.at(-1) || state.cursor;
+    state.done = ids.length < pageSize;
+    await writeBackfillProgress(database, key, state, now());
+    if (state.done) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, pauseMs));
+  }
+  if (summary.republished) {
+    await refreshCountryCounts(database, country, now().toISOString(), { useGenerationIndex: true });
+    staleCoverage.add(country);
+  }
+  return summary;
+};
+
 const saveState = (database, row, revision, status, attempts, retryAt, reason, now, diagnostics = []) => database.prepare(`
   INSERT INTO translation_recovery(address_id,input_hash,service_revision,status,attempts,next_attempt_at,reason,updated_at,diagnostics_json)
   VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(address_id) DO UPDATE SET input_hash=excluded.input_hash,
@@ -106,21 +149,24 @@ const localizedRow = (row, variants) => ({ ...row, component_variants_json: JSON
     'zh-CN': localizedFormattedAddress(variants['zh-CN'], row.country_code, 'zh-CN') }) });
 const translationDiagnostics = (row, variants) => Object.entries(pendingTranslationFields(variants, row.native_language, row))
   .flatMap(([language, fields]) => fields.map((field) => ({ stage: 'translation', language, field, code: 'invalid_or_missing_translation' })));
-// An ordinary address whose Chinese street is still untranslated publishes with the English street name;
-// the row stays queued so the Chinese name replaces it once translated.
-const chineseStreetPending = (row, variants) => pendingTranslationFields(variants, row.native_language, row)['zh-CN'].includes('street');
-const applyChineseStreetFallback = (row, variants) => {
-  if (!chineseStreetFallbackAllowed(row.property_type) || !chineseStreetPending(row, variants)) return false;
-  const fallback = [clean(variants.en?.street), clean(variants.native?.street)]
-    .find((value) => value && componentLooksLocalized(value, 'zh-CN'));
-  if (!fallback) return false;
-  variants['zh-CN'] = { ...variants['zh-CN'], street: fallback };
-  return true;
+// English-first publication: an address publishes once its English variant is complete; Chinese fields still
+// untranslated carry the English (or source) text and the row stays queued until the Chinese names replace them.
+const chinesePending = (row, variants) => pendingTranslationFields(variants, row.native_language, row)['zh-CN'].length > 0;
+const CHINESE_FALLBACK_REASONS = ['chinese_fallback', 'chinese_street_fallback'];
+// A pending Chinese value that already reads in Chinese script (a Japanese place written in kanji) stays; only an empty or
+// unusable one takes the English or source text.
+const applyChineseFallback = (row, variants) => {
+  for (const field of pendingTranslationFields(variants, row.native_language, row)['zh-CN']) {
+    const current = clean(variants['zh-CN']?.[field]);
+    const original = clean(variants.native?.[field]);
+    if (current && /\p{Script=Han}/u.test(current) && usableTranslation(current, 'zh-CN', original, field)) continue;
+    const fallback = [clean(variants.en?.[field]), original].find((value) => value && componentLooksLocalized(value, 'zh-CN'));
+    variants['zh-CN'] = { ...variants['zh-CN'], [field]: fallback || '' };
+  }
 };
 const readyToPublish = (row, variants, now) => {
-  applyChineseStreetFallback(row, variants);
-  const issues = translationDiagnostics(row, variants).filter((issue) => !(issue.language === 'zh-CN' && issue.field === 'street'
-    && chineseStreetFallbackAllowed(row.property_type) && componentLooksLocalized(clean(variants['zh-CN']?.street), 'zh-CN')));
+  applyChineseFallback(row, variants);
+  const issues = translationDiagnostics(row, variants).filter((issue) => issue.language === 'en');
   return !issues.length && storedAddressPoolV2RowIsPublishable(localizedRow(row, variants), now);
 };
 
@@ -128,7 +174,7 @@ const readyToPublish = (row, variants, now) => {
 const COVERAGE_REFRESH_INTERVAL_MS = 10 * 60_000;
 const PUBLICATION_WINDOW_MS = 120_000;
 const CHINESE_FALLBACK_RETRY_MS = 6 * 60 * 60_000;
-const DEFERRED_STREET_BACKLOG = 200;
+const DEFERRED_CHINESE_BACKLOG = 200;
 const TERMINAL_FAILURE_REASONS = ['translation_or_publication_rejected', 'retry_limit', 'publication_timeout', 'publication_conflict'];
 const coverageRefreshedAt = new Map();
 
@@ -218,9 +264,9 @@ const publish = async (database, candidates, revision, now, signal, outcome, cou
       for (const row of updates) {
         const current = publishedRows.get(row.id);
         const { attempts, variants } = candidates.find((item) => item.row.id === row.id);
-        if (chineseStreetPending(row, variants)) {
+        if (chinesePending(row, variants)) {
           await saveState(transaction, current, revision, 'waiting', attempts, new Date(now().getTime() + CHINESE_FALLBACK_RETRY_MS).toISOString(),
-            'chinese_street_fallback', now());
+            'chinese_fallback', now());
         } else await saveState(transaction, current, revision, 'complete', attempts, null, null, now());
       }
       lap('state');
@@ -272,21 +318,23 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
       [now().toISOString()], 'next_attempt_at,address_id'),
     ...await dueBranch(`status='failed' AND reason NOT IN (${TERMINAL_FAILURE_REASONS.map(() => '?').join(',')})`,
       TERMINAL_FAILURE_REASONS, 'address_id'),
-    ...await dueBranch(`status IN ('failed','rejected') AND service_revision<>
-        CASE WHEN status='rejected' AND reason='base_contract' THEN ?
-          WHEN status='failed' AND reason='translation_or_publication_rejected' THEN ? ELSE ? END`,
-      [stateRevision(services.revision, 'rejected', 'base_contract'),
-        stateRevision(services.revision, 'failed', 'translation_or_publication_rejected'), services.revision], 'address_id')
+    // One status per branch: a status list cannot walk the (status,address_id) index in order, and the primary-key
+    // scan it falls back to reads every recovery row when no revision is stale.
+    ...await dueBranch(`status='rejected' AND service_revision<>CASE WHEN reason='base_contract' THEN ? ELSE ? END`,
+      [stateRevision(services.revision, 'rejected', 'base_contract'), services.revision], 'address_id'),
+    ...await dueBranch(`status='failed' AND service_revision<>CASE WHEN reason='translation_or_publication_rejected' THEN ? ELSE ? END`,
+      [stateRevision(services.revision, 'failed', 'translation_or_publication_rejected'), services.revision], 'address_id')
   ].sort((left, right) => Number(left.match_level !== 'street') - Number(right.match_level !== 'street')
     || Number(right.active) - Number(left.active) || String(left.updated_at).localeCompare(String(right.updated_at)))
     .slice(0, scanLimit).map(({ id, country_code: countryCode }) => ({ id, country_code: countryCode }));
+  // The cursor bounds both join sides, or the merge join walks every recovery row before it.
   const rows = (await database.prepare(`SELECT address.id,address.country_code,address.component_variants_json,address.native_language,
       address.active,address.retired_at,recovery.status AS recovery_status
-    FROM address_pool address LEFT JOIN translation_recovery recovery ON recovery.address_id=address.id
+    FROM address_pool address LEFT JOIN translation_recovery recovery ON recovery.address_id=address.id AND recovery.address_id>?
     WHERE address.country_code<>'CN' AND address.id>?
       AND (address.active=1 OR address.retired_at LIKE 'publication-validation:%')
       ${progress.phase === 'street' ? "AND address.match_level='street'" : ''}${countryScope} ORDER BY address.id LIMIT ?`)
-    .bind(progress.cursor, ...countries, scanLimit).all()).results;
+    .bind(progress.cursor, progress.cursor, ...countries, scanLimit).all()).results;
   let scanned = 0;
   const pending = [];
   const outcome = { published: new Set(), busy: new Set(), failed: new Map(), started: new Set(), timings: {} };
@@ -324,12 +372,13 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
         const states = (await database.prepare(`SELECT * FROM translation_recovery WHERE address_id IN (${ids.map(() => '?').join(',')})`)
           .bind(...ids).all()).results;
         recoveryStates = new Map(states.map((state) => [state.address_id, state]));
-        if (onlyCached) {
+        // Cache-only passes read both languages and a backlog reads Chinese names, once per 200 candidates.
+        if (onlyCached || candidates.length >= DEFERRED_CHINESE_BACKLOG) {
           const values = [...new Set([...prefetched.values()].flatMap((row) => {
             const native = parse(projectAdministrativeRow(row).component_variants_json).native || {};
             return localizedFields.map((field) => clean(native[field])).filter(Boolean);
           }))];
-          cachedValues = { en: await cache.get(values, 'en', signal), 'zh-CN': await cache.get(values, 'zh-CN', signal) };
+          cachedValues = { en: onlyCached ? await cache.get(values, 'en', signal) : new Map(), 'zh-CN': await cache.get(values, 'zh-CN', signal) };
         }
       }
       const scannedRow = candidates[index];
@@ -393,21 +442,27 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
             if (usableTranslation(value, language, original, field) && safeTranslatedField(row, field, value)) variants[language][field] = value;
           }
         }
-        if (row.active === 1 && chineseStreetPending(row, variants) && storedAddressPoolV2RowIsPublishable(row, now())) continue;
+        if (row.active === 1 && chinesePending(row, variants) && storedAddressPoolV2RowIsPublishable(row, now())) continue;
         if (!readyToPublish(row, variants, now())) continue;
         fields = { en: [], 'zh-CN': [] };
       }
-      // Under a backlog, an ordinary address first uses a cached Chinese street if present, otherwise publishes with
-      // the English street now and sends the street to providers on the later fallback retry.
-      if (!cacheOnly && candidates.length >= DEFERRED_STREET_BACKLOG && chineseStreetFallbackAllowed(row.property_type)
-        && previous?.reason !== 'chinese_street_fallback'
-        && fields['zh-CN'].includes('street')) {
-        const original = clean(variants.native.street);
-        const cachedStreet = (await cache.get([original], 'zh-CN', signal)).get(original);
-        if (usableTranslation(cachedStreet, 'zh-CN', original, 'street') && safeTranslatedField(row, 'street', cachedStreet)) {
-          variants['zh-CN'].street = cachedStreet;
+      // Under a backlog, Chinese names come from the cache only; providers translate English first so addresses
+      // publish, and the Chinese fields follow on the later fallback retry.
+      if (!cacheOnly && candidates.length >= DEFERRED_CHINESE_BACKLOG && !CHINESE_FALLBACK_REASONS.includes(previous?.reason)
+        && fields['zh-CN'].length) {
+        const cached = cachedValues['zh-CN'];
+        for (const field of fields['zh-CN']) {
+          const original = clean(variants.native[field]);
+          const value = cached.get(original);
+          if (usableTranslation(value, 'zh-CN', original, field) && safeTranslatedField(row, field, value)) variants['zh-CN'][field] = value;
         }
-        fields = { ...fields, 'zh-CN': fields['zh-CN'].filter((field) => field !== 'street') };
+        fields = { ...fields, 'zh-CN': [] };
+        // A published address with only Chinese names left waits for its fallback retry instead of a publication slot.
+        if (!fields.en.length && row.active === 1 && storedAddressPoolV2RowIsPublishable(row, now())) {
+          await saveState(database, row, services.revision, 'waiting', attempts,
+            new Date(now().getTime() + CHINESE_FALLBACK_RETRY_MS).toISOString(), 'chinese_fallback', now());
+          continue;
+        }
       }
       pending.push({ row, variants, attempts, retryAt, fields, cacheOnly });
       if (!cacheOnly) await saveState(database, row, services.revision, 'pending', attempts, retryAt, 'in_progress', now());

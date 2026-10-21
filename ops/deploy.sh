@@ -92,7 +92,7 @@ git ls-files -co --exclude-standard -z \
 TREE_HASH=$(sha256sum "$STAGE/.release-manifest.sha256" | cut -c1-12)
 REL="$(git rev-parse --short HEAD)-$TREE_HASH"
 TARBALL=$(mktemp "${TMPDIR:-/tmp}/address-$REL.XXXXXX.tar.gz")
-tar -C "$STAGE" -czf "$TARBALL" .
+tar --owner=0 --group=0 --numeric-owner -C "$STAGE" -czf "$TARBALL" .
 
 scp_retry() {
   for i in 1 2 3 4 5; do

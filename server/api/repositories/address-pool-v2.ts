@@ -284,7 +284,6 @@ export interface AddressPublicationIssue {
 
 // Ordinary addresses may publish before the Chinese street name is translated (it stays in Latin script);
 // residential addresses and the recovery scan still require the full Chinese variant.
-export const chineseStreetFallbackAllowed = (propertyType: string): boolean => !['residential', 'apartment'].includes(propertyType);
 
 const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = true,
   issues?: AddressPublicationIssue[], requireChineseStreet = false): VerifiedAddress | undefined => {
@@ -340,8 +339,28 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
     for (const code of quality.reasons) reject('source', code);
     return undefined;
   }
+  // English-first publication: a Chinese field still untranslated or unusable shows its English form (or the source
+  // value) until translation recovery replaces it. `requireChineseStreet` asks for the complete Chinese variant instead,
+  // which decides whether a published row still needs translation.
+  let chineseFallback = false;
   if (requireTranslations) {
     for (const language of ['en', 'zh-CN'] as const) {
+      if (language === 'zh-CN' && !requireChineseStreet) {
+        const chinese = { ...componentVariants['zh-CN'] };
+        for (const field of [...semanticAddressFields, 'houseNumber', 'unit', 'postcode', 'admin1Code'] as Array<keyof AddressComponents>) {
+          const original = String(componentVariants.native[field] || '');
+          const value = String(chinese[field] || '');
+          const semantic = (semanticAddressFields as readonly string[]).includes(field);
+          if ((!original || value) && preservesAddressNumbers(original, value) && preservesAddressIdentifiers(original, value)
+            && (!['postcode', 'admin1Code'].includes(field) || original === value)
+            && (!semantic || componentLooksLocalized(value, language) && !(hanScript.test(value) && implausibleChineseTranslation(original, value)))) continue;
+          const fallback = String(componentVariants.en[field] || original);
+          if (fallback && componentLooksLocalized(fallback, language)) chinese[field] = fallback; else delete chinese[field];
+          chineseFallback = true;
+        }
+        componentVariants['zh-CN'] = chinese;
+        continue;
+      }
       const translated = componentVariants[language];
       for (const field of [...semanticAddressFields, 'houseNumber', 'unit', 'postcode', 'admin1Code'] as Array<keyof AddressComponents>) {
         const original = String(componentVariants.native[field] || '');
@@ -360,7 +379,6 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
       }
       if (language === 'zh-CN') {
         for (const field of translatedSemanticFields(row.country_code) as Array<keyof AddressComponents>) {
-          if (field === 'street' && !requireChineseStreet && chineseStreetFallbackAllowed(row.property_type)) continue;
           const original = String(componentVariants.native[field] || '');
           const value = String(translated[field] || '');
           if (original && /\p{L}/u.test(original) && !hanScript.test(value) && !unchangedIdentifier.test(original)) {
@@ -369,8 +387,6 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
         }
         for (const field of semanticAddressFields as Array<keyof AddressComponents>) {
           const value = String(translated[field] || '');
-          // An ordinary address may still carry its untranslated street; only Chinese renderings are judged.
-          if (field === 'street' && !hanScript.test(value)) continue;
           if (implausibleChineseTranslation(componentVariants.native[field], value)) {
             return reject('translation', 'implausible_target_translation', { language, field });
           }
@@ -400,6 +416,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
         'zh-CN': storedAddress(componentVariants['zh-CN'], row.country_code)
       }
     : parsedAddresses;
+  if (chineseFallback) addressVariants['zh-CN'] = storedAddress(componentVariants['zh-CN'], row.country_code);
   const propertyType = propertyTypes.has(row.property_type as PropertyType)
     ? row.property_type as PropertyType
     : 'unknown';

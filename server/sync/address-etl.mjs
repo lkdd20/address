@@ -108,7 +108,7 @@ const displayNames = {
   zh: new Intl.DisplayNames(['zh-CN'], { type: 'region' })
 };
 export const localizedFields = ['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit'];
-import { normalizeAddressDigits, usableAddressTranslation as usableTranslation } from '../../src/domain/address-localization.mjs';
+import { expandEnglishStreetType, normalizeAddressDigits, normalizeChineseStreetType, usableAddressTranslation as usableTranslation } from '../../src/domain/address-localization.mjs';
 const letters = /\p{L}/u;
 const toSimplified = createSimplifier({ from: 'hk', to: 'cn' });
 export { usableTranslation };
@@ -303,9 +303,12 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
       const retry = chunk.filter((value) => !accepts(translated.get(value), target, value));
       if (!retry.length || !translate) return;
       try {
-        const results = await translate(retry, target, fetchImpl, signal);
+        // Chinese renderings read the street type written out and keep the address type (Carson DR → 卡森大道).
+        const chinese = target === 'zh-CN';
+        const results = await translate(chinese ? retry.map(expandEnglishStreetType) : retry, target, fetchImpl, signal);
         retry.forEach((value, index) => {
-          if (accepts(results?.[index], target, value)) translated.set(value, results[index]);
+          const result = chinese ? normalizeChineseStreetType(value, results?.[index]) : results?.[index];
+          if (accepts(result, target, value)) translated.set(value, result);
         });
       } catch {
         signal?.throwIfAborted();
@@ -351,7 +354,8 @@ export const translateNumberedValues = async (values, target, environment, fetch
   for (const [value, tokens] of parts) {
     const candidate = tokens.map((part, index) => index % 2 ? normalizeAddressDigits(part)
       : translated.get(clean(part)) || clean(part)).filter(Boolean).join(' ');
-    if (accepts(candidate, target, value)) output.set(value, candidate);
+    const localized = target === 'zh-CN' ? normalizeChineseStreetType(value, candidate) : candidate;
+    if (accepts(localized, target, value)) output.set(value, localized);
   }
   if (output.size) await cache?.set(output, target, signal);
   return output;
@@ -422,7 +426,7 @@ export class PostgresTranslationCache {
         .bind(targetLanguage, ...chunk).all();
       for (const row of rows.results) {
         const original = originals.get(row.cache_key);
-        if (original) output.set(original, row.value);
+        if (original) output.set(original, targetLanguage === 'zh-CN' ? normalizeChineseStreetType(original, row.value) : row.value);
       }
     }
     return output;
