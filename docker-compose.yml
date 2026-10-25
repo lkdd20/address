@@ -65,6 +65,7 @@ services:
   postgres:
     image: postgres:16-bookworm
     restart: unless-stopped
+    shm_size: ${POSTGRES_SHM_SIZE:-256mb}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-address}
       POSTGRES_USER: ${POSTGRES_USER:-address}

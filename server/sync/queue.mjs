@@ -24,7 +24,8 @@ const timeoutFailureCodes = new Set([
 ]);
 const circuitBreakerFailureCodes = new Set([...timeoutFailureCodes, 'SYNC_PROCESS_FAILED']);
 const executionCapabilityRevisions = Object.freeze({
-  import: 'postgres-publish-v3-touched-finalization',
+  // v4: imports run on the dedicated 4C24G host with a 6 h job deadline and 10 min cancellation grace (2026-10-25).
+  import: 'postgres-publish-v4-dedicated-host',
   materialize: 'child-process-diagnostics-v2',
   discover: 'source-discovery-v1',
   interrupted: 'restart-recovery-v3',
@@ -1079,8 +1080,8 @@ export const computeQueueSnapshot = async ({
         if (meteredOrder) return meteredOrder;
         const leftAt = left.matches ? left.nextAttempt : 0;
         const rightAt = right.matches ? right.nextAttempt : 0;
-        // Popular regions run first; unprioritised shards keep their catalogue order.
-        const priority = (source) => Number(source.shard.priority) || Number.MAX_SAFE_INTEGER;
+        // Popular cities run first, then popular regions; unprioritised shards keep their catalogue order.
+        const priority = (source) => source.shard.popularCities ? 0 : Number(source.shard.priority) || Number.MAX_SAFE_INTEGER;
         return (leftAt > now.getTime()) - (rightAt > now.getTime()) || leftAt - rightAt
           || priority(left) - priority(right);
       });

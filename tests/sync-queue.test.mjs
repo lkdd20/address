@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { createSyncApi } from '../server/sync/api.mjs';
-import { sourceAdapterRevisions } from '../server/sync/source-adapters.mjs';
+import { loadSourceCatalog, sourceAdapterRevisions } from '../server/sync/source-adapters.mjs';
 import { CHINA_PRIORITY_TARGET } from '../server/sync/address-policy.mjs';
 import {
   computeQueueSnapshot, countryFingerprint, createQueueSources, createSyncQueue, evaluateAttempt,
@@ -851,6 +851,25 @@ describe('queue snapshot', () => {
       now
     });
     expect(snapshot.entries.find((entry) => entry.countryCode === 'US')?.runnableShardId).toBe('overture-us-ca');
+  });
+
+  it('runs the popular-city export before popular-region shards', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget.add('US');
+    const shard = (id, extra = {}) => ({ id, countryCode: 'US', ...extra, source: { adapter: 'overture' } });
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {}),
+      catalogShards: [shard('overture-us-ca', { priority: 1 }), shard('overture-addresses-us', { popularCities: true }), shard('overture-us-al')],
+      queueState: { schemaVersion: 1, countries: {} },
+      now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'US')?.runnableShardId).toBe('overture-addresses-us');
+  });
+
+  it('marks countrywide Overture shards as popular-city exports', async () => {
+    const { shards } = await loadSourceCatalog();
+    expect(shards.find((item) => item.id === 'overture-addresses-us')).toMatchObject({ popularCities: true });
+    expect(shards.find((item) => item.id === 'overture-usa-structures-ca')?.popularCities).toBeUndefined();
   });
 
   it('keeps an incomplete Singapore source waiting when OneMap is not configured', async () => {

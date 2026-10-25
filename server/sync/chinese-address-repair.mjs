@@ -36,7 +36,7 @@ export const repairChineseAddressStrings = async ({ database, countryCode, pageS
         .map((field) => [field, variants.native[field]]));
       const source = variants.native?.street;
       const normalized = components.street && normalizeChineseStreetType(source, restored.street || components.street);
-      const street = normalized && source && implausibleChineseTranslation(source, normalized) ? source : normalized;
+      const street = normalized && source && implausibleChineseTranslation(source, normalized, 'street') ? source : normalized;
       const updated = { ...components, ...restored, ...(street ? { street } : {}) };
       const localized = JSON.stringify(updated) === JSON.stringify(components) ? components : updated;
       const rebuilt = localizedFormattedAddress(localized, country, 'zh-CN');

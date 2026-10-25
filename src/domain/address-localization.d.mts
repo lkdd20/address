@@ -6,7 +6,7 @@ export function componentLooksLocalized(text: string, locale: Locale): boolean;
 export function storedVariantLooksLocalized(components: AddressComponents, locale: Locale): boolean;
 export function preservesAddressNumbers(original: string, translated: string): boolean;
 export function preservesAddressIdentifiers(original: string, translated: string): boolean;
-export function implausibleChineseTranslation(original: unknown, translated: unknown): boolean;
+export function implausibleChineseTranslation(original: unknown, translated: unknown, field?: string): boolean;
 export function implausibleEnglishTranslation(original: unknown, translated: unknown, field?: string): boolean;
 export function expandEnglishStreetType(value: string): string;
 export function normalizeChineseStreetType(original: unknown, translated: string): string;

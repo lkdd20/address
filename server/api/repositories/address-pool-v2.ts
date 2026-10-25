@@ -353,7 +353,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
           const semantic = (semanticAddressFields as readonly string[]).includes(field);
           if ((!original || value) && preservesAddressNumbers(original, value) && preservesAddressIdentifiers(original, value)
             && (!['postcode', 'admin1Code'].includes(field) || original === value)
-            && (!semantic || componentLooksLocalized(value, language) && !(hanScript.test(value) && implausibleChineseTranslation(original, value)))) continue;
+            && (!semantic || componentLooksLocalized(value, language) && !(hanScript.test(value) && implausibleChineseTranslation(original, value, field)))) continue;
           const fallback = String(componentVariants.en[field] || original);
           if (fallback && componentLooksLocalized(fallback, language)) chinese[field] = fallback; else delete chinese[field];
           chineseFallback = true;
@@ -387,7 +387,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date, requireTranslations = tr
         }
         for (const field of semanticAddressFields as Array<keyof AddressComponents>) {
           const value = String(translated[field] || '');
-          if (implausibleChineseTranslation(componentVariants.native[field], value)) {
+          if (implausibleChineseTranslation(componentVariants.native[field], value, field)) {
             return reject('translation', 'implausible_target_translation', { language, field });
           }
         }

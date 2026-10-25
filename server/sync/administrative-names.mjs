@@ -4,7 +4,9 @@ import { nameVariants, variantRegionIndex } from '../../src/domain/region-names.
 
 export const ADMINISTRATIVE_NAMES_REVISION = 'administrative-names-v19';
 // A country whose published rows need another pass without rescanning every country takes its own revision.
-const countryRevisions = {};
+// v20: IT rescans rows imported while a region-polygon assignment failed (a Gressoney address left in Biella); FR takes
+// catalog Chinese city names the street-type check had refused (Vivier au Court).
+const countryRevisions = { IT: 'administrative-names-v20', FR: 'administrative-names-v20' };
 // Rows the structure and administrative-names repairs retired by region polygons the publication check cannot see; only
 // these repairs' own next revision may restore them.
 export const repairRetirement = /^publication-validation:(?:address-structure|administrative-names)-/u;

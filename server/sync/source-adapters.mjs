@@ -571,8 +571,9 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         source: { ...source, id: `${source.id}-${partition.shardId}`, name: `${source.name} (${partition.name})` }
       });
     } else if (source.adapter === 'overture') {
+      // A countrywide Overture export samples the popular cities first, so it runs before the popular-region shards.
       for (const countryCode of source.countries || []) shards.push({
-        id: `${source.id}-${countryCode.toLowerCase()}`, countryCode, intervalDays, source
+        id: `${source.id}-${countryCode.toLowerCase()}`, countryCode, intervalDays, popularCities: true, source
       });
     } else if (source.adapter === 'geofabrik') {
       for (const extract of source.extracts || []) shards.push({
@@ -3638,10 +3639,10 @@ export const createSourceAdapters = ({
       await assignRegionsToFile({ countryCode: shard.countryCode, input: result.file, output, format: result.format,
         cacheDir: options.cacheDir, pythonBin, execute: runExecute, signal });
     } catch (error) {
-      if (signal?.aborted) throw error;
-      // Region polygons only refine a snapshot; their absence must not fail the source.
-      console.error(`[address-sync] ${shard.countryCode} region boundaries unavailable`, error?.code || error?.message || error);
-      return result;
+      // Rows imported without their polygon region keep a wrong source region nothing corrects later, so the shard
+      // fails and is retried under the sync failure policy instead.
+      if (!signal?.aborted) console.error(`[address-sync] ${shard.countryCode} region boundaries unavailable`, error?.code || error?.message || error);
+      throw error;
     }
     if (result.cacheFile && result.file !== result.cacheFile) await rm(result.file, { force: true });
     return { ...result, file: output, cacheFile: result.cacheFile || result.file };

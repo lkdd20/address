@@ -156,7 +156,8 @@ const englishStreetTypeMissing = (original, value) => {
   const match = trailingEnglishStreetType(original);
   return Boolean(match && /\p{Script=Han}/u.test(value) && !match.type.accepted.test(value));
 };
-export const implausibleChineseTranslation = (original, translated) => {
+// Street types are checked on streets only: a place named like one (Vivier au Court) keeps its transliteration.
+export const implausibleChineseTranslation = (original, translated, field = '') => {
   const value = String(translated ?? '').trim();
   if (conversationalChinese.test(value) || replyPunctuation.test(value) && !replyPunctuation.test(String(original ?? ''))) return true;
   const source = String(original ?? '');
@@ -164,7 +165,7 @@ export const implausibleChineseTranslation = (original, translated) => {
     && (chineseSentence.test(sourcePronoun.test(source) || sourceSubject.test(source) ? value.replace(/[我你您她]/gu, '') : value)
       || value.includes('。') && !source.includes('.'))) return true;
   if (cyrillicStreetType.test(String(original ?? '')) && !chineseStreetType.test(value)) return true;
-  if (englishStreetTypeMissing(original, value)) return true;
+  if (field === 'street' && englishStreetTypeMissing(original, value)) return true;
   // Short names can be one-syllable transliterations (Rau → 劳) and generic words can be one character (Street → 街,
   // West → 西); other longer names collapsed to one character were translated literally (Badger → 獾).
   if (/^[街路道巷弄栋楼座塔号区村镇乡市县省州港桥岛园场庄屯东西南北中]$/u.test(value)) return false;
@@ -205,7 +206,7 @@ export const usableAddressTranslation = (value, target, original = '', field = '
   if (!componentLooksLocalized(translated, target)) return false;
   if (target === 'en' && original && implausibleEnglishTranslation(original, translated, field)) return false;
   if (target === 'en') return !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Thai}\p{Script=Cyrillic}]/u.test(translated);
-  if (target === 'zh-CN' && original && implausibleChineseTranslation(original, translated)) return false;
+  if (target === 'zh-CN' && original && implausibleChineseTranslation(original, translated, field)) return false;
   if (target === 'zh-CN') return !/\p{L}/u.test(original || translated) || /\p{Script=Han}/u.test(translated)
     || /^[A-Z]{1,6}[-./ ]?\d+(?:[-./ ]?[A-Z\d]+)*$/u.test(original) && translated === original;
   return true;

@@ -32,8 +32,15 @@ describe('implausible Chinese translations', () => {
     ['Marine DR', '海洋灾难恢复'],
     ['2nd ST', '2nd 意法半导体']
   ])('rejects %s → %s', (original, translated) => {
-    expect(implausibleChineseTranslation(original, translated)).toBe(true);
-    expect(usableAddressTranslation(translated, 'zh-CN', original)).toBe(false);
+    expect(implausibleChineseTranslation(original, translated, 'street')).toBe(true);
+    expect(usableAddressTranslation(translated, 'zh-CN', original, 'street')).toBe(false);
+  });
+
+  it('checks English street types on streets only', () => {
+    expect(implausibleChineseTranslation('Vivier au court', '维维耶奥库尔', 'locality')).toBe(false);
+    expect(usableAddressTranslation('维维耶奥库尔', 'zh-CN', 'Vivier au court', 'locality')).toBe(true);
+    expect(implausibleChineseTranslation('Vivier au court', '维维耶奥库尔')).toBe(false);
+    expect(implausibleChineseTranslation('Kensington Court', '肯辛顿', 'street')).toBe(true);
   });
 
   it.each([
