@@ -204,4 +204,52 @@ describe('floor-aware hierarchical allocation', () => {
       .first('count')).toBe(2);
     database.close();
   });
+
+  it('fills ranked popular-city rows before the balanced remainder', async () => {
+    const directory = resolve('.data-cache', 'floor-allocation-tests', randomUUID());
+    directories.push(directory);
+    await mkdir(directory, { recursive: true });
+    const file = resolve(directory, 'popular.jsonl');
+    const row = (index, city, tier, rank, longitude, latitude) => JSON.stringify({
+      id: `overture-${city}-${index}`, admin1: 'Pennsylvania', locality: city, postal_city: city, postcode: '',
+      street: 'Market Street', number: String(100 + index), longitude, latitude, property_type: 'unknown',
+      sampling_tier: tier, sampling_rank: rank
+    });
+    // Rows arrive out of rank order, as parallel COPY writes them.
+    const rows = [
+      ...Array.from({ length: 6 }, (_, index) => row(index, 'Erie', 2, 10 + index, -80.08 + index / 1000, 42.12)),
+      ...Array.from({ length: 6 }, (_, index) => row(index, 'Philadelphia', 1, 1 + index, -75.16 + index / 1000, 39.95))
+    ];
+    await writeFile(file, `${rows.join('\n')}\n`, 'utf8');
+    const database = openTestDatabase(':memory:');
+    const importer = new PostgresAddressImporter({
+      database,
+      normalizeRecord: normalizeSourceRecord,
+      hash: (value) => createHash('sha256').update(value).digest('hex'),
+      localizeRecords: async (records) => records.map((value) => ({
+        ...value,
+        localizations: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, {
+          components: value.components, formattedAddress: value.formattedAddress, source: 'fixture'
+        }]))
+      }))
+    });
+    const source = {
+      id: 'popular', adapter: 'overture', name: 'Fixture', homepageUrl: 'https://example.test',
+      dataUrl: 'https://example.test/data', licenseCode: 'CC0-1.0', licenseName: 'CC0',
+      licenseUrl: 'https://example.test/license', attributionText: 'Fixture',
+      attributionUrl: 'https://example.test', termsUrl: 'https://example.test/terms',
+      shareAlike: false, redistributionAllowed: true
+    };
+    const result = await importer.importShard({
+      shard: { id: 'popular-us', countryCode: 'US', source },
+      discovery: { version: 'v1', dataUrl: source.dataUrl },
+      materialized: { file, format: 'overture-jsonl', checksum: 'e'.repeat(64) },
+      maxRecords: 8, perLocality: 10, policy: { targetCount: 8, levelLimits: [100, 100, 100, 0], overrides: new Map() }
+    });
+    expect(result.acceptedCount).toBe(8);
+    const cities = (await database.prepare('SELECT locality,COUNT(*) AS count FROM address_pool WHERE active=1 GROUP BY locality')
+      .all()).results;
+    expect(Object.fromEntries(cities.map((value) => [value.locality, Number(value.count)]))).toEqual({ Philadelphia: 6, Erie: 2 });
+    database.close();
+  });
 });

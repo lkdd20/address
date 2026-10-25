@@ -701,6 +701,8 @@ export const normalizeSourceRecord = (value, shard, format) => {
     components,
     englishComponentHints,
     ...(value.admin_boundary && typeof value.admin_boundary === 'object' ? { administrativeBoundary: value.admin_boundary } : {}),
+    // Popular-city exports rank their rows; tier 1 is a popular metro area's share.
+    ...(Number.isSafeInteger(value.sampling_rank) ? { samplingRank: value.sampling_rank, samplingTier: Number(value.sampling_tier) } : {}),
     ...(value.admin_region && typeof value.admin_region === 'object'
       ? { administrativeRegion: value.admin_region.outside ? { outside: true } : value.admin_region.region || null } : {})
   };
@@ -799,6 +801,7 @@ export const runAddressEtl = async ({
   bytesPerRecord = integer(process.env.ADDRESS_STORAGE_BYTES_PER_RECORD, DEFAULT_STORAGE_BYTES_PER_RECORD),
   maxRecords = integer(process.env.ADDRESS_SYNC_MAX_RECORDS_PER_SHARD, 200_000),
   maxGrowthPerRun = integer(process.env.ADDRESS_SYNC_MAX_GROWTH_PER_RUN, 50_000),
+  maxCandidates = integer(process.env.ADDRESS_SYNC_MAX_CANDIDATES, 300_000),
   perLocality = integer(process.env.ADDRESS_SYNC_RECORDS_PER_LOCALITY, 64),
   maxShardsPerRun = integer(process.env.ADDRESS_SYNC_MAX_SHARDS_PER_RUN, !estimate && syncMode === 'daily' ? 1 : Number.MAX_SAFE_INTEGER),
   requireResidential = boolean(process.env.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
@@ -1053,8 +1056,8 @@ export const runAddressEtl = async ({
       // headroom, and never shrinks below what the source already published.
       const previousCount = Math.max(0, Number(task.previous?.acceptedCount) || 0);
       const shareRecords = Math.floor(Math.max(0, softLimitBytes - plannedStorageBytes) / (bytesPerRecord * enabledCountries));
-      // Popular regions (shards with a priority) grow faster so their cities fill first.
-      const growth = task.shard.priority ? maxGrowthPerRun * 3 : maxGrowthPerRun;
+      // Popular-city exports and popular regions (shards with a priority) grow faster so their cities fill first.
+      const growth = task.shard.priority || task.shard.popularCities ? maxGrowthPerRun * 3 : maxGrowthPerRun;
       const sourceTarget = Math.min(integer(task.shard.maxRecords, maxRecords), Math.max(1, previousCount + Math.min(shareRecords, growth)));
       const estimatedOutputBytes = sourceTarget * 2048;
       const estimatedDatabaseBytes = Math.max(0, sourceTarget - previousCount) * bytesPerRecord;
@@ -1198,7 +1201,7 @@ export const runAddressEtl = async ({
           await reportProgress({ phase: 'materialize', countryCode: task.shard.countryCode, sourceId: task.shard.id });
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
           const shardTarget = task.report.targetCount;
-          const candidateLimit = Math.min(300_000, Math.max(shardTarget + 1_000, shardTarget * 3));
+          const candidateLimit = Math.min(maxCandidates, Math.max(shardTarget + 1_000, shardTarget * 3));
           const candidatePerLocality = task.policy.levelLimits[1] === 0
             ? candidateLimit : Math.max(perLocality, ...task.policy.levelLimits);
           const localityWeights = database && activeRun && task.shard.source?.adapter === 'overture'
@@ -1226,7 +1229,8 @@ export const runAddressEtl = async ({
         await reportProgress({ phase: 'coverage', countryCode });
         // The import is committed by now; coverage is derived and refreshed again by the background coverage pass,
         // so a lock timeout here must not turn a successful import into a failed run.
-        const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString(), signal)
+        const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString(), signal,
+          { useGenerationIndex: true })
           .catch((error) => {
             if (signal?.aborted) throw error;
             console.error(`[address-sync] ${countryCode} coverage refresh deferred`, error?.code || error?.message || error);

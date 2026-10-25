@@ -6,10 +6,13 @@ import { evaluateCountryGoals } from './country-goals.mjs';
 import { CHINA_PRIORITY_TARGET } from './address-policy.mjs';
 import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
+import { statfs } from 'node:fs/promises';
+import { measureStorageBytes, storageFull, storageLimits } from './storage-budget.mjs';
 
 export const LATCH_REASON = 'source_limited_cache';
 export const CHECKED_REASON = 'source_version_checked';
 export const SUSPENDED_REASON = 'retry_suspended';
+export const STORAGE_WAIT_REASON = 'storage_wait';
 export const BACKOFF_REASON = 'retry_backoff';
 export const SHARED_FAILURE_REASON = 'shared_failure_circuit';
 export const PARTIAL_REASON = 'source_partial_checkpoint';
@@ -346,6 +349,21 @@ export const evaluateAttempt = ({
   }
   if (quotaBound && !quotaAvailable) {
     return { action: 'waiting_quota', nextAttemptAt: quotaResetAt, consecutiveFailures: 0 };
+  }
+  // Storage is a host resource, not a fault of the source: the shard waits without counting a failure.
+  if (String(failureCode || '').toUpperCase() === 'ADDRESS_STORAGE_HARD_LIMIT') {
+    return {
+      action: 'backoff',
+      reason: STORAGE_WAIT_REASON,
+      fingerprint: failureFingerprintAfter,
+      consecutiveFailures: Number(consecutiveFailures || 0),
+      failureCode,
+      checkpointToken: retainedCheckpointToken,
+      adapter,
+      failurePhase,
+      failureSignature,
+      nextAttemptAt: new Date(timestamp(completedAt) + 60 * 60_000).toISOString()
+    };
   }
   if (String(failureCode || '').toUpperCase() === 'SYNC_JOB_INTERRUPTED') {
     return {
@@ -917,7 +935,21 @@ export const createQueueSources = ({
       WHERE pool.country_code=? AND pool.active=1 AND generation.address_id IS NULL AND recovery.address_id IS NULL`).bind(countryCode).first('total')
   ) || 0);
 
-  return { addressFacts, quotaStatus, chinaPriority, unpublishedBacklog };
+  // Address storage counts the data directory and the database, as the import budget does.
+  const storageStatus = async () => {
+    const limits = storageLimits(environment);
+    const dataRoot = environment.ADDRESS_DATA_ROOT || resolve('data');
+    const [files, databaseBytes, freeBytes] = await Promise.all([
+      measureStorageBytes([dataRoot]).catch(() => 0),
+      withDatabase(addressDatabase, 0, async (database) => Number(await database
+        .prepare('SELECT pg_database_size(current_database()) AS size').first('size')) || 0).catch(() => 0),
+      statfs(dataRoot).then((stats) => Number(stats.bavail) * Number(stats.bsize)).catch(() => null)
+    ]);
+    const usedBytes = files + databaseBytes;
+    return { ...limits, usedBytes, freeBytes, full: storageFull({ usedBytes, freeBytes, ...limits }) };
+  };
+
+  return { addressFacts, quotaStatus, chinaPriority, unpublishedBacklog, storageStatus };
 };
 
 const runningJobCountries = (job, shards) => {
@@ -1331,6 +1363,8 @@ export const createSyncQueue = ({
   let cachedSnapshot = null;
   let published = { body: '', at: 0 };
   let chinaLogState = '';
+  let storageCheck = null;
+  let storageLogState = '';
   const remember = async (result) => {
     const value = publicSnapshot(result);
     cachedSnapshot = { value, at: now().getTime() };
@@ -1575,6 +1609,35 @@ export const createSyncQueue = ({
       chinaLogState = china.executionState;
       return true;
     };
+    const storageBlocked = async () => {
+      if (!sources.storageStatus) return false;
+      if (!storageCheck || now().getTime() - storageCheck.at >= 60_000) {
+        storageCheck = { at: now().getTime(), status: await sources.storageStatus() };
+        const state = storageCheck.status.full ? 'full' : 'ok';
+        if (state !== storageLogState) {
+          log.log?.(`[sync-queue] storage ${state} used=${storageCheck.status.usedBytes} free=${storageCheck.status.freeBytes} soft=${storageCheck.status.softLimitBytes}`);
+          storageLogState = state;
+        }
+      }
+      return storageCheck.status.full;
+    };
+    if (!coordinator.currentJob && await storageBlocked()) {
+      if (!cachedSnapshot || now().getTime() - cachedSnapshot.at >= 60_000) await refresh();
+      return Math.min(rescanMs, 60_000);
+    }
+    // Sources that stopped only because storage ran out start over once there is room again.
+    if (sources.storageStatus && storageCheck && !storageCheck.status.full) {
+      const state = await store.load();
+      const released = [];
+      for (const [countryCode, country] of Object.entries(state.countries || {})) {
+        for (const [sourceId, saved] of Object.entries(country.shards || {})) {
+          if (!['suspended', 'backoff'].includes(saved.state) || saved.failureCode !== 'ADDRESS_STORAGE_HARD_LIMIT') continue;
+          await store.apply(countryCode, { action: 'waiting_quota' }, now().toISOString(), sourceId);
+          released.push(sourceId);
+        }
+      }
+      if (released.length) log.log?.(`[sync-queue] storage available; released ${released.length} sources`);
+    }
     if (!coordinator.currentJob && await chinaBlocked()) {
       if (!cachedSnapshot || now().getTime() - cachedSnapshot.at >= 60_000) await refresh();
       return Math.min(rescanMs, 5_000);

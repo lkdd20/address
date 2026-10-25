@@ -602,7 +602,7 @@ describe('address source shard catalog', () => {
   });
 
   it('enables Overture residential classification by default and allows an explicit opt-out', async () => {
-    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v7-popular-cities+capacity-20261003');
+    expect(sourceAdapterRevisions.overture).toBe('addresses-streets-residential-subset-v8-popular-ranks+capacity-20261003');
     const fetchImpl = async (input) => {
       const url = String(input);
       if (url.endsWith('/catalog.json')) return Response.json({ latest: '2026-06-17.0' });

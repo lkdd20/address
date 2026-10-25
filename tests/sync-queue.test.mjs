@@ -276,6 +276,14 @@ describe('attempt evaluation and latching', () => {
     expect(Date.parse(eighth.nextAttemptAt)).toBeGreaterThan(Date.parse(base.completedAt));
   });
 
+  it('waits for storage without counting a failure or suspending the source', () => {
+    const result = evaluateAttempt({
+      ...base, jobSucceeded: false, netGrowth: 0, failureCode: 'ADDRESS_STORAGE_HARD_LIMIT', consecutiveFailures: 7
+    });
+    expect(result).toMatchObject({ action: 'backoff', reason: 'storage_wait', consecutiveFailures: 7 });
+    expect(result.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 60 * 60_000));
+  });
+
   it('retains the latest checkpoint across an interruption backoff', () => {
     const result = evaluateAttempt({
       ...base,
@@ -423,6 +431,50 @@ describe('published queue snapshots', () => {
     await queue.tick();
     expect(addressFacts).toHaveBeenCalledTimes(2);
     expect(history.publishQueueSnapshot).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('storage gate', () => {
+  it('starts no job while storage is full and resumes once space is free', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget.add('US');
+    let full = true;
+    const sources = { ...stubSources(facts, {}), storageStatus: vi.fn(async () => ({ full, usedBytes: 1, freeBytes: 1, softLimitBytes: 1 })) };
+    const coordinator = { currentJob: null, trigger: vi.fn(async () => ({ accepted: false })), waitForIdle: async () => {} };
+    let current = new Date('2026-08-02T10:00:00Z');
+    const queue = createSyncQueue({
+      environment: {}, coordinator, stateDir: stateDir(), sources,
+      loadCatalog: async () => ({ shards: [{ id: 'overture-addresses-us', countryCode: 'US', popularCities: true, source: { adapter: 'overture' } }] }),
+      now: () => current, cooldownMs: 0, log: { log: () => {}, error: () => {} }
+    });
+    await queue.tick();
+    current = new Date(current.getTime() + 30_000);
+    await queue.tick();
+    expect(coordinator.trigger).not.toHaveBeenCalled();
+    expect(sources.storageStatus).toHaveBeenCalledTimes(1);
+    full = false;
+    current = new Date(current.getTime() + 60_000);
+    await queue.tick();
+    expect(sources.storageStatus).toHaveBeenCalledTimes(2);
+    expect(coordinator.trigger).toHaveBeenCalled();
+  });
+
+  it('releases sources suspended only by the storage limit once storage is available', async () => {
+    const facts = stubFacts();
+    const sources = { ...stubSources(facts, {}), storageStatus: async () => ({ full: false, usedBytes: 1, freeBytes: 1, softLimitBytes: 2 }) };
+    const queue = createSyncQueue({
+      environment: {}, coordinator: { currentJob: null, trigger: async () => ({ accepted: false }), waitForIdle: async () => {} },
+      stateDir: stateDir(), sources, loadCatalog: async () => ({ shards: [] }),
+      now: () => new Date('2026-08-02T10:00:00Z'), cooldownMs: 0, log: { log: () => {}, error: () => {} }
+    });
+    const suspend = (failureCode) => ({ action: 'suspend', fingerprint: 'f', consecutiveFailures: 8, failureCode,
+      nextAttemptAt: '2026-09-01T00:00:00Z' });
+    await queue.store.apply('US', suspend('ADDRESS_STORAGE_HARD_LIMIT'), '2026-08-02T09:00:00Z', 'storage-source');
+    await queue.store.apply('US', suspend('SYNC_PROCESS_TIMEOUT'), '2026-08-02T09:00:00Z', 'timeout-source');
+    await queue.tick();
+    const shards = (await queue.store.load()).countries.US.shards;
+    expect(shards['storage-source']).toBeUndefined();
+    expect(shards['timeout-source']).toMatchObject({ state: 'suspended', failureCode: 'SYNC_PROCESS_TIMEOUT' });
   });
 });
 

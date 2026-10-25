@@ -199,7 +199,19 @@ export const createSyncRuntime = async ({
         if (summary.changed || summary.retired || summary.duplicates || summary.error) console.log(JSON.stringify({ event: 'administrative_names_repair', ...summary }));
       }
     });
-    await startupStep('projection reconciliation', () => reconcilePublishedPoolProjections(database));
+    // A full recount of every country takes hours on a large pool, so restarts within a day skip it; publication and
+    // backfill keep the projections current in between.
+    await startupStep('projection reconciliation', async () => {
+      const key = 'projection-reconciliation';
+      const last = JSON.parse(await database.prepare('SELECT value_json FROM translation_backfill_progress WHERE key=?')
+        .bind(key).first('value_json') || '{}');
+      if (Date.now() - Date.parse(last.checkedAt || 0) < 24 * 60 * 60_000) return;
+      const reconciled = await reconcilePublishedPoolProjections(database);
+      const checkedAt = new Date().toISOString();
+      await database.prepare(`INSERT INTO translation_backfill_progress(key,value_json,updated_at) VALUES (?,?,?)
+        ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+        .bind(key, JSON.stringify({ checkedAt, reconciled }), checkedAt).run();
+    });
     await startupStep('generation index refresh', () => refreshStaleAddressGenerationIndexes(database));
     await startupStep('residential coverage', () => refreshIndexedResidentialCoverage(database, undefined, { skipLocked: true }));
     await startupStep('address coverage', () => refreshAddressCoverage(database, { useGenerationIndex: true }));

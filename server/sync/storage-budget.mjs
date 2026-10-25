@@ -65,6 +65,19 @@ export const evaluateStorageBudget = ({
   };
 };
 
+const positive = (value, fallback) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+export const storageLimits = (environment = process.env) => ({
+  softLimitBytes: positive(environment.ADDRESS_STORAGE_SOFT_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES),
+  hardLimitBytes: positive(environment.ADDRESS_STORAGE_HARD_LIMIT_BYTES, DEFAULT_HARD_LIMIT_BYTES),
+  minFreeDiskBytes: positive(environment.ADDRESS_STORAGE_MIN_FREE_BYTES, DEFAULT_MIN_FREE_DISK_BYTES)
+});
+// No import can grow the pool once usage reaches the soft limit or the disk keeps less than its reserve free.
+export const storageFull = ({ usedBytes, freeBytes, softLimitBytes, minFreeDiskBytes }) =>
+  usedBytes >= softLimitBytes || Number.isFinite(freeBytes) && freeBytes < minFreeDiskBytes;
+
 export const assertStorageBudget = (options) => {
   const budget = evaluateStorageBudget(options);
   if (!budget.allowWrite) throw new StorageBudgetExceededError(budget);

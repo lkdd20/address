@@ -42,7 +42,8 @@ const franceBdnbExporter = resolve(syncRoot, 'france-bdnb-export.py');
 const spainCatastroExporter = resolve(syncRoot, 'spain-catastro-export.py');
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
-const overtureResidentialRevision = 'addresses-streets-residential-subset-v7-popular-cities';
+// v8 writes each row's popular-city tier and rank; the importer fills popular metro areas first.
+const overtureResidentialRevision = 'addresses-streets-residential-subset-v8-popular-ranks';
 const geofabrikExportRevision = 'g70-streets';
 const googleResidentialRevision = 'osm-address-street-google-geocoding-v10-city-level';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v14';
@@ -1902,6 +1903,34 @@ export const createSourceAdapters = ({
     return verifiedDownloads.get(destination);
   };
 
+  // Remote GeoParquet reads run at ~13 MB/s per stream; parallel whole-file downloads reach several times that, so a
+  // release's address files are mirrored once and every country reads them locally. Two releases are kept.
+  const overtureMirrorConcurrency = Math.max(1, Number.parseInt(environment.ADDRESS_SYNC_OVERTURE_MIRROR_CONCURRENCY || '8', 10) || 8);
+  const mirrorOvertureAssets = async (assets, release, cacheDir, maxBytes) => {
+    if (environment.ADDRESS_SYNC_OVERTURE_MIRROR === 'false' || !assets.length) return assets;
+    const root = resolve(cacheDir, 'overture-mirror');
+    const directory = resolve(root, safeVersion(release));
+    await mkdir(directory, { recursive: true });
+    const releases = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    for (const stale of releases.filter((name) => name !== safeVersion(release)).slice(0, -1)) {
+      await rm(resolve(root, stale), { recursive: true, force: true });
+    }
+    const local = new Array(assets.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(overtureMirrorConcurrency, assets.length) }, async () => {
+      while (next < assets.length) {
+        const index = next++;
+        const url = assets[index];
+        const head = await fetchHead(url);
+        const expectedBytes = head.ok ? headerNumber(head.headers, 'content-length') : null;
+        const destination = resolve(directory, basename(new URL(url).pathname));
+        await download(url, destination, { expectedBytes, maxBytes });
+        local[index] = destination;
+      }
+    }));
+    return local;
+  };
+
   const materializeOverture = async (shard, discovery, options) => {
     const residentialRevision = `-${overtureResidentialRevision}`;
     const weightsJson = options.localityWeights ? JSON.stringify(options.localityWeights) : '';
@@ -1917,12 +1946,13 @@ export const createSourceAdapters = ({
     const buildingAssetsFile = `${temporary}.building-assets.json`;
     const weightsFile = weightsJson ? `${temporary}.locality-weights.json` : null;
     if (weightsFile) await writeFile(weightsFile, weightsJson, 'utf8');
-    await writeFile(assetsFile, JSON.stringify(discovery.assets), 'utf8');
-    await writeFile(buildingAssetsFile, JSON.stringify(discovery.buildingAssetEntries || discovery.buildingAssets || []), 'utf8');
     const structuresZip = discovery.structuresUrl
       ? resolve(options.cacheDir, 'raw', `usa-structures-${shard.admin1}-${safeVersion(discovery.version)}.zip`) : null;
     try {
       if (structuresZip) await download(discovery.structuresUrl, structuresZip, { expectedBytes: null, maxBytes: options.maxBytes });
+      const assets = await mirrorOvertureAssets(discovery.assets || [], String(discovery.version).split('+')[0], options.cacheDir, options.maxBytes);
+      await writeFile(assetsFile, JSON.stringify(assets), 'utf8');
+      await writeFile(buildingAssetsFile, JSON.stringify(discovery.buildingAssetEntries || discovery.buildingAssets || []), 'utf8');
       await runExecute({
         file: pythonBin,
         args: [overtureExporter, '--country', shard.countryCode, '--release', discovery.version,

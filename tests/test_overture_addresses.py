@@ -264,5 +264,17 @@ class OvertureAddressTest(unittest.TestCase):
         self.assertTrue({value["id"] for value in small} <= {value["id"] for value in large})
         self.assertLessEqual(sum(value["locality"] == "Los Angeles" for value in large), 30)
 
+    def test_weighted_export_writes_sampling_tier_and_rank(self):
+        rows = [(f"la-{index}", "CA", "Los Angeles") for index in range(40)]
+        rows += [(f"town{town}-{index}", "CA", f"Town {town}") for town in range(5) for index in range(6)]
+        weights = {"baseline": 1, "cityLimit": 30, "places": [
+            {"admin1": ["ca"], "locality": ["losangeles"], "population": 3_820_000, "popular": True, "dominant": True}]}
+        values = self.weighted_export(rows, weights, 20)
+        self.assertEqual(sorted(value["sampling_rank"] for value in values), list(range(1, 21)))
+        ordered = sorted(values, key=lambda value: value["sampling_rank"])
+        self.assertEqual([value["sampling_tier"] for value in ordered], sorted(value["sampling_tier"] for value in values))
+        self.assertTrue(all(value["locality"] == "Los Angeles" for value in values if value["sampling_tier"] == 1))
+        self.assertTrue(any(value["sampling_tier"] == 1 for value in values))
+
 if __name__ == "__main__":
     unittest.main()

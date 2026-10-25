@@ -2,6 +2,7 @@ import argparse
 import atexit
 import json
 import math
+import os
 import pathlib
 import shutil
 import sys
@@ -53,8 +54,10 @@ if not args.structures_provider.replace("-", "").isalnum():
 assets = json.loads(pathlib.Path(args.assets_file).read_text(encoding="utf-8"))
 if (not isinstance(assets, list)
         or (not args.candidate_jsonl and not assets)
-        or not all(isinstance(value, str) and value.startswith("https://") for value in assets)):
-    raise ValueError("assets-file must contain HTTPS GeoParquet URLs")
+        or not all(isinstance(value, str) and (value.startswith("https://")
+                                              or (os.path.isabs(value) and pathlib.Path(value).is_file()))
+                   for value in assets)):
+    raise ValueError("assets-file must contain HTTPS GeoParquet URLs or mirrored local files")
 building_asset_values = json.loads(pathlib.Path(args.building_assets_file).read_text(encoding="utf-8"))
 if not isinstance(building_asset_values, list):
     raise ValueError("building-assets-file must contain HTTPS GeoParquet URLs")
@@ -77,7 +80,7 @@ connection = duckdb.connect()
 connection.execute(f"SET home_directory={sql_string(str(duckdb_home))}")
 connection.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
 connection.execute("SET preserve_insertion_order=false")
-connection.execute("SET threads=4")
+connection.execute(f"SET threads={max(1, int(os.environ.get('OVERTURE_DUCKDB_THREADS', '4')))}")
 connection.execute("SET enable_http_metadata_cache=true")
 connection.execute("SET http_keep_alive=true")
 connection.execute("SET http_retries=10")
@@ -85,7 +88,7 @@ connection.execute("SET http_retry_wait_ms=250")
 connection.execute("SET http_timeout=120")
 temporary_directory = output_path.parent / "duckdb-temp"
 temporary_directory.mkdir(parents=True, exist_ok=True)
-connection.execute("SET memory_limit='2GB'")
+connection.execute(f"SET memory_limit={sql_string(os.environ.get('OVERTURE_DUCKDB_MEMORY_LIMIT', '2GB'))}")
 connection.execute(f"SET temp_directory={sql_string(str(temporary_directory))}")
 output = sql_string(str(output_path))
 country = sql_string(args.country.upper())
@@ -282,10 +285,19 @@ def weighted_order(rank, residential=True):
             + f"CASE WHEN {rank} <= {baseline} THEN {rank} ELSE ({rank} - {baseline}) / locality_weight END, hash(id)")
 
 
+def sampling_columns(rank, order):
+    """Explicit popular-city tier and rank: parallel COPY does not keep the ORDER BY, and the importer selects by them."""
+    if not weighted:
+        return ""
+    return (f", CASE WHEN {rank} <= {weights.baseline} THEN 0 WHEN {rank} <= locality_popular_limit THEN 1 ELSE 2 END"
+            f" AS sampling_tier, row_number() OVER (ORDER BY {order}) AS sampling_rank")
+
+
 fallback_query = f"""
 COPY (
   SELECT * EXCLUDE (priority, geometry, locality_weight, locality_popular_limit, locality_rank), 'unknown' AS property_type,
     '' AS residential_building_id, '' AS residential_building_class
+    {sampling_columns('locality_rank', weighted_order('locality_rank', residential=False))}
   FROM (SELECT *, {locality_rank_sql} AS locality_rank FROM address_candidates)
   WHERE locality_rank <= {rank_limit}
   ORDER BY {weighted_order('locality_rank', residential=False)}
@@ -429,6 +441,7 @@ COPY (
   )
   SELECT
     balanced.* EXCLUDE (priority, residential_priority, residential_locality_rank, geometry, locality_weight, locality_popular_limit)
+    {sampling_columns('residential_locality_rank', selection_order)}
   FROM balanced
   ORDER BY {selection_order}
   LIMIT {args.max_records}

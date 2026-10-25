@@ -622,11 +622,16 @@ export class PostgresAddressImporter {
       Number(Boolean(right.residentialSourceRecordId)) - Number(Boolean(left.residentialSourceRecordId))
       || Number(right.qualityScore || 0) - Number(left.qualityScore || 0)
       || left.canonicalHash.localeCompare(right.canonicalHash));
-    let records = applyHierarchicalQuota(candidates, {
+    // Popular-city exports fill each popular metro area's share first, in the exporter's rank order; the remaining
+    // budget keeps the balanced node policy (baselines, region minimums, round-robin).
+    const popular = candidates.filter((record) => record.samplingTier === 1)
+      .sort((left, right) => left.samplingRank - right.samplingRank).slice(0, sourceMaxRecords);
+    const popularIds = new Set(popular.map((record) => record.canonicalKey));
+    let records = [...popular, ...applyHierarchicalQuota(candidates.filter((record) => !popularIds.has(record.canonicalKey)), {
       ...activePolicy,
-      targetCount: sourceMaxRecords,
-      maxRecords: sourceMaxRecords
-    });
+      targetCount: Math.max(0, sourceMaxRecords - popular.length),
+      maxRecords: Math.max(0, sourceMaxRecords - popular.length)
+    })];
     const canonicalKeys = [...new Set(records.map((record) => record.canonicalKey).filter(Boolean))];
     const existingByKey = new Map();
     const ambiguousKeys = new Set();

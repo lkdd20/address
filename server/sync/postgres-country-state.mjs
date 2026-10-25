@@ -1,5 +1,4 @@
 import { evaluateCountryGoals } from './country-goals.mjs';
-import { addressPublicationSqlClause } from '../database/generation-index.mjs';
 
 const nextSyncAt = (lastSuccessfulAt, intervalDays) => {
   if (!lastSuccessfulAt) return null;
@@ -159,10 +158,10 @@ export class PostgresCountryStateStore {
       const latestVersion = shardRows.find((row) => row.source_version);
       const datasetId = await this.database.prepare(`SELECT id FROM address_datasets
         WHERE country_code=? AND status='active' ORDER BY imported_at DESC LIMIT 1`).bind(countryCode).first('id');
-      const counts = await this.database.prepare(`SELECT COUNT(DISTINCT id) AS address_count,
-        COUNT(DISTINCT id) FILTER (WHERE property_type IN ('residential','apartment') AND residential_evidence=1) AS residential_count
-        FROM address_pool_runtime WHERE country_code=? AND ${addressPublicationSqlClause()}`)
-        .bind(countryCode).first();
+      // The generation index holds exactly the publishable rows and is refreshed by the import, so counting it
+      // avoids rescanning a large country's runtime view after every run.
+      const counts = await this.database.prepare(`SELECT COUNT(*) AS address_count,SUM(residential_ready) AS residential_count
+        FROM address_generation_index WHERE country_code=? AND active=1`).bind(countryCode).first();
       const minimum = (column) => shardRows.map((row) => row[column]).filter(Boolean).sort()[0] || null;
       const status = failed ? 'failed' : shardRows.length && shardRows.every((row) => row.status === 'ready') ? 'ready' : 'pending';
       await this.database.prepare(`UPDATE sync_country_state SET status=?,last_success_at=?,next_sync_at=?,

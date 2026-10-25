@@ -46,5 +46,5 @@
 
 ## 热门城市与热门地区优先（2026-10-19）
 
-- Overture 导出改为热门优先配额（详见共用规则）：先统计各“一级行政区+城市”的地址数，每个城市保底 10 条，热门城市的都市圈（按名称或中心坐标半径归圈）补到每圈共 30,000 条，其余预算按目录人口平方根加权；按记录 ID 哈希切片抽样，预算增大只追加不替换。适配器修订为 `addresses-streets-residential-subset-v7-popular-cities`，所有 Overture 分片按新能力重新评估。
+- Overture 导出改为热门优先配额（详见共用规则）：先统计各“一级行政区+城市”的地址数，每个城市保底 10 条，热门城市的都市圈（按名称或中心坐标半径归圈）补到每圈共 30,000 条，其余预算按目录人口平方根加权；按记录 ID 哈希切片抽样，预算增大只追加不替换。适配器修订为 `addresses-streets-residential-subset-v8-popular-ranks`（v8 起导出每行写明热门分层与排名，导入先按排名取热门都市圈配额，剩余名额再按保底、一级行政区下限和均衡规则分配，2026-10-25），所有 Overture 分片按新能力重新评估。
 - Geofabrik 旧大区分片优先级/上限：Île-de-France 1/150,000、Rhône-Alpes 2/80,000、PACA 3/80,000、Midi-Pyrénées 4/40,000、Languedoc-Roussillon 5/30,000、Aquitaine 6/40,000、Nord-Pas-de-Calais 7/40,000、Pays de la Loire 8/30,000；其余不变。
