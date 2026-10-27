@@ -313,9 +313,15 @@ const runTranslationBatch = async ({ database, environment = process.env, fetchI
       address.country_code,address.match_level,address.active,recovery.updated_at
     FROM (SELECT address_id,updated_at FROM translation_recovery WHERE ${where}${scopedRecovery} ORDER BY ${order} LIMIT ?) recovery
     JOIN address_pool address ON address.id=recovery.address_id`).bind(...bindings, ...countries, scanLimit).all()).results;
+  // A status list with an OR on the attempt time reads every waiting row and timed out under load; each status and
+  // attempt-time form walks the (status,next_attempt_at,address_id) index in order and stops at the limit.
+  const retryDue = [];
+  for (const status of onlyCached ? [] : ['pending', 'waiting']) {
+    retryDue.push(...await dueBranch('status=? AND next_attempt_at<=?', [status, now().toISOString()], 'next_attempt_at,address_id'),
+      ...await dueBranch('status=? AND next_attempt_at IS NULL', [status], 'next_attempt_at,address_id'));
+  }
   const due = onlyCached ? [] : [
-    ...await dueBranch(`status IN ('pending','waiting') AND (next_attempt_at IS NULL OR next_attempt_at<=?)`,
-      [now().toISOString()], 'next_attempt_at,address_id'),
+    ...retryDue,
     ...await dueBranch(`status='failed' AND reason NOT IN (${TERMINAL_FAILURE_REASONS.map(() => '?').join(',')})`,
       TERMINAL_FAILURE_REASONS, 'address_id'),
     // One status per branch: a status list cannot walk the (status,address_id) index in order, and the primary-key

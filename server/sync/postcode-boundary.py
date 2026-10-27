@@ -12,7 +12,9 @@ def sql_string(value):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--boundary-zip", required=True)
+source = parser.add_mutually_exclusive_group(required=True)
+source.add_argument("--boundary-zip")
+source.add_argument("--boundary-file", help="GeoJSON or another single-file format DuckDB spatial reads")
 parser.add_argument("--field", required=True)
 parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
@@ -24,14 +26,18 @@ output_path = pathlib.Path(args.output).resolve()
 work = output_path.parent / f"{output_path.name}.boundary"
 shutil.rmtree(work, ignore_errors=True)
 try:
-    with zipfile.ZipFile(args.boundary_zip) as archive:
-        for member in archive.namelist():
-            if work.resolve() not in (work / member).resolve().parents:
-                raise ValueError("boundary archive contains an unsafe path")
-        archive.extractall(work)
-    shapes = sorted(path for path in work.rglob("*.shp"))
-    if len(shapes) != 1:
-        raise ValueError("boundary archive must contain exactly one shapefile")
+    work.mkdir(parents=True, exist_ok=True)
+    if args.boundary_file:
+        shapes = [pathlib.Path(args.boundary_file)]
+    else:
+        with zipfile.ZipFile(args.boundary_zip) as archive:
+            for member in archive.namelist():
+                if work.resolve() not in (work / member).resolve().parents:
+                    raise ValueError("boundary archive contains an unsafe path")
+            archive.extractall(work)
+        shapes = sorted(path for path in work.rglob("*.shp"))
+        if len(shapes) != 1:
+            raise ValueError("boundary archive must contain exactly one shapefile")
     connection = duckdb.connect()
     duckdb_home = output_path.parent / "duckdb-home"
     duckdb_home.mkdir(parents=True, exist_ok=True)

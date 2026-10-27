@@ -10,13 +10,13 @@ describe('address generation index', () => {
   it('uses the reader language gate for every stored semantic field without inspecting identifiers', async () => {
     const database = openTestDatabase(':memory:');
     const fields = ['buildingName', 'street', 'locality', 'postalLocality', 'dependentLocality', 'district', 'admin1'];
-    const native = { street: 'Fixture Road', locality: 'Berkeley', admin1: 'CA', houseNumber: '1', postcode: '' };
+    const native = { street: 'Fixture Road', locality: 'Berkeley', admin1: 'CA', houseNumber: '1', postcode: '94704' };
     const valid = { native, en: native, 'zh-CN': { ...native, street: '测试路', locality: '伯克利', admin1: '加利福尼亚州' } };
     try {
       await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,locality,postal_locality,street,
-        house_number,latitude,longitude,native_language,component_variants_json,address_variants_json,
+        house_number,postcode,latitude,longitude,native_language,component_variants_json,address_variants_json,
         quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at)
-        VALUES ('language-fixture','US','CA','Berkeley','Berkeley','Fixture Road','1',37.86,-122.25,'en',
+        VALUES ('language-fixture','US','CA','Berkeley','Berkeley','Fixture Road','1','94704',37.86,-122.25,'en',
           ?,'{}',.95,'fixture','fixture',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
         .bind(JSON.stringify(valid)).run();
       for (const language of ['en', 'zh-CN']) for (const field of fields) {

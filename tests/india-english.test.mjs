@@ -24,7 +24,7 @@ describe('India English-only text', () => {
   });
 
   it('rejects any local-script component in an Indian address', () => {
-    const components = { street: 'Park Road', houseNumber: '9', locality: 'Chennai', admin1: 'Tamil Nadu' };
+    const components = { street: 'Park Road', houseNumber: '9', locality: 'Chennai', admin1: 'Tamil Nadu', postcode: '600001' };
     expect(validateAddressQuality({ countryCode: 'IN', components }).valid).toBe(true);
     expect(validateAddressQuality({ countryCode: 'IN', components: { ...components, buildingName: 'होटल आमंत्रण' } }).reasons).toContain('non_latin_text');
     expect(validateAddressQuality({ countryCode: 'TH', components: { ...components, locality: 'พระนคร' } }).reasons).not.toContain('non_latin_text');

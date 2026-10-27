@@ -211,7 +211,7 @@ describe('floor-aware hierarchical allocation', () => {
     await mkdir(directory, { recursive: true });
     const file = resolve(directory, 'popular.jsonl');
     const row = (index, city, tier, rank, longitude, latitude) => JSON.stringify({
-      id: `overture-${city}-${index}`, admin1: 'Pennsylvania', locality: city, postal_city: city, postcode: '',
+      id: `overture-${city}-${index}`, admin1: 'Pennsylvania', locality: city, postal_city: city, postcode: city === 'Erie' ? '16501' : '19103',
       street: 'Market Street', number: String(100 + index), longitude, latitude, property_type: 'unknown',
       sampling_tier: tier, sampling_rank: rank
     });

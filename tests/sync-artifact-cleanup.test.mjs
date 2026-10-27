@@ -33,8 +33,11 @@ describe('synchronization artifact cleanup', () => {
     const plateau = resolve(root, 'raw', 'plateau-13113-2023');
     const deadDirectory = resolve(root, 'raw', 'extract.999999.tmp');
     const liveDirectory = resolve(root, 'raw', 'extract.42.tmp');
+    // A pid this container cannot see may belong to a writer in another container while the file keeps changing.
+    const foreignWriter = resolve(root, 'boundaries', 'points.jsonl.999998.tmp');
     await Promise.all([
-      createFile(dead, current),
+      createFile(dead, old),
+      createFile(foreignWriter, current),
       createFile(live, old),
       createFile(expiredPart, old),
       createFile(freshPart, current),
@@ -43,7 +46,7 @@ describe('synchronization artifact cleanup', () => {
       createFile(resolve(liveDirectory, 'data.json'), old)
     ]);
     await utimes(plateau, old, old);
-    await utimes(deadDirectory, current, current);
+    await utimes(deadDirectory, old, old);
     await utimes(liveDirectory, old, old);
 
     const cleanup = createSyncArtifactCleanup({
@@ -63,6 +66,7 @@ describe('synchronization artifact cleanup', () => {
     expect(await exists(live)).toBe(true);
     expect(await exists(freshPart)).toBe(true);
     expect(await exists(liveDirectory)).toBe(true);
+    expect(await exists(foreignWriter)).toBe(true);
   });
 
   it('does not scan while a synchronization job is running', async () => {

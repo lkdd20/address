@@ -29,9 +29,12 @@ const source = (longitude = -89.65) => ({
 });
 
 describe('real street address contract', () => {
-  it('accepts an explicitly street-level record without a number or postcode', () => {
-    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street', components })).toMatchObject({ valid: true });
-    expect(validateAddressContract('US', components, { strict: true, matchLevel: 'street' })).toMatchObject({ valid: true });
+  it('accepts an explicitly street-level record without a number once it has a postcode', () => {
+    const posted = { ...components, postcode: '62701' };
+    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street', components: posted })).toMatchObject({ valid: true });
+    expect(validateAddressContract('US', posted, { strict: true, matchLevel: 'street' })).toMatchObject({ valid: true });
+    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street', components }).reasons).toContain('missing_postcode');
+    expect(validateAddressContract('US', components, { strict: true, matchLevel: 'street' }).reasons).toContain('missing_postcode');
   });
 
   it('retains administrative, precision and postcode validation', () => {
@@ -39,16 +42,18 @@ describe('real street address contract', () => {
       components: { ...components, locality: '' } }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'premise', components }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street',
-      components: { ...components, postcode: 'wrong' } })).toMatchObject({ valid: true, components: { postcode: '' } });
+      components: { ...components, postcode: 'wrong' } })).toMatchObject({ valid: false, components: { postcode: '' } });
     expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'street',
       components: { ...components, houseNumber: '12' } }).valid).toBe(false);
     expect(validateAddressQuality({ countryCode: 'CN', matchLevel: 'street', components }).valid).toBe(false);
   });
 
-  it('retains a real non-China house number when its postcode cannot be established', () => {
+  it('rejects a house-number address whose postcode cannot be established', () => {
     const precise = { ...components, houseNumber: '12' };
-    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'premise', components: precise }).valid).toBe(true);
-    expect(validateAddressContract('US', precise, { matchLevel: 'premise' }).valid).toBe(true);
+    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'premise', components: precise }).reasons).toContain('missing_postcode');
+    expect(validateAddressContract('US', precise, { matchLevel: 'premise' }).reasons).toContain('missing_postcode');
+    expect(validateAddressQuality({ countryCode: 'US', matchLevel: 'premise', components: { ...precise, postcode: '62701' } }).valid)
+      .toBe(true);
     expect(validateAddressContract('CN', { ...precise, district: 'Example District' }).reasons).toContain('missing_postcode');
   });
 
@@ -90,8 +95,9 @@ describe('real street address contract', () => {
         licenseCode: 'CC0-1.0+fixture-api-authorization',
         recordSources: { api: { name: 'Fixture API', url: 'https://example.test/api' } }
       } };
-      await writeFile(file, [{ ...source(), source_record_provider: 'api' }, { ...source(-89.651), id: 'second-point' },
-        { ...source(), id: 'missing-city', locality: '' }].map(JSON.stringify).join('\n'));
+      await writeFile(file, [{ ...source(), postcode: '62701', source_record_provider: 'api' },
+        { ...source(-89.651), postcode: '62701', id: 'second-point' },
+        { ...source(), postcode: '62701', id: 'missing-city', locality: '' }].map(JSON.stringify).join('\n'));
       await database.exec(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,path)
         VALUES (1,'US','IL','Illinois','Illinois','伊利诺伊州','US/IL');
         INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name)
@@ -122,10 +128,10 @@ describe('real street address contract', () => {
         JOIN address_datasets dataset ON dataset.id=evidence.dataset_id WHERE evidence.evidence_type='address_existence'`).first())
         .toEqual({ record_url: 'https://example.test/api', license_code: 'CC0-1.0+fixture-api-authorization' });
       expect(await database.prepare('SELECT match_level,house_number,postcode,property_type FROM address_pool').first())
-        .toMatchObject({ match_level: 'street', house_number: '', postcode: '', property_type: 'unknown' });
+        .toMatchObject({ match_level: 'street', house_number: '', postcode: '62701', property_type: 'unknown' });
       expect(await database.prepare('SELECT COUNT(*) AS total FROM address_generation_index WHERE active=1').first('total')).toBe(1);
       const address = await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'fixture-street');
-      expect(address).toMatchObject({ matchLevel: 'street', components: { houseNumber: '', postcode: '', admin1Code: 'IL' } });
+      expect(address).toMatchObject({ matchLevel: 'street', components: { houseNumber: '', postcode: '62701', admin1Code: 'IL' } });
       expect(address.evidence.map(({ type }) => type)).toEqual(['address_existence', 'coordinate']);
       expect(await pickAddressPoolV2Address(database, 'US', true, {}, undefined, 'fixture-residential')).toBeUndefined();
       await refreshAddressCoverage(database);

@@ -2,34 +2,36 @@ import { isValidPostcode } from './postcode-patterns.mjs';
 import { countryBoundAreas } from './country-bounds.mjs';
 import countryNames from './country-names.json' with { type: 'json' };
 
+// A published address carries a postcode everywhere postcodes exist (2026-10-26); Hong Kong has none and China
+// keeps its district-level rule.
 const policies = {
-  US: { admin1: true, locality: true },
-  CA: { admin1: true, locality: true },
-  MX: { admin1: true, locality: true, district: true },
-  GB: { locality: true },
-  DE: { locality: true },
-  FR: { locality: true },
-  IT: { admin1: true, locality: true },
-  ES: { admin1: true, locality: true },
-  NL: { locality: true },
-  JP: { admin1: true, locality: true, district: true },
+  US: { admin1: true, locality: true, postcode: true },
+  CA: { admin1: true, locality: true, postcode: true },
+  MX: { admin1: true, locality: true, district: true, postcode: true },
+  GB: { locality: true, postcode: true },
+  DE: { locality: true, postcode: true },
+  FR: { locality: true, postcode: true },
+  IT: { admin1: true, locality: true, postcode: true },
+  ES: { admin1: true, locality: true, postcode: true },
+  NL: { locality: true, postcode: true },
+  JP: { admin1: true, locality: true, district: true, postcode: true },
   CN: { admin1: true, locality: true, district: true, postcode: false },
   HK: { locality: true, postcode: false },
-  TW: { admin1: true, locality: true },
-  KR: { admin1: true, locality: true },
+  TW: { admin1: true, locality: true, postcode: true },
+  KR: { admin1: true, locality: true, postcode: true },
   SG: { postcode: true },
-  MY: { admin1: true, locality: true },
-  TH: { admin1: true, locality: true },
-  PH: { admin1: true, locality: true },
-  VN: { admin1: true, locality: true },
-  TR: { admin1: true, locality: true },
-  SA: { locality: true },
-  IN: { admin1: true, locality: true },
-  AU: { admin1: true, locality: true },
-  BR: { admin1: true, locality: true },
-  NG: { admin1: true, locality: true },
-  ZA: { admin1: true, locality: true },
-  RU: { admin1: true, locality: true }
+  MY: { admin1: true, locality: true, postcode: true },
+  TH: { admin1: true, locality: true, postcode: true },
+  PH: { admin1: true, locality: true, postcode: true },
+  VN: { admin1: true, locality: true, postcode: true },
+  TR: { admin1: true, locality: true, postcode: true },
+  SA: { locality: true, postcode: true },
+  IN: { admin1: true, locality: true, postcode: true },
+  AU: { admin1: true, locality: true, postcode: true },
+  BR: { admin1: true, locality: true, postcode: true },
+  NG: { admin1: true, locality: true, postcode: true },
+  ZA: { admin1: true, locality: true, postcode: true },
+  RU: { admin1: true, locality: true, postcode: true }
 };
 
 // Geocoders return these labels for roads without an official name; they are not real street names.
@@ -281,7 +283,9 @@ export const localityIssue = (countryCode, components = {}) => {
   return '';
 };
 
-export const validateAddressQuality = ({ countryCode, components, latitude, longitude, matchLevel = 'premise' } = {}) => {
+// `requirePostcode: false` lets an import write a row whose postcode the post-import inference may still fill; rows it
+// cannot fill are retired before publication.
+export const validateAddressQuality = ({ countryCode, components, latitude, longitude, matchLevel = 'premise', requirePostcode = true } = {}) => {
   const country = clean(countryCode).toUpperCase();
   const policy = policies[country];
   const normalizedComponents = normalizeAddressFacts(country, components);
@@ -308,7 +312,7 @@ export const validateAddressQuality = ({ countryCode, components, latitude, long
   if (policy?.locality && !localityValue(normalizedComponents)) reasons.push('missing_locality');
   if (policy?.district && !districtValue(normalizedComponents)) reasons.push('missing_district');
   const postcode = clean(normalizedComponents.postcode);
-  if (policy?.postcode && !postcode) reasons.push('missing_postcode');
+  if (policy?.postcode && requirePostcode && !postcode) reasons.push('missing_postcode');
   if (postcode && !isValidPostcode(country, postcode)) reasons.push('invalid_postcode');
   if (clean(normalizedComponents.buildingName) && /^\d+[\p{L}\p{N}./-]*$/u.test(clean(normalizedComponents.buildingName))) {
     reasons.push('numeric_building_name');
@@ -348,6 +352,7 @@ export const addressQualitySqlClause = (prefix = '') => {
     if (policy.district) checks.push(district);
     if (country === 'CN') checks.push(value('postcode'));
     if (country === 'SG') checks.push(`${prefix}postcode ~ '^[0-9]{6}$'`);
+    else if (policy.postcode) checks.push(value('postcode'));
     const expression = [fresh, ...checks].join(' AND ');
     const countries = groups.get(expression) || [];
     countries.push(country);

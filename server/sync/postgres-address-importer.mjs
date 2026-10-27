@@ -3,6 +3,7 @@ import { addressCanonicalKey, localityIssue, splitConcatenatedLocality, validate
 import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
+import { POSTCODE_REQUIRED_REVISION, postcodeRequired } from './postcode-requirement.mjs';
 import { correctedRegion, regionCorrectionCountries } from './region-boundaries.mjs';
 import { administrativeNameCountries, createAdministrativeNames, mixedLevelCountries, singaporeRegion } from './administrative-names.mjs';
 import { semanticAddressFields, usableAddressTranslation } from '../../src/domain/address-localization.mjs';
@@ -100,6 +101,17 @@ const applyAdministrativeNames = (record, geocoder, countryCode) => {
   record.englishComponentHints = { ...(record.englishComponentHints || {}), ...en };
   record.chineseComponentHints = { ...(record.chineseComponentHints || {}), ...zh };
   return Object.keys(native).length > 0;
+};
+
+// The pool audit's polygon rule, applied once every correction has run: a snapshot whose regions were assigned by
+// polygon must carry this record's polygon, and a mixed-level country's region must agree with it.
+const polygonRegionIssue = (record, shard, materialized, geocoder) => {
+  const countryCode = shard.countryCode;
+  if (!materialized.regionsAssigned) return '';
+  if (!record.administrativeRegion) return 'region_unverified';
+  if (!mixedLevelCountries.has(countryCode) || !geocoder?.regionsById?.size) return '';
+  return administrativeNamesOf(geocoder, countryCode).regionInBoundary(record.components, record.administrativeRegion,
+    { postcode: record.components.postcode, latitude: record.latitude, longitude: record.longitude }) ? 'region_boundary' : '';
 };
 
 // Fills empty admin fields via catalog reverse-geocoding, then enforces the
@@ -341,12 +353,15 @@ const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
     locality: record.components.locality
   });
   if (!hierarchy.valid) return { valid: false, reasons: [hierarchy.reason], components: record.components };
+  // A missing postcode is filled by the post-import inference or the row is retired before it is published.
   const quality = validateAddressQuality({
     countryCode, components: record.components, latitude: record.latitude, longitude: record.longitude,
-    matchLevel: record.matchLevel
+    matchLevel: record.matchLevel, requirePostcode: false
   });
   if (!quality.valid) return quality;
-  const contract = validateAddressContract(countryCode, record.components, { strict: true, matchLevel: record.matchLevel });
+  const contract = validateAddressContract(countryCode, record.components, {
+    strict: true, matchLevel: record.matchLevel, requirePostcode: false
+  });
   if (!contract.valid) return { valid: false, reasons: contract.reasons, components: record.components };
   record.components = quality.components;
   for (const field of ['admin1', 'admin1Code', 'locality', 'postalLocality', 'district', 'postcode', 'street', 'houseNumber', 'buildingName', 'unit']) {
@@ -461,18 +476,23 @@ const addressStatements = (database, records, context) => {
   const addressRows = records.map((record) => {
     const localized = variants(record);
     const coverage = coverageKey(record);
+    // A row still missing a required postcode is stored unpublished; the post-import inference publishes it once filled.
+    const pending = postcodeRequired(record.countryCode) && !String(record.postcode || '').trim();
     addressBindings.push(
       record.id, record.canonicalKey, record.countryCode, record.admin1, record.admin1Code, record.locality, record.postalLocality,
       record.district, record.postcode, record.street, record.houseNumber, record.buildingName,
       record.latitude, record.longitude, record.nativeLanguage, JSON.stringify(localized.components),
       JSON.stringify(localized.addresses), cleanKey(record.admin1), cleanKey(record.admin1Code),
       cleanKey(record.locality), cleanKey(record.postalLocality), cleanKey(record.district), postcodeKey(record.postcode),
-      record.propertyType, record.qualityScore, context.datasetId, coverage, randomKey(record.canonicalHash),
-      context.observedAt, context.observedAt, context.expiresAt, record.matchLevel || (record.unit ? 'subpremise' : 'premise')
+      record.propertyType, record.qualityScore, context.datasetId, coverage, randomKey(record.canonicalHash), pending ? 0 : 1,
+      context.observedAt, context.observedAt, context.expiresAt,
+      pending ? `publication-validation:${POSTCODE_REQUIRED_REVISION}:${context.observedAt}` : null,
+      record.matchLevel || (record.unit ? 'subpremise' : 'premise')
     );
-    return '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL,?)';
+    return '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
   });
-  // Rows retired by publication validation return only through translation recovery after revalidation.
+  // Rows retired by publication validation return only through translation recovery after revalidation, except rows
+  // retired for a missing postcode, which follow the postcode of the new import.
   const address = database.prepare(`
     INSERT INTO address_pool(
       id,canonical_key,country_code,admin1,admin1_code,locality,postal_locality,district,postcode,street,house_number,
@@ -493,8 +513,10 @@ const addressStatements = (database, records, context) => {
       property_type=excluded.property_type,quality_score=GREATEST(address_pool.quality_score,excluded.quality_score),
       generation=excluded.generation,coverage=excluded.coverage,last_seen_at=excluded.last_seen_at,
       expires_at=excluded.expires_at,match_level=excluded.match_level,
-      active=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%' THEN 0 ELSE 1 END,
-      retired_at=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%' THEN address_pool.retired_at ELSE NULL END
+      active=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%'
+        AND address_pool.retired_at NOT LIKE 'publication-validation:postcode-required-%' THEN 0 ELSE excluded.active END,
+      retired_at=CASE WHEN address_pool.retired_at LIKE 'publication-validation:%'
+        AND address_pool.retired_at NOT LIKE 'publication-validation:postcode-required-%' THEN address_pool.retired_at ELSE excluded.retired_at END
   `).bind(...addressBindings);
   const evidenceBindings = [];
   const evidenceRows = records.flatMap((record) => {
@@ -599,6 +621,11 @@ export class PostgresAddressImporter {
       const quality = applyQualityGate(record, shard.countryCode, this.rebuildFormattedAddress);
       if (!quality.valid) {
         reject(quality.reasons);
+        continue;
+      }
+      const polygonIssue = polygonRegionIssue(record, shard, materialized, geocoder);
+      if (polygonIssue) {
+        reject([polygonIssue]);
         continue;
       }
       if (shard.countryCode === 'CN'

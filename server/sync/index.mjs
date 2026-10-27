@@ -151,6 +151,12 @@ export const createSyncRuntime = async ({
         const summary = await runPostcodeInference({ database, countryCode, cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'),
           pythonBin: environment.PYTHON_BIN }).catch((error) => ({ countryCode, error: error?.message || String(error) }));
         if (summary.checked || summary.error) console.log(JSON.stringify({ event: 'postcode_inference', ...summary }));
+        if (summary.filledIds?.length) {
+          const names = await repairAdministrativeNames({ database, countryCode, addressIds: summary.filledIds,
+            cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'), pythonBin: environment.PYTHON_BIN || 'python3' })
+            .catch((error) => ({ countryCode, error: error?.code || error?.message || String(error) }));
+          if (names.changed || names.retired || names.duplicates || names.error) console.log(JSON.stringify({ event: 'administrative_names_repair', scoped: true, ...names }));
+        }
       }
     });
     await startupStep('chinese address spacing', async () => {
@@ -197,6 +203,33 @@ export const createSyncRuntime = async ({
           cacheDir: environment.ADDRESS_SYNC_CACHE_DIR || resolve('.data-cache'), pythonBin: environment.PYTHON_BIN || 'python3' })
           .catch((error) => ({ countryCode, error: error?.code || error?.message || String(error) }));
         if (summary.changed || summary.retired || summary.duplicates || summary.error) console.log(JSON.stringify({ event: 'administrative_names_repair', ...summary }));
+      }
+    });
+    await startupStep('postcode requirement', async () => {
+      const { retirePostcodeLessRows } = await import('./postcode-requirement.mjs');
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 ORDER BY country_code").all()).results;
+      for (const { country_code: countryCode } of countries) {
+        const summary = await retirePostcodeLessRows({ database, countryCode });
+        if (summary.retired) console.log(JSON.stringify({ event: 'postcode_required_repair', ...summary }));
+      }
+    });
+    // Permanently retired rows are deleted; rows retired for a missing postcode only once their country's official
+    // postcode sources ran. Korea waits for its postcode-area application (2026-10-27).
+    await startupStep('retired address purge', async () => {
+      const { PERMANENT_RETIREMENT_PREFIXES, purgePermanentRetirements, vacuumAddressTables } = await import('./retired-purge.mjs');
+      const { postcodeRecoveryDone } = await import('./postcode-inference.mjs');
+      const countries = (await database.prepare("SELECT country_code FROM sync_country_policies WHERE enabled=1 ORDER BY country_code").all()).results;
+      let deleted = 0;
+      for (const { country_code: countryCode } of countries) {
+        const keepPostcode = countryCode === 'KR' || !await postcodeRecoveryDone(database, countryCode);
+        const prefixes = PERMANENT_RETIREMENT_PREFIXES.filter((prefix) => !keepPostcode || prefix !== 'postcode-required-');
+        const summary = await purgePermanentRetirements({ database, countryCode, prefixes });
+        deleted += summary.deleted;
+        if (summary.deleted) console.log(JSON.stringify({ event: 'retired_address_purge', ...summary }));
+      }
+      if (deleted >= 100_000 && postgresPool) {
+        const client = await postgresPool.connect();
+        try { await vacuumAddressTables(client); } finally { client.release(); }
       }
     });
     // A full recount of every country takes hours on a large pool, so restarts within a day skip it; publication and

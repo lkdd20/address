@@ -77,8 +77,17 @@ describe('country address quality gate', () => {
     ['IN', { ...base, postcode: '012345' }],
     ['US', { ...base, postcode: '1234' }],
     ['VN', { ...base, postcode: '100000' }]
-  ])('keeps a %s address and leaves an invalid postcode empty', (countryCode, components) => {
-    expect(validateAddressQuality({ countryCode, components })).toMatchObject({ valid: true, components: { postcode: '' } });
+  ])('clears an invalid %s postcode and rejects the address unless an import defers it to inference', (countryCode, components) => {
+    expect(validateAddressQuality({ countryCode, components })).toMatchObject({
+      valid: false, components: { postcode: '' }, reasons: expect.arrayContaining(['missing_postcode'])
+    });
+    expect(validateAddressQuality({ countryCode, components, requirePostcode: false }))
+      .toMatchObject({ valid: true, components: { postcode: '' } });
+  });
+
+  it('does not require a postcode in Hong Kong', () => {
+    expect(validateAddressQuality({ countryCode: 'HK', components: { ...base, admin1: '', district: '', postcode: '' } }).reasons)
+      .not.toContain('missing_postcode');
   });
 
   it('normalizes local-script postcode digits and keeps China postcodes strict', () => {
@@ -206,12 +215,12 @@ describe('country address quality gate', () => {
       .toContain('coordinates_outside_country');
   });
 
-  it('requires a postcode only for China in the SQL read gate', () => {
+  it('requires a postcode in the SQL read gate everywhere except Hong Kong', () => {
     const clause = addressQualitySqlClause('pool.');
-    expect(clause).toMatch(/pool\.country_code IN \([^)]*'US'[^)]*\)/u);
-    const china = clause.slice(clause.indexOf("pool.country_code IN ('CN')")).split(' OR (pool.country_code IN ')[0];
-    expect(china).toContain("trim(pool.postcode) <> ''");
-    expect(clause.match(/trim\(pool\.postcode\) <> ''/gu)).toHaveLength(1);
+    const group = (code) => clause.split('pool.country_code IN (').slice(1)
+      .find((part) => part.split(')')[0].includes(`'${code}'`));
+    for (const code of ['US', 'GB', 'IT', 'CA', 'CN']) expect(group(code)).toContain("trim(pool.postcode) <> ''");
+    expect(group('HK')).not.toContain('pool.postcode');
   });
 
   it('applies the same country coordinate envelope to SQL publication gates', () => {

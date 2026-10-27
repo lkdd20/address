@@ -472,7 +472,7 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?,?)');
   });
 
-  it('preserves real premises without a ZIP and drops legacy numeric building names', async () => {
+  it('skips premises without a ZIP and drops legacy numeric building names', async () => {
     const components = {
       houseNumber: '2704', street: 'College Avenue', locality: 'Berkeley', postalLocality: 'Berkeley',
       admin1: 'California', admin1Code: 'CA', postcode: '94704', buildingName: '3'
@@ -505,7 +505,7 @@ describe('ADDRESS_DB v2 repository', () => {
       }
     };
     const address = await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'unit-seed');
-    expect(address).toMatchObject({ id: 'pool-v2-missing-zip', components: { houseNumber: '2704', postcode: '' },
+    expect(address).toMatchObject({ id: 'pool-v2-legacy-unit', components: { houseNumber: '2704', postcode: '94704' },
       unitStatus: 'not_present', unitProvenance: 'none' });
     expect(address?.components).not.toHaveProperty('unit');
     expect(address?.components).not.toHaveProperty('buildingName');

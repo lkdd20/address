@@ -287,11 +287,11 @@ describe('published residential coverage', () => {
         is_primary,is_current,created_at) VALUES (?,'ny','dataset','duplicate-proof',?,?,0,1,?)`)
       .bind(`duplicate-${type}`, now, type, now)));
     const components = { houseNumber: '', street: 'Fixture Road', locality: 'New York City',
-      postalLocality: 'New York City', admin1: 'NY', postcode: '' };
+      postalLocality: 'New York City', admin1: 'NY', postcode: '10001' };
     await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,locality,postal_locality,postcode,street,
       house_number,latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,
       quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,match_level)
-      VALUES ('street','US','NY','New York City','New York City','','Fixture Road','',40,-73.99,'en',?,?,'unknown',
+      VALUES ('street','US','NY','New York City','New York City','10001','Fixture Road','',40,-73.99,'en',?,?,'unknown',
         .95,'fixture','NY:New York City',2,1,?,?,'street')`).bind(JSON.stringify({
       native: components, en: components, 'zh-CN': { ...components, street: '测试路', locality: '纽约市', admin1: '纽约州' }
     }), JSON.stringify({ native: 'Fixture Road', en: 'Fixture Road', 'zh-CN': '测试路' }), now, now).run();

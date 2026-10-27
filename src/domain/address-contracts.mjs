@@ -15,7 +15,7 @@ const hasNonIdentifierLatin = (value) => /\p{Script=Latin}/u.test(String(value)
   .replace(/[A-Za-z]+(?=[区座栋棟幢单元室号號楼])/gu, ''));
 
 export const addressContracts = Object.fromEntries(Object.keys(required).map((code) => [code, {
-  code, required: required[code].filter((field) => field !== 'postcode' || code === 'CN' || code === 'SG'), adminCode: adminCodes.has(code)
+  code, required: required[code], adminCode: adminCodes.has(code)
 }]));
 export const requiresAdminCode = (countryCode) => Boolean(addressContracts[countryCode]?.adminCode);
 
@@ -28,13 +28,16 @@ export function validateNativeScript(countryCode, value, { strict = false } = {}
   return !strict || pattern.test(text);
 }
 
-export function validateAddressContract(countryCode, components = {}, { strict = false, requireAdminCode = true, matchLevel = 'premise' } = {}) {
+export function validateAddressContract(countryCode, components = {}, {
+  strict = false, requireAdminCode = true, matchLevel = 'premise', requirePostcode = true
+} = {}) {
   const contract = addressContracts[countryCode];
   if (!contract) return { valid: false, reasons: ['unsupported_country'] };
   const reasons = [];
   const streetLevel = countryCode !== 'CN' && matchLevel === 'street';
   if (matchLevel === 'street' && !streetLevel) reasons.push('invalid_match_level');
   for (const field of contract.required) {
+    if (field === 'postcode' && !requirePostcode) continue;
     if (!String(components[field] ?? '').trim()) reasons.push(`missing_${field}`);
   }
   if (strict) {

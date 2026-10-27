@@ -3675,7 +3675,7 @@ export const createSourceAdapters = ({
       throw error;
     }
     if (result.cacheFile && result.file !== result.cacheFile) await rm(result.file, { force: true });
-    return { ...result, file: output, cacheFile: result.cacheFile || result.file };
+    return { ...result, file: output, cacheFile: result.cacheFile || result.file, regionsAssigned: true };
   };
 
   const materialize = async (shard, discovery, options) => {

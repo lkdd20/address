@@ -33,6 +33,9 @@ export const createSyncArtifactCleanup = ({
   isBusy = () => false,
   now = () => Date.now(),
   staleMs = 6 * 60 * 60_000,
+  // Another container (the API running a pool audit) writes pid-named files whose pid this one cannot see; such a
+  // file is only removed once it also stopped changing.
+  orphanMs = 30 * 60_000,
   intervalMs = 15 * 60_000,
   retainRaw = false,
   isProcessAlive = processAlive,
@@ -57,7 +60,7 @@ export const createSyncArtifactCleanup = ({
           const expired = metadata && now() - metadata.mtimeMs >= staleMs;
           const pid = ownerPid(entry.name);
           if (pid && isProcessAlive(pid)) continue;
-          const removable = pid ? true : expired;
+          const removable = pid ? metadata && now() - metadata.mtimeMs >= orphanMs : expired;
           if (removable && temporaryDirectory(entry.name, retainRaw)) {
             if (isBusy()) return;
             await rm(target, { recursive: true, force: true });
@@ -72,7 +75,8 @@ export const createSyncArtifactCleanup = ({
         if (!metadata) continue;
         const pid = ownerPid(entry.name);
         const expired = now() - metadata.mtimeMs >= staleMs;
-        const removable = temporaryFile(entry.name) ? (pid ? !isProcessAlive(pid) : expired) : expired && cacheArtifact(root, target);
+        const orphaned = pid && !isProcessAlive(pid) && now() - metadata.mtimeMs >= orphanMs;
+        const removable = temporaryFile(entry.name) ? (pid ? orphaned : expired) : expired && cacheArtifact(root, target);
         if (!removable) continue;
         if (isBusy()) return;
         await rm(target, { force: true });

@@ -280,6 +280,18 @@ describe('administrative names repair', () => {
     expect(await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup: noRegions, pauseMs: 0 })).toMatchObject({ changed: 0 });
   });
 
+  it('judges only the given published rows outside the country pass and leaves the revision unrecorded', async () => {
+    await insert(database, 'filled', { street: 'Avenue Dorval', houseNumber: '10', locality: 'Dorval', admin1: 'QC', admin1Code: 'NB' });
+    await insert(database, 'other', { street: 'Rue Principale', houseNumber: '5', locality: 'Laval', admin1: 'QC', admin1Code: 'NB' });
+
+    expect(await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup: noRegions, pauseMs: 0, addressIds: ['filled'] }))
+      .toMatchObject({ changed: 1, codes: 1 });
+    const codes = Object.fromEntries((await database.prepare('SELECT id,admin1_code FROM address_pool').all()).results
+      .map((row) => [row.id, row.admin1_code]));
+    expect(codes).toEqual({ filled: 'QC', other: 'NB' });
+    expect(await repairAdministrativeNames({ database, countryCode: 'CA', regionLookup: noRegions, pauseMs: 0 })).toMatchObject({ changed: 1 });
+  });
+
   it('repairs retired rows without publishing them and names a refilled postal city in every variant', async () => {
     await database.exec(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,latitude,longitude)
       VALUES (1,'CA',1,'Montreal','Montréal','蒙特利尔',45.5,-73.6)`);

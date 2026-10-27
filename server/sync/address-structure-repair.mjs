@@ -95,7 +95,9 @@ export const repairAddressStructure = async ({
         const matchLevel = downgrade ? 'street' : row.match_level;
         if (!outside && !downgrade && JSON.stringify(next) === JSON.stringify(before)) continue;
         touched.push(row.id);
-        const quality = validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude, matchLevel });
+        // Missing postcodes are retired by the postcode requirement step under their own reason.
+        const quality = validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude, matchLevel,
+          requirePostcode: false });
         if (outside || !quality.valid) {
           await transaction.prepare('UPDATE address_pool SET active=0,retired_at=? WHERE id=?').bind(retiredAt, row.id).run();
           summary.retired += 1;

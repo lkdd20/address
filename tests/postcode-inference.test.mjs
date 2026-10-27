@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { PostgresDatabase } from '../server/database/postgres.mjs';
-import { POSTCODE_INFERENCE_REVISION, runPostcodeInference } from '../server/sync/postcode-inference.mjs';
+import { POSTCODE_INFERENCE_REVISION, postcodeRecoveryDone, runPostcodeInference } from '../server/sync/postcode-inference.mjs';
 
 const at = '2026-10-06T00:00:00.000Z';
 const insertAddress = (database, id, { country = 'US', admin1 = 'CA', locality = 'BOONVILLE', postcode = '', latitude = 39.0, longitude = -123.37 } = {}) => {
@@ -43,7 +43,8 @@ describe('postcode inference', () => {
     const boundaryLookup = vi.fn(async (_source, points) => new Map(points.filter((point) => point.id === 'boundary').map((point) => [point.id, '96001'])));
     expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup, now: () => new Date(at) }))
       .toMatchObject({ checked: 3, boundary: 1, catalog: 1, neighbor: 0 });
-    expect(await runPostcodeInference({ database, countryCode: 'DE', now: () => new Date(at) })).toMatchObject({ checked: 1, neighbor: 1 });
+    expect(await runPostcodeInference({ database, countryCode: 'DE', boundaryLookup: async () => new Map(), now: () => new Date(at) }))
+      .toMatchObject({ checked: 1, neighbor: 1 });
     const rows = new Map((await database.prepare('SELECT id,postcode,component_variants_json,address_variants_json FROM address_pool').all())
       .results.map((row) => [row.id, row]));
     expect(rows.get('catalog').postcode).toBe('95415');
@@ -62,15 +63,16 @@ describe('postcode inference', () => {
     expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup, now: () => new Date(at) })).toMatchObject({ checked: 0 });
   });
 
-  it('fills Taiwan postcodes from a township whose source postcodes share one 3-digit zone', async () => {
+  it('fills Taiwan postcodes from the official township table before source consensus', async () => {
     const point = { country: 'TW', latitude: 22.0, longitude: 120.74 };
     for (const [id, postcode] of [['s1', '946'], ['s2', '94641'], ['s3', '946001']]) await insertAddress(database, id, { ...point, admin1: '屏東縣', locality: '恆春鎮', postcode });
     for (const [id, postcode] of [['m1', '100'], ['m2', '100'], ['m3', '103']]) await insertAddress(database, id, { ...point, admin1: '臺北市', locality: '中正區', postcode });
     await insertAddress(database, 'township', { country: 'TW', admin1: '屏東縣', locality: '恆春鎮', latitude: 22.3, longitude: 120.9 });
     await insertAddress(database, 'mixed', { country: 'TW', admin1: '台北市', locality: '中正區', latitude: 25.3, longitude: 121.9 });
-    expect(await runPostcodeInference({ database, countryCode: 'TW', now: () => new Date(at) })).toMatchObject({ checked: 2, township: 1, neighbor: 0 });
+    expect(await runPostcodeInference({ database, countryCode: 'TW', now: () => new Date(at) })).toMatchObject({ checked: 2, official: 2, neighbor: 0 });
     expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('township').first('postcode')).toBe('946');
-    expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('mixed').first('postcode')).toBe('');
+    // Source postcodes in 中正區 disagree; Chunghwa Post's table still names its zone.
+    expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('mixed').first('postcode')).toBe('100');
   });
 
   it('scans a country once per revision and afterwards checks only the rows an import wrote', async () => {
@@ -83,6 +85,32 @@ describe('postcode inference', () => {
     expect(await runPostcodeInference({ database, countryCode: 'US', boundaryLookup: async () => new Map(), addressIds: ['imported', 'first'] }))
       .toMatchObject({ checked: 1, catalog: 1 });
     expect(await database.prepare('SELECT postcode FROM address_pool WHERE id=?').bind('later').first('postcode')).toBe('');
+  });
+
+  it('restores rows retired only for a missing postcode once an official source fills it', async () => {
+    await insertAddress(database, 'retired', { country: 'TW', admin1: '彰化縣', locality: '員林鎮', latitude: 23.95, longitude: 120.57 });
+    await insertAddress(database, 'other-retirement', { country: 'TW', admin1: '彰化縣', locality: '員林鎮', latitude: 23.95, longitude: 120.57 });
+    await database.prepare("UPDATE address_pool SET active=0,retired_at='publication-validation:postcode-required-v1:2026-10-26T00:00:00Z' WHERE id='retired'").run();
+    await database.prepare("UPDATE address_pool SET active=0,retired_at='publication-validation:administrative-names-v19:2026-10-26T00:00:00Z' WHERE id='other-retirement'").run();
+    expect(await postcodeRecoveryDone(database, 'TW')).toBe(false);
+    expect(await runPostcodeInference({ database, countryCode: 'TW', now: () => new Date(at) })).toMatchObject({ official: 1, restored: 1 });
+    expect(await database.prepare("SELECT active,retired_at,postcode FROM address_pool WHERE id='retired'").first())
+      .toMatchObject({ active: 1, retired_at: null, postcode: '510' });
+    expect(await database.prepare("SELECT active,postcode FROM address_pool WHERE id='other-retirement'").first())
+      .toMatchObject({ active: 0, postcode: '' });
+    expect(await postcodeRecoveryDone(database, 'TW')).toBe(true);
+    expect(await postcodeRecoveryDone(database, 'IT')).toBe(true);
+  });
+
+  it('takes Canadian postcodes only from the address register, never from areas or neighbours', async () => {
+    for (const id of ['n1', 'n2', 'n3']) await insertAddress(database, id, { country: 'CA', admin1: 'ON', locality: 'OTTAWA', postcode: 'K1P 1J1', latitude: 45.42, longitude: -75.69 });
+    await insertAddress(database, 'registered', { country: 'CA', admin1: 'ON', locality: 'OTTAWA', latitude: 45.42, longitude: -75.69 });
+    await insertAddress(database, 'unregistered', { country: 'CA', admin1: 'ON', locality: 'OTTAWA', latitude: 45.42, longitude: -75.69 });
+    const registerLookup = vi.fn(async (_source, rows) => new Map(rows.filter((row) => row.id === 'registered').map((row) => [row.id, 'K1P 5J2'])));
+    expect(await runPostcodeInference({ database, countryCode: 'CA', registerLookup, now: () => new Date(at) }))
+      .toMatchObject({ checked: 2, register: 1, neighbor: 0, catalog: 0 });
+    expect(await database.prepare("SELECT postcode FROM address_pool WHERE id='registered'").first('postcode')).toBe('K1P 5J2');
+    expect(await database.prepare("SELECT postcode FROM address_pool WHERE id='unregistered'").first('postcode')).toBe('');
   });
 
   it('never derives postcodes for countries with building or street level codes', async () => {

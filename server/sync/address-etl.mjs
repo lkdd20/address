@@ -13,6 +13,7 @@ import { isCountryDue, planCountryShards } from './country-plan.mjs';
 import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
 import { runPostcodeInference } from './postcode-inference.mjs';
+import { retirePostcodeLessRows } from './postcode-requirement.mjs';
 import { PostgresCountryStateStore } from './postgres-country-state.mjs';
 import {
   assertStorageBudget,
@@ -1226,6 +1227,18 @@ export const runAddressEtl = async ({
           addressIds: importedIds.get(countryCode) || [] })
           .catch((error) => { if (signal?.aborted) throw error; console.error(`[address-sync] ${countryCode} postcode inference failed`, error?.message || error); return null; });
         if (postcodes?.checked) console.log(JSON.stringify({ event: 'postcode_inference', ...postcodes }));
+        if (postcodes?.filledIds.length) {
+          const { repairAdministrativeNames } = await import('./administrative-names-repair.mjs');
+          const names = await repairAdministrativeNames({ database, countryCode, cacheDir, pythonBin: environment.PYTHON_BIN || 'python3',
+            addressIds: postcodes.filledIds, pauseMs: 0 })
+            .catch((error) => { if (signal?.aborted) throw error; console.error(`[address-sync] ${countryCode} administrative names check failed`, error?.message || error); return null; });
+          if (names?.changed || names?.retired || names?.duplicates) console.log(JSON.stringify({ event: 'administrative_names_repair', scoped: true, ...names }));
+        }
+        // Only this inference could still fill a missing postcode; rows it could not are retired unpublished.
+        if (postcodes) {
+          const retired = await retirePostcodeLessRows({ database, countryCode, addressIds: importedIds.get(countryCode) || [] });
+          if (retired.retired) console.log(JSON.stringify({ event: 'postcode_required', ...retired }));
+        }
         await reportProgress({ phase: 'coverage', countryCode });
         // The import is committed by now; coverage is derived and refreshed again by the background coverage pass,
         // so a lock timeout here must not turn a successful import into a failed run.

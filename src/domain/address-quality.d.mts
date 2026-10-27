@@ -19,5 +19,6 @@ export function validateAddressQuality<T extends object>(input?: {
   latitude?: unknown;
   longitude?: unknown;
   matchLevel?: 'street' | 'premise' | 'subpremise';
+  requirePostcode?: boolean;
 }): AddressQualityResult<T>;
 export function addressQualitySqlClause(prefix?: string): string;

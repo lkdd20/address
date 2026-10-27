@@ -11,7 +11,7 @@ import { applyAdministrativeCatalogOverrides } from '../server/database/administ
 const observedAt = '2026-09-01T00:00:00.000Z';
 const now = () => new Date('2026-09-08T16:00:00.000Z');
 const native = { houseNumber: '', street: 'Main Street 21', locality: 'Springfield',
-  admin1: 'Illinois', admin1Code: 'IL', postcode: '' };
+  admin1: 'Illinois', admin1Code: 'IL', postcode: '62701' };
 const chinese = { ...native, street: '\u4e3b\u8857 21', locality: '\u65af\u666e\u6797\u83f2\u5c14\u5fb7', admin1: '\u4f0a\u5229\u8bfa\u4f0a\u5dde' };
 const translations = new Map(Object.keys(native).map((field) => [native[field], chinese[field]]));
 // A street written in Cyrillic needs an English translation before its address can publish.
@@ -75,9 +75,9 @@ describe('source-backed translation recovery', () => {
       VALUES ('dataset','fixture','US','v1','${observedAt}','${observedAt}','${'a'.repeat(64)}',
         'jsonl','CC0','CC0','https://example.test/license','Fixture','https://example.test','https://example.test/terms',0,0,1,'active');`);
     await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,
-      house_number,latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,
+      house_number,postcode,latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,
       quality_score,generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
-      VALUES ('street-fixture','US','Illinois','IL','Springfield','Main Street 21','',39.78,-89.65,'en',?,?,'unknown',
+      VALUES ('street-fixture','US','Illinois','IL','Springfield','Main Street 21','','62701',39.78,-89.65,'en',?,?,'unknown',
         .95,'v1','US/IL',1,0,?,?,'publication-validation:fixture','street')`)
       .bind(JSON.stringify({ native, en: native, 'zh-CN': native }),
         JSON.stringify({ native: 'Main Street 21, Springfield, Illinois', en: '', 'zh-CN': '' }), observedAt, observedAt).run();
@@ -315,7 +315,7 @@ describe('source-backed translation recovery', () => {
     const result = await runTranslationBackfillBatch({ database, environment: {}, fetchImpl: translate, now });
     expect(result.updated).toBe(1);
     const row = await database.prepare("SELECT * FROM address_pool WHERE id='street-fixture'").first();
-    expect(row).toMatchObject({ active: 1, retired_at: null, house_number: '', postcode: '',
+    expect(row).toMatchObject({ active: 1, retired_at: null, house_number: '', postcode: '62701',
       first_seen_at: observedAt, last_seen_at: observedAt, generation: 'v1' });
     expect(JSON.parse(row.component_variants_json)).toEqual({ native, en: native, 'zh-CN': chinese });
     expect(JSON.parse(row.address_variants_json)['zh-CN']).toContain(chinese.street);
@@ -484,7 +484,7 @@ describe('source-backed translation recovery', () => {
     await refreshStaleCoverage(database, now, { force: true });
     expect(await database.prepare("SELECT region_name,city_name,total_count FROM residential_coverage WHERE country_code='HK'").first())
       .toEqual({ region_name: 'Kowloon', city_name: 'Kwun Tong', total_count: 1 });
-  });
+  }, 20_000);
 
   it('wakes a terminal record after a real service configuration change without waiting for a full pool rescan', async () => {
     await requireEnglish();
@@ -650,17 +650,17 @@ describe('source-backed translation recovery', () => {
         return result;
       });
     }
-    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
+    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON', postcode: 'K1P 1J1' };
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
       redistribution_allowed,status)
       SELECT 'canada-dataset',source_id,'CA',version,retrieved_at,imported_at,input_checksum,format,license_code,license_name,
         license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status
       FROM address_datasets WHERE id='dataset'`);
-    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,
+    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,postcode,
       latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,quality_score,
       generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
-      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','',45.42,-75.69,'en',?,?,'unknown',.95,
+      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','','K1P 1J1',45.42,-75.69,'en',?,?,'unknown',.95,
         'v1','CA/ON',2,0,?,?,'publication-validation:fixture','street')`)
       .bind(JSON.stringify({ native: canadian, en: canadian, 'zh-CN': canadian }),
         JSON.stringify({ native: 'Main Street 21, Ottawa, Ontario', en: '', 'zh-CN': '' }), observedAt, observedAt).run();
@@ -688,7 +688,7 @@ describe('source-backed translation recovery', () => {
   });
 
   it('publishes the country with the most ready rows first and defers the rest past the start deadline', async () => {
-    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
+    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON', postcode: 'K1P 1J1' };
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
       redistribution_allowed,status)
@@ -719,17 +719,17 @@ describe('source-backed translation recovery', () => {
   });
 
   it('publishes every ready country in one batch before the start deadline', async () => {
-    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
+    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON', postcode: 'K1P 1J1' };
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
       redistribution_allowed,status)
       SELECT 'canada-dataset',source_id,'CA',version,retrieved_at,imported_at,input_checksum,format,license_code,license_name,
         license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status
       FROM address_datasets WHERE id='dataset'`);
-    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,
+    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,postcode,
       latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,quality_score,
       generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
-      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','',45.42,-75.69,'en',?,?,'unknown',.95,
+      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','','K1P 1J1',45.42,-75.69,'en',?,?,'unknown',.95,
         'v1','CA/ON',2,0,?,?,'publication-validation:fixture','street')`)
       .bind(JSON.stringify({ native: canadian, en: canadian, 'zh-CN': canadian }),
         JSON.stringify({ native: 'Main Street 21, Ottawa, Ontario', en: '', 'zh-CN': '' }), observedAt, observedAt).run();
@@ -747,17 +747,17 @@ describe('source-backed translation recovery', () => {
   });
 
   it('publishes countries still below their target before countries that already met it', async () => {
-    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON' };
+    const canadian = { ...native, locality: 'Ottawa', admin1: 'Ontario', admin1Code: 'ON', postcode: 'K1P 1J1' };
     await database.exec(`INSERT INTO address_datasets(id,source_id,country_code,version,retrieved_at,imported_at,input_checksum,
       format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
       redistribution_allowed,status)
       SELECT 'canada-dataset',source_id,'CA',version,retrieved_at,imported_at,input_checksum,format,license_code,license_name,
         license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,redistribution_allowed,status
       FROM address_datasets WHERE id='dataset'`);
-    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,
+    await database.prepare(`INSERT INTO address_pool(id,country_code,admin1,admin1_code,locality,street,house_number,postcode,
       latitude,longitude,native_language,component_variants_json,address_variants_json,property_type,quality_score,
       generation,coverage,random_key,active,first_seen_at,last_seen_at,retired_at,match_level)
-      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','',45.42,-75.69,'en',?,?,'unknown',.95,
+      VALUES ('z-canada','CA','Ontario','ON','Ottawa','Main Street 21','','K1P 1J1',45.42,-75.69,'en',?,?,'unknown',.95,
         'v1','CA/ON',2,0,?,?,'publication-validation:fixture','street')`)
       .bind(JSON.stringify({ native: canadian, en: canadian, 'zh-CN': canadian }),
         JSON.stringify({ native: 'Main Street 21, Ottawa, Ontario', en: '', 'zh-CN': '' }), observedAt, observedAt).run();

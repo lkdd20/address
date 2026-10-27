@@ -10,7 +10,7 @@
 | 街道级格式 | `<street>, <district>, <city>, <state>, NG`；`matchLevel=street`，门牌、楼栋、室号为空；可唯一确定的来源邮编保留，否则留空。 |
 | 街道去重 / 验证 | 国家 + 规范行政层级 + 街道名，同一路段不同坐标、邮编或来源 ID 不增加条数；行政字段不使用最近目录点推断。 |
 | 同步方式 / 频率 | Geofabrik 版本检查；Google 补全使用可恢复 checkpoint、额度冷却和自动耗尽判定 |
-| 既有门牌来源验证 / 排除 | 必须具备来源 ID、真实街道、district、城市、州及合法坐标；已有真实门牌保留，未知六位邮编留空，OSM 住宅建筑证据仅用于住宅子集 |
+| 既有门牌来源验证 / 排除 | 必须具备来源 ID、真实街道、district、城市、州及合法坐标；已有真实门牌保留，未知六位邮编须经推断唯一确定，否则不发布，OSM 住宅建筑证据仅用于住宅子集 |
 | 策略版本 / 状态 / 更新 | 1.16 / Geofabrik + Google 补全 + 街道契约 street-v1 + address-structure-v1 + administrative-names-v19 / 2026-10-20 |
 共用规则（翻译、发布、生成、同步框架和结构门禁）见 [README.md](README.md)；本文件只记录本国差异。
 
@@ -24,7 +24,7 @@
 - 调度：优先查询官方目录中零覆盖、未达最低数量和一级/二级数量不足的节点。目录中心点仅用于种子排序；最终行政归属仍由 Google 响应通过官方目录与坐标门禁后确定。
 - 真实字段：Google Geocoding v4 的门牌、道路、行政区、可唯一确认的邮编、WGS84 坐标和 Place ID；同响应补齐只接受国家及已有父级一致、候选值唯一的行政字段。无生成地址字段。
 - 同步：配置 Google Geocoding 凭据后按有界批次执行。checkpoint 按适配器版本、上游 PBF 版本和提取策略隔离；连续批次没有总量、覆盖或节点进展时标记来源已达上限，凭据或额度等待不会误判为耗尽。
-- 门禁：逐条检查同响应的 route/street_address/premise/subpremise，国家、行政层、本国语言和种子几何均须匹配；坐标位于住宅 polygon 内或距种子点不超过 15 米。street 没有门牌/住宅证据；真实门牌保留，未知或歧义邮编留空。
+- 门禁：逐条检查同响应的 route/street_address/premise/subpremise，国家、行政层、本国语言和种子几何均须匹配；坐标位于住宅 polygon 内或距种子点不超过 15 米。street 没有门牌/住宅证据；真实门牌保留，未知或歧义邮编须经推断唯一确定，否则不发布。
 - 去重：门牌保留来源稳定身份；街道按国家、规范行政层与道路名去重，恢复时从已有规范化输出重建去重集合。所有实际 HTTP dispatch 计入预算，失败与 Key 轮换不能绕过额度。
 - 适配器版本：`osm-address-street-google-geocoding-v9`；2026-09-08。
 
@@ -40,7 +40,7 @@
 - 适配器版本 `osm-address-street-google-geocoding-v10-city-level`（Mappls 为 `osm-source-address-street-mappls-reverse-v5-city-level`）。
 - Google 结果落在 OSM 种子建筑外或 15 米外时，不再以 `geometry_mismatch` 丢弃：作为 Google 自身坐标的真实地址发布，`property_type=unknown`，不借用 OSM 住宅证据；只有落在种子建筑内的结果才标记住宅。
 - 住宅结果只要求门牌、道路及城市级行政字段（州、城市）；区县和邮编来源有值时保留，缺失、冲突或格式无效时留空，不淘汰地址。
-- 通用规则：中国以外无法验证的邮编留空，本地数字（阿拉伯-印度、泰文）先转为 ASCII。
+- 通用规则：中国以外无法验证的邮编须经推断唯一确定，否则地址不发布（2026-10-26），本地数字（阿拉伯-印度、泰文）先转为 ASCII。
 
 - 单次上限（capacity-20261003）：google-residential-enrichment（1 个分片）：API 来源，上限保持 10000，不增加付费或额度消耗；geofabrik（1 个分片）：单次上限 200,000。
 

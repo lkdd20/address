@@ -178,7 +178,8 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
       reason = `missing_${missing}`;
       continue;
     }
-    const contract = validateAddressContract(countryCode, { ...parts, houseNumber: parts.number }, { strict: true });
+    // Candidates go through the import, whose postcode inference decides a missing postcode before publication.
+    const contract = validateAddressContract(countryCode, { ...parts, houseNumber: parts.number }, { strict: true, requirePostcode: false });
     if (!contract.valid) {
       reason = contract.reasons[0];
       continue;
@@ -244,7 +245,7 @@ export const evaluateGoogleAddressResults = (payload, seed, countryCode) => {
     }
     const components = { ...parts, houseNumber: streetLevel ? '' : parts.number,
       postcode: streetLevel || parts.ambiguousPostcode ? '' : parts.postcode };
-    const contract = validateAddressContract(countryCode, components, { strict: true, matchLevel });
+    const contract = validateAddressContract(countryCode, components, { strict: true, matchLevel, requirePostcode: false });
     if (!contract.valid) { reason = contract.reasons[0]; continue; }
     records.set(result.placeId, {
       id: `google:${result.placeId}`, source_record_id: `google:${result.placeId}`,

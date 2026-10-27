@@ -32,7 +32,8 @@ describe('address structure rules', () => {
     expect(splitConcatenatedLocality('VN', { locality: 'Phân khu Tinh Hoa, Global Gate' })).toEqual({ locality: '' });
     expect(trimStreetAdministration('NG', { street: 'Okpora Street, Umueze,', locality: 'Amawbia' }).street).toBe('Okpora Street, Umueze');
     expect(trimStreetAdministration('IN', { street: 'MG Road, Mysuru, Karnataka', locality: 'Mysuru', admin1: 'Karnataka' }).street).toBe('MG Road');
-    const quality = (street) => validateAddressQuality({ countryCode: 'BR', components: { street, houseNumber: '1', locality: 'Morrinhos', admin1: 'Goiás' } });
+    const quality = (street) => validateAddressQuality({ countryCode: 'BR',
+      components: { street, houseNumber: '1', locality: 'Morrinhos', admin1: 'Goiás', postcode: '75650-000' } });
     expect(quality('Avenida Roma, Quadra 47, Lote 17').valid).toBe(true);
     expect(quality('Rua A, Centro, Morrinhos Velho').reasons).toContain('concatenated_street');
   });

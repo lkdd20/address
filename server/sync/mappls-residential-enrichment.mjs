@@ -66,8 +66,8 @@ export const evaluateMapplsAddressResults = (payload, seed) => {
     };
     if (['admin1', 'locality', 'district'].some((field) => seed[field] && key(seed[field]) !== key(components[field]))) continue;
     const matchLevel = streetLevel ? 'street' : 'premise';
-    if (!validateAddressQuality({ countryCode: 'IN', components, matchLevel }).valid
-      || !validateAddressContract('IN', components, { strict: true, matchLevel }).valid) continue;
+    if (!validateAddressQuality({ countryCode: 'IN', components, matchLevel, requirePostcode: false }).valid
+      || !validateAddressContract('IN', components, { strict: true, matchLevel, requirePostcode: false }).valid) continue;
     const residential = !streetLevel ? evaluateMapplsResidentialResult({ ...payload, results: [result] }, seed).record : null;
     const identity = ['street', 'houseNumber', 'admin1', 'locality', 'district'].map((field) => key(components[field])).join(':');
     const record = residential ? { ...residential, match_level: matchLevel } : {

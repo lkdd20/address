@@ -59,7 +59,16 @@ const scanColumns = `id,admin1,admin1_code,locality,postal_locality,district,pos
   component_variants_json::jsonb->'zh-CN'->>'locality' AS zh_locality,
   component_variants_json::jsonb->'zh-CN'->>'postalLocality' AS zh_postal_locality`;
 // Retired rows are scanned too: translation recovery republishes publication-validation retirements unchanged.
-const scan = async (database, countryCode, pause) => {
+const scan = async (database, countryCode, pause, addressIds) => {
+  if (addressIds) {
+    const rows = [];
+    for (let offset = 0; offset < addressIds.length; offset += 1_000) {
+      const batch = addressIds.slice(offset, offset + 1_000);
+      rows.push(...(await database.prepare(`SELECT ${scanColumns} FROM address_pool WHERE country_code=? AND active=1
+        AND id IN (${batch.map(() => '?').join(',')})`).bind(countryCode, ...batch).all()).results);
+    }
+    return rows;
+  }
   const rows = (await database.prepare(`SELECT ${scanColumns} FROM address_pool WHERE country_code=? AND active=0
     AND retired_at LIKE 'publication-validation:%'`).bind(countryCode).all()).results;
   for (let cursor = ''; ;) {
@@ -87,9 +96,10 @@ export const administrativeNamesCandidate = (countryCode, names, row, boundary) 
   if (names.unrecognizedRegion?.(native, boundary, row)) return true;
   if (administrativeNameCountries(countryCode) && !clean(row.admin1)) return true;
   // Published rows the import gate would reject are never generated; they are repaired or retired.
+  // Missing postcodes are retired by the postcode requirement step under their own reason.
   if (validateAddressQuality({ countryCode, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level || 'premise',
     components: { ...native, houseNumber: row.house_number, street: row.street, buildingName: row.building_name, district: row.district,
-      postcode: row.postcode } }).reasons.length) return true;
+      postcode: row.postcode }, requirePostcode: false }).reasons.length) return true;
   const stored = current(row);
   const corrections = names.names(native, stored);
   if (Object.keys(corrections.native).length) return true;
@@ -100,16 +110,20 @@ export const administrativeNamesCandidate = (countryCode, names, row, boundary) 
 // One pass per country and revision over published and retired rows: regions and cities take their catalog names, the
 // admin1 text corrects its code, and a city field that names no city is refilled from the catalog or the row is retired.
 export const repairAdministrativeNames = async ({
-  database, countryCode, cacheDir, pythonBin, regionLookup = regionsForPoints, now = () => new Date(), pageSize = 500, pauseMs = 200
+  database, countryCode, cacheDir, pythonBin, regionLookup = regionsForPoints, now = () => new Date(), pageSize = 500, pauseMs = 200,
+  addressIds
 }) => {
   const revision = administrativeNamesRevision(countryCode);
   const key = `${revision}:${countryCode}`;
   const summary = { countryCode, changed: 0, codes: 0, localities: 0, postcodes: 0, retired: 0, duplicates: 0, restored: 0 };
-  if (countryCode === 'CN' || await database.prepare('SELECT value_json FROM translation_backfill_progress WHERE key=?')
+  // With address ids only those published rows are judged, outside the once-per-revision country pass: a postcode filled
+  // after import can prove the region wrong.
+  const scoped = Array.isArray(addressIds);
+  if (countryCode === 'CN' || scoped && !addressIds.length || !scoped && await database.prepare('SELECT value_json FROM translation_backfill_progress WHERE key=?')
     .bind(key).first('value_json')) return summary;
   // v1 retired rows for any quality reason and v4 for findings its own corrections caused (a Paris department equal
   // to the city); they are restored and judged again.
-  const restored = (await database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL WHERE country_code=? AND active=0
+  const restored = scoped ? [] : (await database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL WHERE country_code=? AND active=0
     AND (retired_at LIKE 'publication-validation:administrative-names-v1:%' OR retired_at LIKE 'publication-validation:administrative-names-v4:%')
     RETURNING id`).bind(countryCode).all()).results.map((row) => row.id);
   summary.restored = restored.length;
@@ -120,7 +134,7 @@ export const repairAdministrativeNames = async ({
       'SELECT name,native_name,zh_name FROM catalog_regions WHERE country_code=?').bind(countryCode).all()).results || []) : undefined };
   const geocoder = await CatalogReverseGeocoder.load(database, countryCode);
   const pause = () => delay(pauseMs);
-  const scanned = await scan(database, countryCode, pause);
+  const scanned = await scan(database, countryCode, pause, scoped ? [...new Set(addressIds.map(String))] : undefined);
   // Without the polygons the revision fails and is retried at the next start.
   // Points outside every region polygon are outside the country; mixed-level countries also check their regions.
   const boundaries = regionBoundaryCountries.has(countryCode) && scanned.length
@@ -171,7 +185,8 @@ export const repairAdministrativeNames = async ({
         Object.assign(next, names.names(next).native);
         const active = Number(row.active) === 1;
         touched.push(row.id);
-        const gate = () => validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude, matchLevel: row.match_level });
+        const gate = () => validateAddressQuality({ countryCode, components: next, latitude: row.latitude, longitude: row.longitude,
+          matchLevel: row.match_level, requirePostcode: false });
         // A district repeating the city (Huonville, Huonville) adds nothing and fails the import gate; it is dropped.
         if (gate().reasons.includes('duplicate_locality_district')) {
           if (clean(next.district)) delete next.district; else delete next.dependentLocality;
@@ -233,6 +248,7 @@ export const repairAdministrativeNames = async ({
     await pause();
   }
   if (summary.codes || summary.localities || summary.retired || summary.restored || summary.duplicates) staleCoverage.add(countryCode);
+  if (scoped) return summary;
   await database.prepare(`INSERT INTO translation_backfill_progress(key,value_json,updated_at) VALUES (?,?,?)
     ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
     .bind(key, JSON.stringify({ done: true, ...summary }), now().toISOString()).run();
