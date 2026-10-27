@@ -75,6 +75,7 @@ const communityDistanceKm = (left: { latitude: number; longitude: number }, righ
   return 6371 * 2 * Math.atan2(Math.sqrt(Math.min(1, Math.max(0, value))), Math.sqrt(Math.max(0, 1 - value)));
 };
 const MAX_COMMUNITY_DISTANCE_KM = 25;
+const COMMUNITY_VARIETY_TARGET = 16;
 const providerHome: Record<string, string> = {
   amap: 'https://www.amap.com/', baidu: 'https://map.baidu.com/', tencent: 'https://map.qq.com/'
 };
@@ -197,15 +198,29 @@ export const pickChinaCommunityAddress = async (
   }
   if (filters.postcode) { clauses.push('community.postcode=?'); bindings.push(filters.postcode.replace(/\s/gu, '')); }
   if (filters.q) { clauses.push('(community.canonical_name LIKE ? OR community.provider_address LIKE ?)'); bindings.push(`%${filters.q}%`, `%${filters.q}%`); }
+  const allowed = (row: CommunityCandidateRow): boolean => !matchesCustomBlacklist([
+    row.canonical_name, row.provider_address, row.province, row.city, row.district
+  ]);
+  let rows: CommunityCandidateRow[] = [];
   if (coordinates) {
-    clauses.push('community.latitude BETWEEN ? AND ?', 'community.longitude BETWEEN ? AND ?');
-    bindings.push(coordinates.latitude - 1, coordinates.latitude + 1, coordinates.longitude - 1, coordinates.longitude + 1);
-  }
-  let rows: CommunityCandidateRow[];
-  if (coordinates) {
-    rows = (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
-      WHERE ${clauses.join(' AND ')} ORDER BY community.source_count DESC,community.id LIMIT 500`)
-      .bind(...bindings).all<CommunityCandidateRow>()).results;
+    // The box widens until it holds enough communities for repeated picks to vary and is read nearest first; a fixed ±1°
+    // box read every community of a metropolitan area to keep 500 by source count, which took seconds on a cold cache.
+    const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
+    for (const radiusKm of [0.5, 2, 8, MAX_COMMUNITY_DISTANCE_KM]) {
+      const latitudeRadius = radiusKm / 111.32;
+      const longitudeRadius = latitudeRadius / longitudeScale;
+      const found = (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
+        WHERE ${clauses.join(' AND ')} AND community.latitude BETWEEN ? AND ? AND community.longitude BETWEEN ? AND ?
+        ORDER BY ((community.latitude - ?) * (community.latitude - ?))
+          + ((community.longitude - ?) * (community.longitude - ?) * ? * ?),community.id LIMIT 50`)
+        .bind(...bindings, coordinates.latitude - latitudeRadius, coordinates.latitude + latitudeRadius,
+          coordinates.longitude - longitudeRadius, coordinates.longitude + longitudeRadius,
+          coordinates.latitude, coordinates.latitude, coordinates.longitude, coordinates.longitude, longitudeScale, longitudeScale)
+        .all<CommunityCandidateRow>()).results || [];
+      const usable = found.filter((row) => allowed(row) && communityDistanceKm(coordinates, row) <= radiusKm);
+      if (usable.length) rows = usable;
+      if (usable.length >= COMMUNITY_VARIETY_TARGET) break;
+    }
   } else {
     const pivot = seedKey(`${seed}:china-community`);
     const randomKey = communityRandomKey('published');
@@ -232,9 +247,7 @@ export const pickChinaCommunityAddress = async (
     }
   }
   if (!rows.length) return undefined;
-  const allowedRows = rows.filter((row) => !matchesCustomBlacklist([
-    row.canonical_name, row.provider_address, row.province, row.city, row.district
-  ]));
+  const allowedRows = rows.filter(allowed);
   const coordinateRows = coordinates
     ? allowedRows.map((row) => ({ row, distanceKm: communityDistanceKm(coordinates, row) }))
       .filter((candidate) => candidate.distanceKm <= MAX_COMMUNITY_DISTANCE_KM)
@@ -242,7 +255,8 @@ export const pickChinaCommunityAddress = async (
       .map(({ row }) => row)
     : allowedRows;
   if (!coordinateRows.length) return undefined;
-  const selected = coordinates ? coordinateRows[0] : coordinateRows[seedIndex(`${seed}:candidate`, coordinateRows.length)];
+  // Repeated picks for one IP vary among the nearby communities instead of always returning the nearest.
+  const selected = coordinateRows[seedIndex(`${seed}:candidate`, coordinateRows.length)];
   const providers = await loadCommunityProviders(database, selected.id);
   return providers ? rowToAddress({ ...selected, providers }) : undefined;
 };

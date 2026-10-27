@@ -882,21 +882,27 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       const bootPayload = adoptBoot ? await boot!.payload : null;
       if (bootPayload?.data) payload = bootPayload;
       else {
-        const params = paramsFor(spec, context.requestId, strategy);
-        let response: Response;
-        // A busy server answers 429 within milliseconds; a short bounded retry hides that from the user.
-        for (let attempt = 0; ; attempt += 1) {
-          response = await fetchWithTimeout(
-            `${endpoint}/v1/generate?${params}`,
-            { signal: controller.signal },
-            spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
-          );
-          if (response.status !== 429 || attempt >= GENERATION_BUSY_RETRIES) break;
-          await abortableDelay(400 * 2 ** attempt, controller.signal);
+        // An IP offers only its nearby addresses; a pick shown in the last few draws is drawn again, at most twice.
+        const recentIp = spec.ipRegion ? new Set((recentAddressIds.current.get(`ip:${spec.ip}`) || []).slice(-5)) : undefined;
+        for (let draw = 0; ; draw += 1) {
+          const params = paramsFor(spec, context.requestId, strategy);
+          let response: Response;
+          // A busy server answers 429 within milliseconds; a short bounded retry hides that from the user.
+          for (let attempt = 0; ; attempt += 1) {
+            response = await fetchWithTimeout(
+              `${endpoint}/v1/generate?${params}`,
+              { signal: controller.signal },
+              spec.ipRegion ? IP_GENERATION_REQUEST_TIMEOUT_MS : GENERATION_REQUEST_TIMEOUT_MS
+            );
+            if (response.status !== 429 || attempt >= GENERATION_BUSY_RETRIES) break;
+            await abortableDelay(400 * 2 ** attempt, controller.signal);
+          }
+          if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
+          payload = await response.json() as { data?: GenerateResponseData; error?: { code?: string } | string };
+          ok = response.ok;
+          const drawnId = payload.data?.result?.address.id;
+          if (!recentIp || !ok || draw >= 2 || !drawnId || !recentIp.has(drawnId)) break;
         }
-        if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
-        payload = await response.json() as { data?: GenerateResponseData; error?: { code?: string } | string };
-        ok = response.ok;
       }
       const current = activeRequest.current;
       if (!current || current.requestId !== context.requestId || current.country !== context.country || current.mode !== context.mode) return;
@@ -923,7 +929,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         if (payload.data.eligibleCount) eligibleCounts.current.set(queueKey, payload.data.eligibleCount);
         void fillPrefetchQueue(spec, queueKey);
       }
-      if (!overrides.ipRegion) rememberAddress(queueKey, payload.data.result.address.id);
+      rememberAddress(overrides.ipRegion ? `ip:${spec.ip}` : queueKey, payload.data.result.address.id);
       setResult(payload.data.result);
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;

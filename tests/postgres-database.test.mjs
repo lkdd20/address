@@ -17,7 +17,7 @@ describe('PostgreSQL database adapter', () => {
   });
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 36, control_version: 28 }], fields: [], rowCount: 1
+      rows: [{ address_version: 37, control_version: 28 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -47,6 +47,16 @@ describe('PostgreSQL database adapter', () => {
     expect(statements).toContain('ALTER INDEX address.idx_generation_postcode_random_next RENAME TO idx_generation_postcode_random');
     expect(statements.filter((sql) => sql.startsWith('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_'))).toHaveLength(10);
     expect(statements.some((sql) => sql.includes('VALUES (36,CURRENT_TIMESTAMP::text)'))).toBe(true);
+  });
+
+  it('makes the coordinate index cover IP-region picks when upgrading address version 36', async () => {
+    const query = vi.fn(async () => ({ rows: [{ address_version: 36, control_version: 28 }], fields: [], rowCount: 1 }));
+    await initializePostgres({ connect: async () => ({ query, release: vi.fn() }) });
+    const statements = query.mock.calls.map(([sql]) => String(sql));
+    expect(statements).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_address_pool_coordinates_next ON address.address_pool (country_code,latitude,longitude) INCLUDE (id,random_key,property_type) WHERE active=1');
+    expect(statements).toContain('ALTER INDEX address.idx_address_pool_coordinates_next RENAME TO idx_address_pool_coordinates');
+    expect(statements.filter((sql) => sql.startsWith('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_generation_'))).toHaveLength(0);
+    expect(statements.some((sql) => sql.includes('VALUES (37,CURRENT_TIMESTAMP::text)'))).toBe(true);
   });
 
   it('allows the Index-Translate route when upgrading control version 27', async () => {
@@ -270,7 +280,7 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 36)");
+    expect(addressSchema).toContain("generate_series(1, 37)");
     expect(addressSchema).toContain('idx_address_pool_active_country_id ON address_pool(country_code, id) WHERE active=1');
     expect(addressSchema).toContain("match_level TEXT NOT NULL DEFAULT 'premise'");
     expect(addressSchema).toContain('DROP CONSTRAINT IF EXISTS address_pool_house_number_check');

@@ -13,7 +13,7 @@ import { translationRoutesSchema } from '../translation/routing.mjs';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 36;
+const ADDRESS_SCHEMA_VERSION = 37;
 const CONTROL_SCHEMA_VERSION = 28;
 
 const integer = (value, fallback, minimum, maximum) => {
@@ -237,6 +237,31 @@ const replaceGenerationIndex = async (client, name, definition) => {
   }
 };
 
+// IP-region picks scan a coordinate box; with the id, random key and property type in the index the box is read without
+// visiting the table, which on a cold cache cost one random read per row (seconds in a dense city).
+const coordinatesIndexDefinition = '(country_code,latitude,longitude) INCLUDE (id,random_key,property_type) WHERE active=1';
+const coordinatesIndexSql = `CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates ON address.address_pool ${coordinatesIndexDefinition}`;
+const replaceCoordinatesIndex = async (client) => {
+  const name = 'idx_address_pool_coordinates';
+  const { rows: [current] } = await client.query(`SELECT pg_get_indexdef(relation.oid) AS definition,index_state.indisvalid AS valid
+    FROM pg_class relation JOIN pg_index index_state ON index_state.indexrelid=relation.oid
+    JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='address' AND relation.relname=$1`, [name]);
+  if (current?.valid && String(current.definition || '').includes('INCLUDE (id, random_key, property_type)')) return;
+  const next = `${name}_next`;
+  await ensureConcurrentIndex(client, next, `CREATE INDEX IF NOT EXISTS ${next} ON address.address_pool ${coordinatesIndexDefinition}`);
+  const settings = (await client.query("SELECT current_setting('statement_timeout') AS statement_timeout,current_setting('lock_timeout') AS lock_timeout")).rows[0];
+  try {
+    await client.query("SET statement_timeout TO '60min'");
+    await client.query("SET lock_timeout TO '0'");
+    if (current) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS address.${name}`);
+    await client.query(`ALTER INDEX address.${next} RENAME TO ${name}`);
+  } finally {
+    await client.query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$2,false)",
+      [settings?.statement_timeout, settings?.lock_timeout]);
+  }
+};
+
 const upgradePostcodeInferenceSchema = async (client) => {
   await client.query('BEGIN');
   try {
@@ -379,7 +404,7 @@ export const initializePostgres = async (pool, {
       `);
       if (Number(versions.address_version) >= ADDRESS_SCHEMA_VERSION
         && Number(versions.control_version) >= CONTROL_SCHEMA_VERSION) return;
-      if ([23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36].includes(Number(versions.address_version))
+      if ([23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37].includes(Number(versions.address_version))
         && Number(versions.control_version) >= 19) {
         if (Number(versions.address_version) === 23) await upgradeStreetSchema(client, addressSource);
         if (Number(versions.address_version) < 25) await ensureActiveCountryCursorIndex(client);
@@ -414,6 +439,10 @@ export const initializePostgres = async (pool, {
         if (Number(versions.address_version) < 36) {
           for (const [name, definition] of generationSelectionIndexes) await replaceGenerationIndex(client, name, definition);
           await client.query('INSERT INTO address.schema_migrations(version,applied_at) VALUES (36,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING');
+        }
+        if (Number(versions.address_version) < 37) {
+          await replaceCoordinatesIndex(client);
+          await client.query('INSERT INTO address.schema_migrations(version,applied_at) VALUES (37,CURRENT_TIMESTAMP::text) ON CONFLICT(version) DO NOTHING');
         }
         await lockedTransaction(client, async () => {
           await client.query('SET LOCAL search_path TO address, public');
@@ -577,6 +606,8 @@ export const initializePostgres = async (pool, {
     await client.query(translationStreetIndexSql);
     await client.query(translationRecoveryStatusIndexSql);
     await client.query(generationLocationIndexSql);
+    await client.query('DROP INDEX IF EXISTS address.idx_address_pool_coordinates');
+    await client.query(coordinatesIndexSql);
     await client.query('SET LOCAL search_path TO control, public');
     await client.query(controlSource);
     await client.query(deeplBudgetSchema);

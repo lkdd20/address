@@ -315,12 +315,34 @@ describe('China community storage integration', () => {
     expect(bind.mock.calls[1]).not.toContain('福建');
   });
 
+  it('varies repeated IP picks among the nearby communities', async () => {
+    const communities = Array.from({ length: 20 }, (_, index) => ({
+      id: `near-${index}`, canonical_name: `小区${index}`, provider_address: `文化路${index}号`, province: '江苏省', city: '南京市',
+      district: '玄武区', township: '', postcode: '210000', latitude: 32.06 + index / 100000, longitude: 118.79,
+      source_count: 1, verification_level: 'single-source', last_seen_at: '2026-10-01T00:00:00Z'
+    }));
+    const prepare = vi.fn((sql: string) => ({
+      bind: () => ({ all: async () => ({ results: sql.includes('SELECT DISTINCT provider') ? [{ provider: 'amap' }] : communities }) })
+    }));
+    const picks = new Set<string | undefined>();
+    for (let index = 0; index < 20; index += 1) {
+      picks.add((await pickChinaCommunityAddress({ prepare } as never, {}, `seed-${index}`, { latitude: 32.06, longitude: 118.79 }))?.id);
+    }
+    expect(picks.size).toBeGreaterThan(8);
+    expect([...picks].every((id) => id?.startsWith('cn-community-near-'))).toBe(true);
+  });
+
   it('keeps coordinate matching separate from alias random windows', async () => {
     const bind = vi.fn((..._values: unknown[]) => ({ all: async () => ({ results: [] }) }));
     const prepare = vi.fn((_sql: string) => ({ bind }));
     await pickChinaCommunityAddress({ prepare } as never, { city: '厦门' }, 'nearby', { latitude: 24.48, longitude: 118.09 });
     expect(prepare.mock.calls[0][0]).toContain('community.city IN (');
-    expect(prepare.mock.calls[0][0]).toContain('source_count DESC,community.id LIMIT 500');
+    expect(prepare.mock.calls[0][0]).toContain('community.latitude BETWEEN ? AND ?');
+    expect(prepare.mock.calls[0][0]).toContain('community.id LIMIT 50');
+    // An empty area widens through every radius up to the 25 km limit.
+    expect(prepare).toHaveBeenCalledTimes(4);
+    expect(bind.mock.calls.map((values) => Math.round((Number(values.at(-9)) - Number(values.at(-10))) * 111.32 * 5) / 10))
+      .toEqual([0.5, 2, 8, 25]);
     expect(prepare.mock.calls[0][0]).not.toContain('UNION ALL');
   });
 

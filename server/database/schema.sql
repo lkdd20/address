@@ -698,5 +698,5 @@ CREATE TABLE IF NOT EXISTS address_postcode_inference (
 );
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 36) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 37) AS version
 ON CONFLICT (version) DO NOTHING;
